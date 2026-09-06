@@ -106,8 +106,11 @@ void BLENinebot::setup() {
     pBLEScan->setWindow(SCAN_WINDOW);
 
     pClient = NimBLEDevice::createClient();
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
     pClient->setClientCallbacks(new ScooterClientCallbacks(), false);
-    pClient->setConnectTimeout(3 * 1000);
+    pClient->setConnectTimeout(8 * 1000);
 
     delay(CMD_DELAY);
     loop();
@@ -148,7 +151,7 @@ void BLENinebot::loop() {
                      redrawMainBorder();
                      displayTextLine("Connecting...");
                      scooterDisconnected = false;
-                     if (!pClient->connect(adv->getAddress()))
+                     if (!pClient->connect(adv->getAddress(), false))
                      {
                          displayTextLine("Connection failed.");
                          delay(UI_READ_DELAY);

