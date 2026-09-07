@@ -55,11 +55,7 @@ uint32_t getBatteryVoltage() {
     return (uint32_t)bq.getVoltage();
 #elif defined(ANALOG_BAT_PIN)
 #ifndef ANALOG_BAT_MULTIPLIER
-#if defined(ARDUINO_M5STACK_CARDPUTER) || defined(CARDPUTER)
-#define ANALOG_BAT_MULTIPLIER 2.285f
-#else
 #define ANALOG_BAT_MULTIPLIER 2.0f
-#endif
 #endif
     return (uint32_t)((float)getBatteryAdcMilliVolts() * ANALOG_BAT_MULTIPLIER);
 #else
@@ -84,15 +80,21 @@ int getBattery() {
     float v = (float)getBatteryVoltage(); // in mV
 
     // LiPo 1S discharge curve under typical load (~120-180mA)
+    // Nominal cutoff is ~3.3V due to 3.3V LDO dropout voltage.
+    // 3.65V-3.80V is the flat plateau representing ~40-75% capacity under load.
     int percent;
     if (v >= 4150.0f) percent = 100;
-    else if (v >= 4000.0f) percent = 90 + (int)((v - 4000.0f) * 10.0f / 150.0f);
-    else if (v >= 3850.0f) percent = 75 + (int)((v - 3850.0f) * 15.0f / 150.0f);
-    else if (v >= 3700.0f) percent = 50 + (int)((v - 3700.0f) * 25.0f / 150.0f);
-    else if (v >= 3600.0f) percent = 30 + (int)((v - 3600.0f) * 20.0f / 100.0f);
-    else if (v >= 3500.0f) percent = 15 + (int)((v - 3500.0f) * 15.0f / 100.0f);
-    else if (v >= 3350.0f) percent = 5 + (int)((v - 3350.0f) * 10.0f / 150.0f);
-    else if (v >= 3200.0f) percent = 1 + (int)((v - 3200.0f) * 4.0f / 150.0f);
+    else if (v >= 3980.0f) percent = 90 + (int)((v - 3980.0f) * 10.0f / 170.0f);
+    else if (v >= 3880.0f) percent = 80 + (int)((v - 3880.0f) * 10.0f / 100.0f);
+    else if (v >= 3800.0f) percent = 70 + (int)((v - 3800.0f) * 10.0f / 80.0f);
+    else if (v >= 3750.0f) percent = 60 + (int)((v - 3750.0f) * 10.0f / 50.0f);
+    else if (v >= 3700.0f) percent = 50 + (int)((v - 3700.0f) * 10.0f / 50.0f);
+    else if (v >= 3650.0f) percent = 40 + (int)((v - 3650.0f) * 10.0f / 50.0f);
+    else if (v >= 3600.0f) percent = 30 + (int)((v - 3600.0f) * 10.0f / 50.0f);
+    else if (v >= 3550.0f) percent = 20 + (int)((v - 3550.0f) * 10.0f / 50.0f);
+    else if (v >= 3480.0f) percent = 10 + (int)((v - 3480.0f) * 10.0f / 70.0f);
+    else if (v >= 3380.0f) percent = 5 + (int)((v - 3380.0f) * 5.0f / 100.0f);
+    else if (v >= 3300.0f) percent = 1 + (int)((v - 3300.0f) * 4.0f / 80.0f);
     else percent = 1;
 
     if (percent < 1) percent = 1;
