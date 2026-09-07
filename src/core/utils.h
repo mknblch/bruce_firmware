@@ -5,6 +5,8 @@
 void backToMenu();
 void addOptionToMainMenu();
 int getBattery() __attribute__((weak));
+uint32_t getBatteryVoltage() __attribute__((weak));
+uint32_t getBatteryAdcMilliVolts() __attribute__((weak));
 void updateClockTimezone();
 #if !defined(HAS_RTC)
 void restorePersistedClock();

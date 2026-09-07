@@ -3,6 +3,7 @@
 #include "gatt_explorer.h"
 #include "gatt_server.h"
 #include "BLE_Suite.h"
+#include "ble_oui.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
 #include "core/sd_functions.h"
@@ -40,6 +41,7 @@ struct GattScannedDevice {
     NimBLEAddress address;
     uint8_t addressType = BLE_ADDR_PUBLIC;
     String name;
+    String vendor;
     int rssi = -100;
     bool isConnectable = true;
     std::vector<String> serviceUuids;
@@ -419,6 +421,8 @@ class GattScanCallbacks : public NimBLEScanCallbacks {
             if (u.indexOf("fe2c") != -1) { tag = "FP"; break; }
         }
 
+        String vendor = resolveBleVendor(dev, false);
+
         gattEnsureScanMutex();
         if (!g_gattScanMutex || xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(15)) != pdTRUE) {
             return;
@@ -427,6 +431,7 @@ class GattScanCallbacks : public NimBLEScanCallbacks {
         g_latestScannedDevice.address = dev->getAddress();
         g_latestScannedDevice.addressType = addrType;
         g_latestScannedDevice.name = (name.length() > 0) ? name : mac;
+        g_latestScannedDevice.vendor = vendor;
         g_latestScannedDevice.rssi = rssi;
         g_latestScannedDevice.isConnectable = isConn;
         g_latestScannedDevice.tag = tag;
@@ -437,6 +442,7 @@ class GattScanCallbacks : public NimBLEScanCallbacks {
             if (String(existing.address.toString().c_str()).equalsIgnoreCase(mac)) {
                 existing.rssi = rssi;
                 if (name.length() > 0) existing.name = name;
+                if (vendor.length() > 0 && existing.vendor.length() == 0) existing.vendor = vendor;
                 if (isConn) existing.isConnectable = true;
                 if (!serviceUuids.empty()) {
                     for (size_t si = 0; si < serviceUuids.size(); si++) {
@@ -498,6 +504,7 @@ class GattScanCallbacks : public NimBLEScanCallbacks {
         newDev.address = dev->getAddress();
         newDev.addressType = addrType;
         newDev.name = (name.length() > 0) ? name : mac;
+        newDev.vendor = vendor;
         newDev.rssi = rssi;
         newDev.isConnectable = isConn;
         newDev.serviceUuids = serviceUuids;
@@ -547,7 +554,20 @@ static BleConnDiagInfo g_lastConnDiag;
 
 class GattExplorerClientCallbacks : public NimBLEClientCallbacks {
 public:
+    volatile bool connectDone = false;
+    volatile bool connectSuccess = false;
+    volatile int connectErrorCode = 0;
+
+    void reset() {
+        connectDone = false;
+        connectSuccess = false;
+        connectErrorCode = 0;
+    }
+
     void onConnect(NimBLEClient *pClient) override {
+        connectDone = true;
+        connectSuccess = true;
+        connectErrorCode = 0;
         NimBLEConnInfo info = pClient->getConnInfo();
         Serial.println(F("\n[BLE-DBG] >>> Connection ESTABLISHED! <<<"));
         Serial.printf("[BLE-DBG] Handle: %d, Peer: %s, MTU: %d\n",
@@ -561,6 +581,9 @@ public:
     }
 
     void onConnectFail(NimBLEClient *pClient, int reason) override {
+        connectDone = true;
+        connectSuccess = false;
+        connectErrorCode = reason;
         g_lastBleError = reason;
         g_lastConnDiag.lastErrorCode = reason;
         String desc = getBleErrorDescription(reason);
@@ -764,7 +787,19 @@ static void showDiscoveredDevicesList() {
                 int textW = w - 16;
 
                 String typeTag = (d.addressType == BLE_ADDR_PUBLIC) ? "P" : "R";
-                String label = "[" + d.tag + ":" + typeTag + "] " + d.name + " " + String(d.rssi) + "dBm";
+                String macStr = String(d.address.toString().c_str());
+                String label;
+                if (d.name.length() > 0 && !d.name.equalsIgnoreCase(macStr)) {
+                    if (d.vendor.length() > 0 && !d.name.equalsIgnoreCase(d.vendor)) {
+                        label = "[" + d.tag + ":" + typeTag + "] " + d.name + " (" + d.vendor + ") " + String(d.rssi) + "dBm";
+                    } else {
+                        label = "[" + d.tag + ":" + typeTag + "] " + d.name + " " + String(d.rssi) + "dBm";
+                    }
+                } else if (d.vendor.length() > 0) {
+                    label = "[" + d.tag + ":" + typeTag + "] " + d.vendor + " (" + macStr.substring(9) + ") " + String(d.rssi) + "dBm";
+                } else {
+                    label = "[" + d.tag + ":" + typeTag + "] " + d.name + " " + String(d.rssi) + "dBm";
+                }
                 tft.drawString(gattFitText(label, textW), textX, y, 1);
             } else if (idx == devCount) {
                 tft.drawString("> Rescan Devices", x, y, 1);
@@ -793,8 +828,9 @@ static void showDiscoveredDevicesList() {
 // Robust Multi-Strategy GATT Connection
 //=============================================================================
 
-static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError) {
+static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError, bool *outUserCancelled = nullptr) {
     if (outError) *outError = 0;
+    if (outUserCancelled) *outUserCancelled = false;
     g_lastBleDisconnectReason = 0;
     g_lastBleError = 0;
 
@@ -853,10 +889,13 @@ static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient 
     Serial.println(F("=================================================="));
 
     int lastErr = 0;
+    const char *spinnerChars = "|/-\\";
+    int spinnerIdx = 0;
 
     for (size_t i = 0; i < totalStrats; i++) {
-        if (check(EscPress)) {
-            Serial.println(F("[BLE-DBG] Aborted by user keypress."));
+        if (check(EscPress) || check(PrevPress)) {
+            Serial.println(F("[BLE-DBG] Aborted by user keypress before strategy."));
+            if (outUserCancelled) *outUserCancelled = true;
             if (outError) *outError = lastErr;
             return false;
         }
@@ -886,10 +925,13 @@ static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient 
         NimBLEClient::Config cfg = pClient->getConfig();
         cfg.exchangeMTU = 0; // Decouple immediate ATT MTU exchange
         cfg.connectFailRetries = 1;
+        cfg.asyncConnect = 1;
         pClient->setConfig(cfg);
 
+        g_gattClientCallbacks.reset();
         pClient->setClientCallbacks(&g_gattClientCallbacks, false);
-        pClient->setConnectTimeout((g_gattSettings.timeoutSec > 0 ? g_gattSettings.timeoutSec : 5) * 1000);
+        uint32_t perStratTimeoutMs = (g_gattSettings.timeoutSec > 0 ? g_gattSettings.timeoutSec : 5) * 1000;
+        pClient->setConnectTimeout(perStratTimeoutMs);
 
         if (strat.useCustomParams) {
             pClient->setConnectionParams(strat.itvlMin, strat.itvlMax, strat.latency, strat.timeout, strat.scanItvl, strat.scanWin);
@@ -907,11 +949,90 @@ static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient 
             Serial.printf("[BLE-DBG]   Params: Stack Native Defaults\n");
         }
 
-        // Explicitly pass exchangeMTU = false so it doesn't trigger immediate ATT MTU request on connection
-        if (pClient->connect(*strat.targetAddr, true, false, false)) {
+        // Initiate connection attempt asynchronously
+        if (!pClient->connect(*strat.targetAddr, /*deleteAttributes=*/true, /*asyncConnect=*/true, /*exchangeMTU=*/false)) {
+            int err = pClient->getLastError();
+            if (err != 0) lastErr = err;
+            g_lastConnDiag.lastErrorCode = lastErr;
+            NimBLEDevice::deleteClient(pClient);
+            pClient = nullptr;
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        // Active non-blocking polling loop with live user abort check and screen updates
+        uint32_t startMs = millis();
+        uint32_t lastUiTick = 0;
+        bool strategySuccess = false;
+        bool strategyFailed = false;
+
+        while (millis() - startMs < perStratTimeoutMs) {
+            // Check for user cancellation (ESC / Prev)
+            if (check(EscPress) || check(PrevPress)) {
+                Serial.println(F("[BLE-DBG] Aborted by user keypress during connection attempt."));
+                pClient->cancelConnect();
+                vTaskDelay(50 / portTICK_PERIOD_MS);
+                NimBLEDevice::deleteClient(pClient);
+                if (outUserCancelled) *outUserCancelled = true;
+                if (outError) *outError = -1;
+                return false;
+            }
+
+            // Check if connection succeeded
+            if (g_gattClientCallbacks.connectDone) {
+                if (g_gattClientCallbacks.connectSuccess || pClient->isConnected()) {
+                    strategySuccess = true;
+                    break;
+                } else {
+                    strategyFailed = true;
+                    lastErr = g_gattClientCallbacks.connectErrorCode;
+                    break;
+                }
+            }
+
+            if (pClient->isConnected()) {
+                strategySuccess = true;
+                break;
+            }
+
+            // Periodic UI updates (spinner + timer + cancel reminder)
+            uint32_t now = millis();
+            if (now - lastUiTick >= 100) {
+                lastUiTick = now;
+                spinnerIdx = (spinnerIdx + 1) % 4;
+                uint32_t elapsed = now - startMs;
+                int remainSec = (elapsed < perStratTimeoutMs) ? (int)((perStratTimeoutMs - elapsed + 999) / 1000) : 0;
+
+                tft.setTextSize(FP);
+                tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+
+                // Strategy line & countdown
+                String stratStatus = "[" + String(spinnerChars[spinnerIdx]) + "] Strat " +
+                                     String((int)i + 1) + "/" + String((int)totalStrats) +
+                                     " (" + String(remainSec) + "s left)";
+                tft.fillRect(BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 26, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
+                tft.drawString(gattFitText(stratStatus, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 26);
+
+                // Cancel prompt line
+                tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
+                tft.fillRect(BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 13, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
+                tft.drawString("Press ESC to Cancel", BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 13);
+            }
+
+            vTaskDelay(20 / portTICK_PERIOD_MS);
+        }
+
+        if (strategySuccess) {
             Serial.printf("[BLE-DBG] >>> SUCCESS with Strat %d: %s <<<\n\n", (int)i + 1, strat.name);
             *outClient = pClient;
             return true;
+        }
+
+        // Connection failed or timed out on this strategy
+        if (!strategyFailed) {
+            Serial.printf("[BLE-DBG] [Strat %d/%d] Timeout (%ums)\n", (int)i + 1, (int)totalStrats, (unsigned int)perStratTimeoutMs);
+            lastErr = BLE_HS_ETIMEOUT;
+            pClient->cancelConnect();
         }
 
         int err = pClient->getLastError();
@@ -923,8 +1044,17 @@ static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient 
         NimBLEDevice::deleteClient(pClient);
         pClient = nullptr;
 
-        // Delay briefly between strategies before the next attempt
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        // Delay briefly between strategies before next attempt, still checking for ESC
+        uint32_t pauseStart = millis();
+        while (millis() - pauseStart < 100) {
+            if (check(EscPress) || check(PrevPress)) {
+                Serial.println(F("[BLE-DBG] Aborted by user keypress during pause."));
+                if (outUserCancelled) *outUserCancelled = true;
+                if (outError) *outError = lastErr;
+                return false;
+            }
+            vTaskDelay(20 / portTICK_PERIOD_MS);
+        }
     }
 
     if (outError) *outError = lastErr;
@@ -986,6 +1116,10 @@ static void showBleConnectDiagnostics(const BleConnDiagInfo &diag, const GattSca
 //=============================================================================
 
 static void exploreGattDevice(GattScannedDevice &device) {
+    if (device.vendor.length() == 0 && device.addressType == BLE_ADDR_PUBLIC) {
+        device.vendor = resolveBleOui(device.address, true);
+    }
+
     drawMainBorderWithTitle("GATT CONNECTING");
     tft.setTextSize(FP);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
@@ -993,6 +1127,9 @@ static void exploreGattDevice(GattScannedDevice &device) {
     int rowY = BORDER_PAD_Y + 16;
     const int step = 11;
     tft.drawString("Target: " + gattFitText(device.name, tftWidth - 20), BORDER_PAD_X, rowY); rowY += step;
+    if (device.vendor.length() > 0) {
+        tft.drawString("Vendor: " + gattFitText(device.vendor, tftWidth - 20), BORDER_PAD_X, rowY); rowY += step;
+    }
     tft.drawString("MAC:    " + String(device.address.toString().c_str()), BORDER_PAD_X, rowY); rowY += step;
     tft.drawString("Type:   " + String((device.addressType == BLE_ADDR_PUBLIC) ? "PUBLIC" : "RANDOM"), BORDER_PAD_X, rowY); rowY += step;
     tft.drawString("Signal: " + String(device.rssi) + " dBm", BORDER_PAD_X, rowY); rowY += step + 2;
@@ -1000,7 +1137,13 @@ static void exploreGattDevice(GattScannedDevice &device) {
 
     NimBLEClient *pClient = nullptr;
     int connError = 0;
-    bool connected = gattConnectWithStrategies(device.address, &pClient, &connError);
+    bool userCancelled = false;
+    bool connected = gattConnectWithStrategies(device.address, &pClient, &connError, &userCancelled);
+
+    if (userCancelled) {
+        displayWarning("Connection cancelled", true);
+        return;
+    }
 
     if (!connected || !pClient) {
         showBleConnectDiagnostics(g_lastConnDiag, device);
@@ -1374,7 +1517,14 @@ static void readStandardDeviceInfo(NimBLEClient *pClient) {
     }
 
     std::vector<String> lines;
+    String resolvedVendor = resolveBleOui(pClient->getPeerAddress(), true);
+    if (resolvedVendor.length() > 0 && manufacturer == "N/A") {
+        manufacturer = resolvedVendor + " (OUI)";
+    }
     lines.push_back("Manufacturer: " + manufacturer);
+    if (resolvedVendor.length() > 0 && manufacturer != "N/A" && manufacturer.indexOf(resolvedVendor) == -1) {
+        lines.push_back("OUI Vendor:   " + resolvedVendor);
+    }
     lines.push_back("Model Number: " + model);
     lines.push_back("Serial Num:   " + serial);
     lines.push_back("Firmware Rev: " + firmware);
@@ -1505,7 +1655,12 @@ static void runAutoDumpAll() {
         lineY += 12;
 
         NimBLEClient *pClient = nullptr;
-        bool connected = gattConnectWithStrategies(dev.address, &pClient, nullptr);
+        bool userCancelled = false;
+        bool connected = gattConnectWithStrategies(dev.address, &pClient, nullptr, &userCancelled);
+        if (userCancelled) {
+            tft.drawString("Aborted by user.", BORDER_PAD_X, lineY);
+            break;
+        }
         if (connected && pClient) {
             vTaskDelay(100 / portTICK_PERIOD_MS);
             pClient->discoverAttributes();
@@ -1710,12 +1865,14 @@ void gattScanCli(int timeoutSec) {
     for (int i = 0; i < results.getCount(); i++) {
         const auto *dev = results.getDevice(i);
         if (!dev) continue;
-        Serial.printf("[BLE-CLI] %2d. %s [%s] RSSI:%d dBm Name:\"%s\" Conn:%s\n",
+        String vendor = resolveBleVendor(dev, true);
+        Serial.printf("[BLE-CLI] %2d. %s [%s] RSSI:%d dBm Name:\"%s\" Vendor:\"%s\" Conn:%s\n",
                       i + 1,
                       dev->getAddress().toString().c_str(),
                       (dev->getAddress().getType() == BLE_ADDR_PUBLIC) ? "PUB" : "RND",
                       dev->getRSSI(),
                       dev->getName().c_str(),
+                      vendor.length() > 0 ? vendor.c_str() : "Unknown",
                       dev->isConnectable() ? "YES" : "NO");
     }
 

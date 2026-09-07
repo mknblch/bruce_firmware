@@ -1,5 +1,6 @@
 #include "rf_spectrum.h"
 #include "core/display.h"
+#include "core/mykeyboard.h"
 #include "protocols/rf_config.h"
 #include "protocols/rf_decoder.h"
 #include "rf_utils.h"
@@ -29,16 +30,6 @@ static void draw_rf_header(const String &title, const String &info) {
     tft.drawString(info, rf_plot_left(), rf_plot_bot() + 2, 1);
 }
 
-static bool spectrum_rmt_rx_done_callback(
-    rmt_channel_t *channel, const rmt_rx_done_event_data_t *edata, void *user_data
-) {
-    BaseType_t high_task_wakeup = pdFALSE;
-    QueueHandle_t receive_queue = (QueueHandle_t)user_data;
-    // send the received RMT symbols to the parser task
-    xQueueSendFromISR(receive_queue, edata, &high_task_wakeup);
-    return high_task_wakeup == pdTRUE;
-}
-
 void draw_tf_spectrum_grid() {
     const int top = rf_plot_top();
     const int bot = rf_plot_bot();
@@ -64,95 +55,173 @@ static void draw_rf_pulse(int x, int magnitude) {
 }
 
 void rf_spectrum() {
-    draw_rf_header("RF Spectrum", String(bruceConfigPins.rfFreq, 2) + " MHz");
-    draw_tf_spectrum_grid();
-    if (bruceConfigPins.rfModule == M5_RF_MODULE) {
-        RfRxSession rx;
-        if (!rx.begin()) {
-            deinitRfModule();
-            return;
-        }
-
-        std::vector<int> durations;
-        while (1) {
-            if (rx.poll(durations)) {
-                draw_tf_spectrum_grid();
-                for (size_t i = 0; i < durations.size(); i++) {
-                    int lineX =
-                        rf_plot_left() +
-                        map(i, 0, durations.size() > 1 ? durations.size() - 1 : 1, 0, rf_plot_width() - 1);
-                    draw_rf_pulse(lineX, abs(durations[i]));
-                }
-                RF_DBG("m5 spectrum: durations=%u", (unsigned)durations.size());
-            }
-
-            if (check(EscPress)) { break; }
-            if (setMHZMenu()) {
-                rx.end();
-                rx.begin();
-                draw_rf_header("RF Spectrum", String(bruceConfigPins.rfFreq, 2) + " MHz");
-                draw_tf_spectrum_grid();
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-
-        rx.end();
-        returnToMenu = true;
+    if (!initRfModule("rx", bruceConfigPins.rfFreq)) return;
+    RfRxSession rx;
+    if (!rx.begin()) {
         deinitRfModule();
         return;
     }
+    draw_rf_header("RF Spectrum", String(bruceConfigPins.rfFreq, 2) + " MHz");
+    draw_tf_spectrum_grid();
 
-    rmt_channel_handle_t rx_ch = NULL;
-    rx_ch = setup_rf_rx();
-    if (rx_ch == NULL) return;
-    ESP_LOGI("RMT_SPECTRUM", "register RX done callback");
-    QueueHandle_t receive_queue = xQueueCreate(1, sizeof(rmt_rx_done_event_data_t));
-    assert(receive_queue);
-    rmt_rx_event_callbacks_t cbs = {
-        .on_recv_done = spectrum_rmt_rx_done_callback,
-    };
-    ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rx_ch, &cbs, receive_queue));
-    ESP_ERROR_CHECK(rmt_enable(rx_ch));
-    rmt_receive_config_t receive_config = {
-        .signal_range_min_ns = 3000,     // 6us minimum signal duration
-        .signal_range_max_ns = 12000000, // 24ms maximum signal duration
-    };
-    rmt_symbol_word_t item[64];
-    rmt_rx_done_event_data_t rx_data;
-    ESP_ERROR_CHECK(rmt_receive(rx_ch, item, sizeof(item), &receive_config));
-
-    size_t rx_size = 0;
+    std::vector<int> durations;
     while (1) {
-        rmt_symbol_word_t *rx_items = NULL;
-        if (xQueueReceive(receive_queue, &rx_data, 0) == pdPASS) {
-            rx_size = rx_data.num_symbols;
-            rx_items = rx_data.received_symbols;
-        }
-        if (rx_size != 0) {
-            // Draw grid and info
+        if (rx.poll(durations)) {
             draw_tf_spectrum_grid();
-            // Draw waveform based on signal strength
-            for (size_t i = 0; i < rx_size; i++) {
-                int lineX = rf_plot_left() + map(i, 0, rx_size - 1, 0, rf_plot_width() - 1);
-                draw_rf_pulse(lineX, rx_items[i].duration0 + rx_items[i].duration1);
+            for (size_t i = 0; i < durations.size(); i++) {
+                int lineX =
+                    rf_plot_left() +
+                    map(i, 0, durations.size() > 1 ? durations.size() - 1 : 1, 0, rf_plot_width() - 1);
+                draw_rf_pulse(lineX, abs(durations[i]));
             }
-
-            ESP_ERROR_CHECK(rmt_receive(rx_ch, item, sizeof(item), &receive_config));
-            rx_size = 0;
+            RF_DBG("spectrum: durations=%u", (unsigned)durations.size());
         }
-        // Checks to leave while
+
         if (check(EscPress)) { break; }
-        if (setMHZMenu()) yield();
+        if (setMHZMenu()) {
+            rx.end();
+            rx.begin();
+            draw_rf_header("RF Spectrum", String(bruceConfigPins.rfFreq, 2) + " MHz");
+            draw_tf_spectrum_grid();
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+
+    rx.end();
     returnToMenu = true;
-    rmt_disable(rx_ch);
-    rmt_del_channel(rx_ch);
-    vQueueDelete(receive_queue);
     deinitRfModule();
 }
 
-#define TIME_DIVIDER (rf_plot_width() / 10)
+static String format_timebase(uint32_t usPerPx) {
+    if (usPerPx >= 1000) {
+        if (usPerPx % 1000 == 0) return String(usPerPx / 1000) + "ms/px";
+        return String(usPerPx / 1000.0, 1) + "ms/px";
+    }
+    return String(usPerPx) + "us/px";
+}
+
+static void render_rf_squarewave(
+    const std::vector<int> &durations,
+    uint32_t usPerPx,
+    bool isHeld,
+    bool showInitialPrompt
+) {
+    const int top = rf_plot_top();
+    const int bot = rf_plot_bot();
+    const int left = rf_plot_left();
+    const int width = rf_plot_width();
+    const int right = left + width;
+
+    const int traceH = 7;
+    const int rowGap = 5;
+    const int rowPitch = traceH + rowGap;
+    const int numRows = (bot - top) / rowPitch;
+
+    // Clear plot area
+    tft.fillRect(left, top, width, bot - top, bruceConfig.bgColor);
+
+    // Draw baseline guides for each row
+    const uint16_t gridColor = rf_grid_color();
+    for (int r = 0; r < numRows; r++) {
+        int rowY = top + r * rowPitch;
+        tft.drawFastHLine(left, rowY + traceH, width, gridColor);
+    }
+
+    // Compose bottom info line
+    String info = String(bruceConfigPins.rfFreq, 2) + "M " + format_timebase(usPerPx);
+
+    if (durations.empty()) {
+        if (showInitialPrompt) {
+            tft.setTextSize(FP);
+            tft.setTextColor(rf_label_color(), bruceConfig.bgColor);
+            String prompt = "Waiting for RF signal...";
+            int tw = prompt.length() * 6 * FP;
+            int tx = left + (width - tw) / 2;
+            int ty = top + (bot - top) / 2 - 4;
+            tft.drawString(prompt, tx > left ? tx : left, ty, 1);
+        }
+    } else {
+        uint32_t totalUs = 0;
+        for (int d : durations) totalUs += abs(d);
+
+        RfCodes code;
+        bool decoded = rf_decode_ook(durations, code);
+        if (!decoded) decoded = rf_decode_keeloq(durations, code);
+
+        if (decoded) {
+            info += " | " + code.protocol + " 0x" + String((uint32_t)code.key, HEX);
+            if (code.Bit > 0) info += " (" + String(code.Bit) + "b)";
+        } else {
+            info += " | " + String(durations.size()) + "e " + String(totalUs / 1000) + "ms";
+        }
+    }
+
+    if (isHeld) {
+        info += " [HOLD]";
+    }
+
+    // Draw bottom status bar
+    tft.setTextSize(FP);
+    tft.fillRect(left, bot + 2, width, 8 * FP, bruceConfig.bgColor);
+    tft.setTextColor(rf_label_color(), bruceConfig.bgColor);
+    tft.drawString(info, left, bot + 2, 1);
+
+    if (durations.empty() || numRows <= 0) return;
+
+    // Draw waveform trace
+    int curRow = 0;
+    int curX = left;
+    int curLevel = -1; // -1: uninitialized, 0: LOW, 1: HIGH
+    uint32_t remainderUs = 0;
+
+    for (int dur : durations) {
+        if (dur == 0) continue;
+        int level = (dur > 0) ? 1 : 0;
+        uint32_t us = (uint32_t)abs(dur);
+
+        int rowY = top + curRow * rowPitch;
+
+        // If level changed, draw vertical transition edge
+        if (curLevel != -1 && curLevel != level) {
+            tft.drawFastVLine(curX, rowY, traceH + 1, bruceConfig.priColor);
+        }
+        curLevel = level;
+
+        // Calculate pixel length with timing remainder accumulator
+        uint32_t totalDur = us + remainderUs;
+        int px = totalDur / usPerPx;
+        remainderUs = totalDur % usPerPx;
+        if (px == 0 && us > 0) px = 1;
+
+        while (px > 0 && curRow < numRows) {
+            rowY = top + curRow * rowPitch;
+            int y = (curLevel == 1) ? rowY : (rowY + traceH);
+            int spaceLeft = right - curX;
+
+            if (px <= spaceLeft) {
+                if (px > 0) {
+                    tft.drawFastHLine(curX, y, px, bruceConfig.priColor);
+                    curX += px;
+                    if (curX >= right) {
+                        curRow++;
+                        curX = left;
+                    }
+                }
+                px = 0;
+            } else {
+                if (spaceLeft > 0) {
+                    tft.drawFastHLine(curX, y, spaceLeft, bruceConfig.priColor);
+                }
+                px -= spaceLeft;
+                curRow++;
+                curX = left;
+            }
+        }
+
+        if (curRow >= numRows) break;
+    }
+}
+
 //@Pirata
 void rf_SquareWave() {
     if (!initRfModule("rx", bruceConfigPins.rfFreq)) return;
@@ -162,57 +231,84 @@ void rf_SquareWave() {
         deinitRfModule();
         return;
     }
-    const int top = rf_plot_top();
-    const int bot = rf_plot_bot();
-    const int traceH = 6; // height of one logic level
-    int line_w = rf_plot_left();
-    int line_h = top;
+
+    const uint32_t zoomLevels[] = { 10, 20, 50, 100, 250, 500, 1000, 2500, 5000 };
+    const size_t numZoom = sizeof(zoomLevels) / sizeof(zoomLevels[0]);
+    size_t zoomIdx = 2; // default 50 us/px
+    bool isHeld = false;
     std::vector<int> durations;
+    std::vector<int> lastDurations;
+
 PRINT:
     tft.drawPixel(0, 0, 0);
-    line_w = rf_plot_left();
-    line_h = top;
     draw_rf_header("RF SquareWave", String(bruceConfigPins.rfFreq, 2) + " MHz");
-    tft.fillRect(rf_plot_left(), top, rf_plot_width(), bot - top, bruceConfig.bgColor);
+    render_rf_squarewave(lastDurations, zoomLevels[zoomIdx], isHeld, lastDurations.empty());
 
     while (1) {
-        if (rx.poll(durations)) {
-            // Draw the captured square wave (HIGH width then LOW width per pair).
-            for (size_t i = 0; i + 1 < durations.size(); i += 2) {
-                int high = abs(durations[i]);
-                int low = abs(durations[i + 1]);
-                if (high == 0) break;
+        bool reRender = false;
 
-                if (high > 20000) high = 20000;
-                if (low > 20000) low = 20000;
-                if (line_w + (high + low) / TIME_DIVIDER > rf_plot_left() + rf_plot_width()) {
-                    line_w = rf_plot_left();
-                    line_h += traceH + 4;
-                }
-                if (line_h + traceH > bot) {
-                    line_h = top;
-                    tft.fillRect(rf_plot_left(), top, rf_plot_width(), bot - top, bruceConfig.bgColor);
-                }
-                tft.drawFastVLine(line_w, line_h, traceH, bruceConfig.priColor);
-                tft.drawFastHLine(line_w, line_h, high / TIME_DIVIDER, bruceConfig.priColor);
-
-                tft.drawFastVLine(line_w + high / TIME_DIVIDER, line_h, traceH, bruceConfig.priColor);
-                tft.drawFastHLine(
-                    line_w + high / TIME_DIVIDER,
-                    line_h + traceH,
-                    low / TIME_DIVIDER,
-                    bruceConfig.priColor
-                );
-                line_w += (high + low) / TIME_DIVIDER;
+        if (!isHeld && rx.poll(durations)) {
+            if (!durations.empty()) {
+                lastDurations = durations;
+                reRender = true;
             }
         }
-        // Checks to leave while
+
         if (check(EscPress)) { break; }
-        if (setMHZMenu()) goto PRINT;
+
+        if (check(NextPress) || check(UpPress)) {
+            if (zoomIdx > 0) {
+                zoomIdx--;
+                reRender = true;
+            }
+        } else if (check(PrevPress) || check(DownPress)) {
+            if (zoomIdx + 1 < numZoom) {
+                zoomIdx++;
+                reRender = true;
+            }
+        }
+
+        char key = checkLetterShortcutPress();
+        if (key > 0) {
+            char lowerKey = tolower(key);
+            if (lowerKey == 'h' || lowerKey == 'p' || key == ' ') {
+                isHeld = !isHeld;
+                reRender = true;
+            } else if (key == '+' || key == '=') {
+                if (zoomIdx > 0) {
+                    zoomIdx--;
+                    reRender = true;
+                }
+            } else if (key == '-' || key == '_') {
+                if (zoomIdx + 1 < numZoom) {
+                    zoomIdx++;
+                    reRender = true;
+                }
+            } else if (lowerKey == 'c') {
+                lastDurations.clear();
+                reRender = true;
+            }
+        }
+
+        if (setMHZMenu()) {
+            rx.end();
+            rx.begin();
+            lastDurations.clear();
+            goto PRINT;
+        } else if (check(SelPress)) {
+            isHeld = !isHeld;
+            reRender = true;
+        }
+
+        if (reRender) {
+            render_rf_squarewave(lastDurations, zoomLevels[zoomIdx], isHeld, lastDurations.empty());
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     rx.end();
     returnToMenu = true;
+    deinitRfModule();
 }
 
 void rf_CC1101_rssi() {

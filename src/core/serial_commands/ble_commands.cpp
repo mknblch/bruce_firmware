@@ -1,6 +1,7 @@
 #include "ble_commands.h"
 #include "modules/ble/gatt_server.h"
 #include "modules/ble/gatt_explorer.h"
+#include "modules/ble/ble_oui.h"
 #include <globals.h>
 
 #if !defined(LITE_VERSION)
@@ -55,6 +56,34 @@ static uint32_t bleCallback(cmd *c) {
         if (timeoutSec <= 0) timeoutSec = 5;
         gattScanCli(timeoutSec);
         return true;
+    } else if (action == "oui") {
+        if (param1 == "" || param1 == "status" || param1 == "info") {
+            serialDevice->println("=== OUI & Vendor Database Status ===");
+            serialDevice->printf("SD Database Available: %s\n", isSdOuiDatabaseAvailable() ? "YES" : "NO");
+            serialDevice->printf("SD Card Mounted:       %s\n", sdcardMounted ? "YES" : "NO");
+            serialDevice->println("Usage: ble oui <MAC_or_OUI_hex> (e.g. ble oui AC:67:84:11:22:33, ble oui 001122, ble oui AC6784)");
+            return true;
+        }
+        serialDevice->println("[BLE-CLI] Testing OUI resolution for: " + param1);
+        String clean = param1;
+        clean.replace(":", "");
+        clean.replace("-", "");
+        clean.replace("0x", "");
+        clean.replace("0X", "");
+        if (clean.length() >= 6) {
+            uint32_t oui = (uint32_t)strtoul(clean.substring(0, 6).c_str(), NULL, 16);
+            serialDevice->printf("[BLE-CLI] Parsed OUI: 0x%06X\n", (unsigned int)oui);
+            String vendor = resolveBleOui(oui, true);
+            if (vendor.length() > 0) {
+                serialDevice->println("[BLE-CLI] Result: Vendor = \"" + vendor + "\"");
+            } else {
+                serialDevice->println("[BLE-CLI] Result: Vendor = NOT FOUND (Unknown OUI)");
+            }
+            return true;
+        } else {
+            serialDevice->println("[BLE-CLI] Invalid OUI / MAC length (need at least 6 hex chars)");
+            return false;
+        }
     }
 
     serialDevice->println(
@@ -64,7 +93,8 @@ static uint32_t bleCallback(cmd *c) {
         "  ble server stop\n"
         "  ble server status\n"
         "  ble scan [seconds]\n"
-        "  ble connect <MAC> [pub|rnd]"
+        "  ble connect <MAC> [pub|rnd]\n"
+        "  ble oui [status|<MAC|OUI>]"
     );
     return false;
 }

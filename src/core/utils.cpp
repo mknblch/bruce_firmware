@@ -30,6 +30,43 @@ void addOptionToMainMenu() {
     options.push_back({"Main Menu", backToMenu});
 }
 
+uint32_t getBatteryAdcMilliVolts() {
+#ifdef ANALOG_BAT_PIN
+    static bool adcInitialized = false;
+    if (!adcInitialized) {
+        pinMode(ANALOG_BAT_PIN, INPUT);
+        analogSetPinAttenuation(ANALOG_BAT_PIN, ADC_11db);
+        adcInitialized = true;
+    }
+
+    // 4-sample moving average to smooth out ADC noise / RF ripple
+    uint32_t adcReading = 0;
+    for (int i = 0; i < 4; i++) {
+        adcReading += analogReadMilliVolts(ANALOG_BAT_PIN);
+    }
+    return adcReading / 4;
+#else
+    return 0;
+#endif
+}
+
+uint32_t getBatteryVoltage() {
+#ifdef USE_BQ27220_VIA_I2C
+    return (uint32_t)bq.getVoltage();
+#elif defined(ANALOG_BAT_PIN)
+#ifndef ANALOG_BAT_MULTIPLIER
+#if defined(ARDUINO_M5STACK_CARDPUTER) || defined(CARDPUTER)
+#define ANALOG_BAT_MULTIPLIER 2.285f
+#else
+#define ANALOG_BAT_MULTIPLIER 2.0f
+#endif
+#endif
+    return (uint32_t)((float)getBatteryAdcMilliVolts() * ANALOG_BAT_MULTIPLIER);
+#else
+    return 0;
+#endif
+}
+
 /***************************************************************************************
 ** Function name: getBattery()
 ** Description:   Returns the battery value from 1-100
@@ -44,23 +81,23 @@ int getBattery() {
     return (int)pct;
 #endif
 #ifdef ANALOG_BAT_PIN
-#ifndef ANALOG_BAT_MULTIPLIER
-#define ANALOG_BAT_MULTIPLIER 2.0f
-#endif
-    static bool adcInitialized = false;
-    if (!adcInitialized) {
-        pinMode(ANALOG_BAT_PIN, INPUT);
-        adcInitialized = true;
-    }
-    uint32_t adcReading = analogReadMilliVolts(ANALOG_BAT_PIN);
-    float actualVoltage = (float)adcReading * ANALOG_BAT_MULTIPLIER;
-    const float MIN_VOLTAGE = 3300.0f;
-    const float MAX_VOLTAGE = 4150.0f;
-    float percent = ((actualVoltage - MIN_VOLTAGE) / (MAX_VOLTAGE - (MIN_VOLTAGE + 50.0f))) * 100.0f;
+    float v = (float)getBatteryVoltage(); // in mV
 
-    if (percent < 0) percent = 1;
+    // LiPo 1S discharge curve under typical load (~120-180mA)
+    int percent;
+    if (v >= 4150.0f) percent = 100;
+    else if (v >= 4000.0f) percent = 90 + (int)((v - 4000.0f) * 10.0f / 150.0f);
+    else if (v >= 3850.0f) percent = 75 + (int)((v - 3850.0f) * 15.0f / 150.0f);
+    else if (v >= 3700.0f) percent = 50 + (int)((v - 3700.0f) * 25.0f / 150.0f);
+    else if (v >= 3600.0f) percent = 30 + (int)((v - 3600.0f) * 20.0f / 100.0f);
+    else if (v >= 3500.0f) percent = 15 + (int)((v - 3500.0f) * 15.0f / 100.0f);
+    else if (v >= 3350.0f) percent = 5 + (int)((v - 3350.0f) * 10.0f / 150.0f);
+    else if (v >= 3200.0f) percent = 1 + (int)((v - 3200.0f) * 4.0f / 150.0f);
+    else percent = 1;
+
+    if (percent < 1) percent = 1;
     if (percent > 100) percent = 100;
-    return (int)percent;
+    return percent;
 #endif
     return 0;
 }
