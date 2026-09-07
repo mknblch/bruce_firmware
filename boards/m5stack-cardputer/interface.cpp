@@ -87,6 +87,10 @@ void _setup_gpio() {
     pinMode(5, OUTPUT);
     // Set GPIO5 HIGH for SD card compatibility (thx for the tip @bmorcelli & 7h30th3r0n3)
     digitalWrite(5, HIGH);
+#if defined(RGB_LED) && RGB_LED >= 0
+    pinMode(RGB_LED, OUTPUT);
+    digitalWrite(RGB_LED, LOW);
+#endif
 }
 volatile bool kb_interrupt = false;
 void IRAM_ATTR gpio_isr_handler(void *arg) {

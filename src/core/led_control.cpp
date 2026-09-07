@@ -292,53 +292,23 @@ void ledEffectTask(void *pvParameters) {
 }
 
 void beginLed() {
-#ifdef RGB_LED_CLK
-    FastLED.addLeds<LED_TYPE, RGB_LED, RGB_LED_CLK, LED_ORDER>(leds, LED_COUNT);
-#else
-    FastLED.addLeds<LED_TYPE, RGB_LED, LED_ORDER>(leds, LED_COUNT);
+    static bool inited = false;
+    if (!inited) {
+#if defined(RGB_LED) && RGB_LED >= 0
+        pinMode(RGB_LED, OUTPUT);
+        digitalWrite(RGB_LED, LOW);
 #endif
+#ifdef RGB_LED_CLK
+        FastLED.addLeds<LED_TYPE, RGB_LED, RGB_LED_CLK, LED_ORDER>(leds, LED_COUNT);
+#else
+        FastLED.addLeds<LED_TYPE, RGB_LED, LED_ORDER>(leds, LED_COUNT);
+#endif
+        inited = true;
+    }
 
-    /* The default FastLED driver takes over control of the RMT interrupt
-     * handler, making it hard to use the RMT device for other
-     * (non-FastLED) purposes. You can change it's behavior to use the ESP
-     * core driver instead, allowing other RMT applications to
-     * co-exist. To switch to this mode, add the following directive
-     * before you include FastLED.h:
-     *
-     *      #define FASTLED_RMT_BUILTIN_DRIVER 1
-     *  RMT is also used for RF Spectrum (and for RF readings in the future),
-     *  So it is needed to restart the driver in case it had been turned off
-     *  by the RF functions, in this case, we are restarting it all the time
-     */
-    // -- RMT configuration for transmission
-
-    // These configurations made T-Embed (non CC1101) stop working
-    // Commented to test if with the FASTLED_RMT_MAX_CHANNELS 1 was sufficient for the other devices to
-    // work LED and RF Spectrum and RAW capture and it is working well without it for now.. So I'll keep
-    // the code below for the case we find some issue and need to rollback
-
-    /*
-        rmt_config_t rmt_tx;
-        memset(&rmt_tx, 0, sizeof(rmt_config_t));
-        rmt_tx.channel = rmt_channel_t(FASTLED_ESP32_RMT_CHANNEL_0);
-        rmt_tx.rmt_mode = RMT_MODE_TX;
-        rmt_tx.gpio_num = (gpio_num_t)RGB_LED;
-        rmt_tx.mem_block_num = 2;
-        rmt_tx.clk_div = 2;
-        rmt_tx.tx_config.loop_en = false;
-        rmt_tx.tx_config.carrier_level = RMT_CARRIER_LEVEL_LOW;
-        rmt_tx.tx_config.carrier_en = false;
-        rmt_tx.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
-        rmt_tx.tx_config.idle_output_en = true;
-
-        // -- Apply the configuration
-        rmt_config(&rmt_tx);
-        rmt_driver_uninstall(rmt_channel_t(FASTLED_ESP32_RMT_CHANNEL_0));
-        rmt_driver_install(rmt_channel_t(FASTLED_ESP32_RMT_CHANNEL_0), 0, 0);
-    */
+    int bright = 255 * max(0, min(100, bruceConfig.ledBright)) / 100;
+    FastLED.setBrightness(bright);
     ledSetup();
-
-    setLedBrightness(bruceConfig.ledBright);
 }
 
 void blinkLed(int blinkTime) {
@@ -598,6 +568,7 @@ void setLedEffectConfig() {
                  setLedEffect(LED_EFFECT_RAINBOW_CHASE);
                  return false;
              }                                                                        },
+#endif
             {"Rainbow Breathe",
              [=]() { bruceConfig.setLedEffect(LED_EFFECT_RAINBOW_BREATHE); },
              bruceConfig.ledEffect == LED_EFFECT_RAINBOW_BREATHE,
@@ -619,7 +590,6 @@ void setLedEffectConfig() {
                  setLedEffect(LED_EFFECT_FIRE);
                  return false;
              }                                                                        },
-#endif
             {"Config - Speed",
              setLedEffectSpeedConfig,                                         false,
              [](void *pointer,                                                                         bool shouldRender) {
@@ -638,7 +608,15 @@ void setLedEffectConfig() {
 
         addOptionToMainMenu();
 
-        int selectedOption = loopOptions(options, bruceConfig.ledEffect);
+        int idx = 0;
+        for (size_t i = 0; i < options.size(); i++) {
+            if (options[i].selected) {
+                idx = i;
+                break;
+            }
+        }
+
+        int selectedOption = loopOptions(options, idx);
         if (selectedOption == -1 || selectedOption == options.size() - 1) {
             ledPreviewMode(false);
             ledSetup();
@@ -726,11 +704,18 @@ void setLedEffectDirectionConfig() {
 }
 
 void ledSetup() {
-    if (bruceConfig.ledEffect == LED_EFFECT_SOLID) { ledEffects(false); }
+    if (bruceConfig.ledBright == 0) {
+        ledEffects(false);
+        setLedColor(CRGB::Black);
+        return;
+    }
 
     if (bruceConfig.ledEffect > LED_EFFECT_SOLID) {
         ledEffects(true);
-    } else setLedColor(bruceConfig.ledColor);
+    } else {
+        ledEffects(false);
+        setLedColor(bruceConfig.ledColor);
+    }
 }
 
 void ledEffects(bool enable) {
@@ -814,5 +799,6 @@ void setLedBrightnessConfig() {
 
     loopOptions(options, idx);
     setLedBrightness(bruceConfig.ledBright);
+    ledSetup();
 }
 #endif

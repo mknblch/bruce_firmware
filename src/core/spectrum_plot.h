@@ -25,6 +25,7 @@
 class SpectrumPlot {
 public:
     bool begin(const String &title);
+    void redraw(const String &title);
     void end();
     bool ready() const { return _ok; }
 

@@ -1,6 +1,7 @@
 #include "rf_spectrum.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
+#include "core/spectrum_plot.h"
 #include "protocols/rf_config.h"
 #include "protocols/rf_decoder.h"
 #include "rf_utils.h"
@@ -30,64 +31,149 @@ static void draw_rf_header(const String &title, const String &info) {
     tft.drawString(info, rf_plot_left(), rf_plot_bot() + 2, 1);
 }
 
-void draw_tf_spectrum_grid() {
-    const int top = rf_plot_top();
-    const int bot = rf_plot_bot();
-    const uint16_t grid = rf_grid_color();
-
-    const int left = rf_plot_left();
-    const int w = rf_plot_width();
-
-    tft.fillRect(left, top, w, bot - top, bruceConfig.bgColor);
-    tft.drawFastHLine(left, (top + bot) / 2, w, grid);
-    for (int i = 1; i < 4; i++) tft.drawFastVLine(left + (i * w) / 4, top, bot - top, grid);
+static void rf_envelope(const uint8_t *lvl, size_t numChannels, uint8_t *env, int plotW) {
+    if (numChannels < 2) {
+        memset(env, numChannels ? lvl[0] : 0, plotW);
+        return;
+    }
+    for (int i = 0; i < plotW; i++) {
+        int32_t pos = (int32_t)i * (numChannels - 1) * 256 / (plotW - 1);
+        int ci = pos >> 8;
+        int frac = pos & 0xff;
+        if (ci >= (int)numChannels - 1) {
+            ci = numChannels - 2;
+            frac = 256;
+        }
+        int v = lvl[ci] + (lvl[ci + 1] - lvl[ci]) * frac / 256;
+        env[i] = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
+    }
 }
 
-// Centres a pulse-width bar on the mid line of the plot band.
-static void draw_rf_pulse(int x, int magnitude) {
-    const int top = rf_plot_top();
-    const int bot = rf_plot_bot();
-    const int mid = (top + bot) / 2;
-    int h = map(magnitude, 0, SIGNAL_STRENGTH_THRESHOLD, 0, bot - top);
-    int startY = constrain(mid - h / 2, top, bot);
-    int endY = constrain(mid + h / 2, top, bot);
-    tft.drawLine(x, startY, x, endY, bruceConfig.priColor);
+static void rf_spectrum_range_selection() {
+    options = {
+        {subghz_frequency_ranges[0], [=]() { bruceConfigPins.setRfScanRange(0); }},
+        {subghz_frequency_ranges[1], [=]() { bruceConfigPins.setRfScanRange(1); }},
+        {subghz_frequency_ranges[2], [=]() { bruceConfigPins.setRfScanRange(2); }},
+        {subghz_frequency_ranges[3], [=]() { bruceConfigPins.setRfScanRange(3); }},
+    };
+    int idx = constrain(bruceConfigPins.rfScanRange, 0, 3);
+    loopOptions(options, idx);
+    options.clear();
+    bruceConfigPins.rfFxdFreq = false;
 }
 
 void rf_spectrum() {
-    if (!initRfModule("rx", bruceConfigPins.rfFreq)) return;
-    RfRxSession rx;
-    if (!rx.begin()) {
+    bruceConfigPins.rfFxdFreq = false;
+    if (!initRfModule("rx", bruceConfigPins.rfFreq)) {
+        displayError("Error starting RF", true);
+        return;
+    }
+
+    SpectrumPlot plot;
+    if (!plot.begin("RF Spectrum")) {
+        displayError("Out of memory", true);
         deinitRfModule();
         return;
     }
-    draw_rf_header("RF Spectrum", String(bruceConfigPins.rfFreq, 2) + " MHz");
-    draw_tf_spectrum_grid();
 
-    std::vector<int> durations;
-    while (1) {
-        if (rx.poll(durations)) {
-            draw_tf_spectrum_grid();
-            for (size_t i = 0; i < durations.size(); i++) {
-                int lineX =
-                    rf_plot_left() +
-                    map(i, 0, durations.size() > 1 ? durations.size() - 1 : 1, 0, rf_plot_width() - 1);
-                draw_rf_pulse(lineX, abs(durations[i]));
-            }
-            RF_DBG("spectrum: durations=%u", (unsigned)durations.size());
-        }
-
-        if (check(EscPress)) { break; }
-        if (setMHZMenu()) {
-            rx.end();
-            rx.begin();
-            draw_rf_header("RF Spectrum", String(bruceConfigPins.rfFreq, 2) + " MHz");
-            draw_tf_spectrum_grid();
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
+    const int plotW = plot.width();
+    uint8_t *env = (uint8_t *)malloc(plotW);
+    uint8_t *envPeak = (uint8_t *)malloc(plotW);
+    if (!env || !envPeak) {
+        free(env);
+        free(envPeak);
+        plot.end();
+        deinitRfModule();
+        displayError("Out of memory", true);
+        return;
     }
 
-    rx.end();
+    auto updateRuler = [&]() {
+        int startIdx = range_limits[bruceConfigPins.rfScanRange][0];
+        int endIdx = range_limits[bruceConfigPins.rfScanRange][1];
+        int numFreqs = endIdx - startIdx + 1;
+        const int tickCount = min(5, numFreqs);
+        int cols[5];
+        String labels[5];
+        for (int i = 0; i < tickCount; i++) {
+            int idx = i * (numFreqs - 1) / (tickCount > 1 ? tickCount - 1 : 1);
+            cols[i] = idx * (plotW - 1) / (numFreqs > 1 ? numFreqs - 1 : 1);
+            labels[i] = String(subghz_frequency_list[startIdx + idx], 1);
+        }
+        plot.ruler(cols, labels, tickCount);
+    };
+
+    updateRuler();
+
+    uint8_t channelLvl[64] = {0};
+    uint8_t channelPeak[64] = {0};
+    uint32_t lastFrame = 0, lastRow = 0;
+
+    while (1) {
+        if (check(EscPress)) { break; }
+
+        if (check(SelPress)) {
+            rf_spectrum_range_selection();
+            plot.redraw("RF Spectrum");
+            updateRuler();
+            memset(channelLvl, 0, sizeof(channelLvl));
+            memset(channelPeak, 0, sizeof(channelPeak));
+            continue;
+        }
+
+        int startIdx = range_limits[bruceConfigPins.rfScanRange][0];
+        int endIdx = range_limits[bruceConfigPins.rfScanRange][1];
+        int numFreqs = endIdx - startIdx + 1;
+        if (numFreqs > 64) numFreqs = 64;
+
+        int maxIdx = 0;
+        int maxRssiDbm = -120;
+
+        for (int i = 0; i < numFreqs; i++) {
+            if (EscPress || SelPress) break;
+            float freq = subghz_frequency_list[startIdx + i];
+            setMHZ(freq);
+            delayMicroseconds(500);
+            int rssi = ELECHOUSE_cc1101.getRssi();
+            tft.drawPixel(0, 0, 0);
+
+            int rawPct = map(constrain(rssi, -95, -20), -95, -20, 0, 100);
+            channelLvl[i] = (channelLvl[i] * 3 + rawPct) / 4;
+
+            if (channelLvl[i] > channelPeak[i]) channelPeak[i] = channelLvl[i];
+            else if (channelPeak[i]) channelPeak[i]--;
+
+            if (rssi > maxRssiDbm) {
+                maxRssiDbm = rssi;
+                maxIdx = i;
+            }
+        }
+
+        if (millis() - lastFrame >= 40) {
+            lastFrame = millis();
+            rf_envelope(channelLvl, numFreqs, env, plotW);
+            rf_envelope(channelPeak, numFreqs, envPeak, plotW);
+
+            int hlC = maxIdx * (plotW - 1) / (numFreqs > 1 ? numFreqs - 1 : 1);
+            int hlSpan = max(2, (2 * (plotW - 1)) / (numFreqs > 1 ? numFreqs - 1 : 1));
+            plot.trace(env, envPeak, hlC - hlSpan, hlC + hlSpan);
+
+            if (millis() - lastRow >= 120) {
+                lastRow = millis();
+                plot.pushRow(env);
+                float peakFreq = subghz_frequency_list[startIdx + maxIdx];
+                plot.status(
+                    "peak: " + String(peakFreq, 2) + "MHz " + String(maxRssiDbm) + "dBm [" +
+                    String(subghz_frequency_ranges[bruceConfigPins.rfScanRange]) + "]"
+                );
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    free(env);
+    free(envPeak);
+    plot.end();
     returnToMenu = true;
     deinitRfModule();
 }

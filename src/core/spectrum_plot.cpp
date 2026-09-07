@@ -83,10 +83,19 @@ bool SpectrumPlot::begin(const String &title) {
     _wfHead = 0;
     _ok = true;
 
-    drawMainBorderWithTitle(title); // clears the screen itself
-
-    drawWaterfall();
+    redraw(title);
     return true;
+}
+
+void SpectrumPlot::redraw(const String &title) {
+    if (!_ok) return;
+    drawMainBorderWithTitle(title);
+    tft.fillRect(_plotL, _specTop, _plotW, tftHeight - BORDER_PAD_Y - _specTop, _bg);
+    if (_wfRows > 0) {
+        tft.drawFastHLine(_plotL, _specBot + 1, _plotW, _grid);
+        tft.drawFastHLine(_plotL, _specBot + 2, _plotW, _bg);
+    }
+    drawWaterfall();
 }
 
 void SpectrumPlot::end() {
@@ -142,6 +151,9 @@ void SpectrumPlot::trace(const uint8_t *env, const uint8_t *envPeak, int hlL, in
 void SpectrumPlot::drawWaterfall() {
     if (!_wfRows || !_wf) return;
 
+    tft.drawFastHLine(_plotL, _specBot + 1, _plotW, _grid);
+    tft.drawFastHLine(_plotL, _specBot + 2, _plotW, _bg);
+
     for (int r = 0; r < _wfRows; r++) {
         int idx = (_wfHead - r + 2 * _wfRows) % _wfRows;
         const uint8_t *row = _wf + (size_t)idx * _plotW;
@@ -172,8 +184,12 @@ void SpectrumPlot::pushRow(const uint8_t *env) {
 void SpectrumPlot::ruler(const int *cols, const String *labels, int count, int highlight) {
     if (!_ok || _lblY < 0 || !cols || !labels) return;
 
-    int h = 8 * FP;
-    tft.fillRect(_plotL, _lblY - 1, _plotW, h + 2, _bg);
+    int topY = _wfRows ? (_wfTop + _wfRows) : (_specBot + 1);
+    int botY = (_footY >= 0) ? (_footY - 1) : (tftHeight - BORDER_PAD_Y);
+    int h = botY - topY + 1;
+    if (h > 0) {
+        tft.fillRect(_plotL, topY, _plotW, h, _bg);
+    }
     tft.setTextSize(FP);
 
     for (int i = 0; i < count; i++) {
@@ -184,7 +200,7 @@ void SpectrumPlot::ruler(const int *cols, const String *labels, int count, int h
         if (tx + w > _plotL + _plotW) tx = _plotL + _plotW - w;
 
         if (i == highlight) {
-            tft.fillRect(tx - 2, _lblY - 1, w + 4, h + 2, bruceConfig.priColor);
+            tft.fillRect(tx - 2, _lblY - 1, w + 4, 8 * FP + 2, bruceConfig.priColor);
             tft.setTextColor(_bg, bruceConfig.priColor);
         } else {
             tft.setTextColor(_label, _bg);
@@ -196,7 +212,9 @@ void SpectrumPlot::ruler(const int *cols, const String *labels, int count, int h
 void SpectrumPlot::status(const String &text, bool alert) {
     if (!_ok || _footY < 0) return;
 
-    tft.fillRect(_plotL, _footY, _plotW, 8 * FP, _bg);
+    int botY = tftHeight - BORDER_PAD_Y;
+    int h = botY - _footY + 1;
+    tft.fillRect(_plotL, _footY, _plotW, max(h, 8 * FP), _bg);
     tft.setTextSize(FP);
     tft.setTextColor(alert ? alertColor() : _label, _bg);
 
