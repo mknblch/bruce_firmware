@@ -95,6 +95,7 @@ public:
     int badUSBBLEKeyboardLayout = 0;
     uint16_t badUSBBLEKeyDelay = 10;
     bool badUSBBLEShowOutput = true;
+    bool showRamHeader = false;
 
     std::vector<String> disabledMenus = {};
 

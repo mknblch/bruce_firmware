@@ -15,43 +15,59 @@ void print_errorMessage(const char *msg, const char *stackTrace) {
     tft.setTextSize(FP);
     tft.setCursor(0, 33);
 
-    tft.printf("%s\n%s\n", msg, stackTrace);
-    Serial.printf("%s\n%s\n", msg, stackTrace);
+    const char *m = msg ? msg : "JS Error";
+    const char *st = stackTrace ? stackTrace : "";
+
+    tft.printf("%s\n%s\n", m, st);
+    Serial.printf("%s\n%s\n", m, st);
     Serial.flush();
+    if (serialDevice) {
+        serialDevice->printf("%s\n%s\n", m, st);
+        serialDevice->flush();
+    }
 
     delay(500);
-    while (!check(AnyKeyPress)) delay(50);
+    int timeout = 100;
+    while (!check(AnyKeyPress) && timeout > 0) {
+        if (serialDevice && serialDevice->available()) break;
+        delay(50);
+        timeout--;
+    }
 }
 
 void js_fatal_error_handler(JSContext *ctx) {
-    JSValue obj;
-    JSCStringBuf sb;
-    obj = JS_GetException(ctx);
+    JSValue obj = JS_GetException(ctx);
 
+    JSCStringBuf sbMsg, sbName, sbStack;
     JSValue jsvMessage = JS_GetPropertyStr(ctx, obj, "message");
-    if (strcmp(JS_ToCString(ctx, jsvMessage, &sb), "Script exited") == 0) { return; }
+    const char *msgStr = JS_ToCString(ctx, jsvMessage, &sbMsg);
+    if (msgStr && strcmp(msgStr, "Script exited") == 0) { return; }
 
-    tft.fillScreen(bruceConfig.bgColor);
-    tft.setTextSize(FM);
-    tft.setTextColor(TFT_RED, bruceConfig.bgColor);
-    tft.drawCentreString("Error", tftWidth / 2, 10, 1);
-    tft.setTextColor(TFT_WHITE, bruceConfig.bgColor);
-    tft.setTextSize(FP);
-    tft.setCursor(0, 33);
+    JSValue jsvName = JS_GetPropertyStr(ctx, obj, "name");
+    const char *nameStr = JS_ToCString(ctx, jsvName, &sbName);
 
     JSValue jsvStack = JS_GetPropertyStr(ctx, obj, "stack");
     const char *stackTrace = NULL;
     if (!JS_IsUndefined(jsvStack) && JS_IsString(ctx, jsvStack)) {
-        stackTrace = JS_ToCString(ctx, jsvStack, &sb);
+        stackTrace = JS_ToCString(ctx, jsvStack, &sbStack);
+    }
+
+    String fullMsg;
+    if (nameStr && strlen(nameStr) > 0) {
+        fullMsg += nameStr;
+        if (msgStr && strlen(msgStr) > 0) {
+            fullMsg += ": ";
+            fullMsg += msgStr;
+        }
+    } else if (msgStr && strlen(msgStr) > 0) {
+        fullMsg = msgStr;
     } else {
-        /* fallback to exception's string representation */
-        stackTrace = JS_ToCString(ctx, obj, &sb);
+        fullMsg = "JavaScript Error";
     }
 
     JS_PrintValueF(ctx, obj, JS_DUMP_LONG);
-    const char *msg = JS_ToCString(ctx, obj, &sb);
 
-    print_errorMessage(msg != NULL ? msg : "JS Error", stackTrace);
+    print_errorMessage(fullMsg.c_str(), stackTrace ? stackTrace : "");
 }
 
 bool JS_IsTypedArray(JSContext *ctx, JSValue val) {

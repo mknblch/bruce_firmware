@@ -14,14 +14,21 @@ extern "C" {
 char *script = NULL;
 char *scriptDirpath = NULL;
 char *scriptName = NULL;
+static FS *pendingScriptFs = NULL;
+static String pendingScriptPath = "";
 
 TaskHandle_t interpreterTaskHandler = NULL;
 
 void interpreterHandler(void *pvParameters) {
     printMemoryUsage("init interpreter");
-    if (script == NULL) { return; }
+    if (script == NULL && pendingScriptFs == NULL) {
+        interpreter_state = -1;
+        interpreterTaskHandler = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
 
-    while (interpreter_state != 2) { vTaskDelay(pdMS_TO_TICKS(500)); }
+    while (interpreter_state != 2) { vTaskDelay(pdMS_TO_TICKS(100)); }
 
     tft.fillScreen(TFT_BLACK);
     tft.setTextSize(FM);
@@ -29,14 +36,31 @@ void interpreterHandler(void *pvParameters) {
     bool psramAvailable = psramFound();
 
     size_t max_alloc = psramAvailable ? ESP.getMaxAllocPsram() : ESP.getMaxAllocHeap();
-    size_t mem_size;
-    if (max_alloc < 150000) {
-        mem_size = (max_alloc / 2 < 65536) ? max_alloc - 8192 : 65536;
-    } else if (psramAvailable && max_alloc > 1000000) {
-        // PSRAM available with plenty of space: allocate up to 512KB for large scripts
-        mem_size = (max_alloc > 4000000) ? 512000 : 256000;
+    size_t mem_size = 0;
+    uint8_t *mem_buf = NULL;
+
+    if (psramAvailable) {
+        if (max_alloc > 4000000) {
+            mem_size = 512000;
+        } else if (max_alloc > 1000000) {
+            mem_size = 256000;
+        } else {
+            mem_size = 100000;
+        }
+        mem_buf = (uint8_t *)ps_malloc(mem_size);
     } else {
-        mem_size = 100000;
+        // On non-PSRAM devices (e.g. Cardputer), allocate largest possible contiguous chunk from heap.
+        // With deferred script loading, system heap is at its maximum here.
+        size_t target_size = (max_alloc > 85000) ? 80000 : (max_alloc > 4096 ? max_alloc - 2048 : max_alloc);
+        while (target_size >= 24000) {
+            mem_buf = (uint8_t *)malloc(target_size);
+            if (mem_buf != NULL) {
+                mem_size = target_size;
+                break;
+            }
+            if (target_size <= 4096) break;
+            target_size -= 4096;
+        }
     }
     log_d(
         "JS engine memory: %zu bytes (max_alloc: %zu, psram: %s)",
@@ -44,19 +68,33 @@ void interpreterHandler(void *pvParameters) {
         max_alloc,
         psramAvailable ? "yes" : "no"
     );
-    if (mem_size < 2000) {
+    if (mem_buf == NULL || mem_size < 2000) {
         print_errorMessage("Failed to allocate memory for JS engine, try restarting the device");
+        if (script) { free((char *)script); script = NULL; }
+        if (scriptDirpath) { free((char *)scriptDirpath); scriptDirpath = NULL; }
+        if (scriptName) { free((char *)scriptName); scriptName = NULL; }
+        pendingScriptFs = NULL;
+        pendingScriptPath = "";
         interpreter_state = -1;
+        interpreterTaskHandler = NULL;
         vTaskDelete(NULL);
         return;
     }
 
-    uint8_t *mem_buf = psramAvailable ? (uint8_t *)ps_malloc(mem_size) : (uint8_t *)malloc(mem_size);
-    if (mem_buf == NULL) {
-        print_errorMessage("Failed to allocate memory for JS engine, try restarting the device");
-        interpreter_state = -1;
-        vTaskDelete(NULL);
-        return;
+    if (script == NULL && pendingScriptFs != NULL) {
+        script = readBigFile(pendingScriptFs, pendingScriptPath);
+        pendingScriptFs = NULL;
+        pendingScriptPath = "";
+        if (script == NULL) {
+            print_errorMessage("Failed to read script file");
+            if (scriptDirpath) { free((char *)scriptDirpath); scriptDirpath = NULL; }
+            if (scriptName) { free((char *)scriptName); scriptName = NULL; }
+            free(mem_buf);
+            interpreter_state = -1;
+            interpreterTaskHandler = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
     }
 
     JSContext *ctx = JS_NewContext(mem_buf, mem_size, &js_stdlib);
@@ -89,14 +127,10 @@ void interpreterHandler(void *pvParameters) {
     size_t scriptSize = strlen(script);
     log_d("Script length: %zu\n", scriptSize);
 
-    JSValue val = JS_Eval(ctx, (const char *)script, scriptSize, scriptName, 0);
+    // Parse and execute script with JS_EVAL_STRIP_COL to omit column debug tables and save JS heap
+    JSValue val = JS_Eval(ctx, (const char *)script, scriptSize, scriptName, JS_EVAL_STRIP_COL);
 
-    run_timers(ctx);
-
-    LongPress = false;
-    if (JS_IsException(val)) { js_fatal_error_handler(ctx); }
-
-    // Clean up.
+    // Free script source buffer immediately after execution starts to release system heap
     free((char *)script);
     script = NULL;
     free((char *)scriptDirpath);
@@ -104,6 +138,12 @@ void interpreterHandler(void *pvParameters) {
     free((char *)scriptName);
     scriptName = NULL;
 
+    run_timers(ctx);
+
+    LongPress = false;
+    if (JS_IsException(val)) { js_fatal_error_handler(ctx); }
+
+    // Clean up.
     js_timers_deinit(ctx);
     JS_FreeContext(ctx);
     free(mem_buf);
@@ -111,6 +151,7 @@ void interpreterHandler(void *pvParameters) {
     printMemoryUsage("deinit interpreter");
 
     interpreter_state = -1;
+    interpreterTaskHandler = NULL;
     vTaskDelete(NULL);
     return;
 }
@@ -153,6 +194,8 @@ void run_bjs_script() {
 bool run_bjs_script_headless(char *code) {
     script = code;
     if (script == NULL) { return false; }
+    pendingScriptFs = NULL;
+    pendingScriptPath = "";
     scriptDirpath = strdup("/scripts");
     scriptName = strdup("index.js");
 
@@ -163,8 +206,9 @@ bool run_bjs_script_headless(char *code) {
 }
 
 bool run_bjs_script_headless(FS &fs, const String &filename) {
-    script = readBigFile(&fs, filename);
-    if (script == NULL) { return false; }
+    pendingScriptFs = &fs;
+    pendingScriptPath = filename;
+    script = NULL;
 
     int slash = filename.lastIndexOf('/');
     if (slash < 0) {

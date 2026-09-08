@@ -36,9 +36,8 @@ void ConfigMenu::optionsMenu() {
         };
 
 #if !defined(LITE_VERSION)
-        if (!appStoreInstalled()) {
-            localOptions.push_back({"Install App Store", []() { installAppStoreJS(); }});
-        }
+        localOptions.push_back({appStoreInstalled() ? "Reinstall App Store" : "Install App Store",
+                                []() { installAppStoreJS(); }});
 #endif
 
         if (bruceConfig.devMode) {
@@ -67,9 +66,14 @@ void ConfigMenu::displayUIMenu() {
             {"Dim Time",    [this]() { setDimmerTimeMenu(); }               },
             {"Orientation", [this]() { lambdaHelper(gsetRotation, true)(); }},
             {"Menu Layout", [this]() { setMainMenuStyleMenu(); }            },
-            {"UI Color",    [this]() { setUIColor(); }                      },
-            {"UI Theme",    [this]() { setTheme(); }                        },
-            {"Back",        []() {}                                         },
+            {"UI Color",    [this]() { setUIColor(); }                                          },
+            {"UI Theme",    [this]() { setTheme(); }                                            },
+            {String("Header RAM: ") + (bruceConfig.showRamHeader ? "ON" : "OFF"),
+             [this]() {
+                 bruceConfig.showRamHeader = !bruceConfig.showRamHeader;
+                 bruceConfig.saveFile();
+             }                                                                                  },
+            {"Back",        []() {}                                                             },
         };
 
         int selected = loopOptions(localOptions, MENU_TYPE_SUBMENU, "Display & UI");

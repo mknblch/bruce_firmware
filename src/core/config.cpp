@@ -73,6 +73,7 @@ JsonDocument BruceConfig::toJson() const {
     setting["badUSBBLEKeyboardLayout"] = badUSBBLEKeyboardLayout;
     setting["badUSBBLEKeyDelay"] = badUSBBLEKeyDelay;
     setting["badUSBBLEShowOutput"] = badUSBBLEShowOutput;
+    setting["showRamHeader"] = showRamHeader;
 
     JsonArray dm = setting["disabledMenus"].to<JsonArray>();
     for (int i = 0; i < disabledMenus.size(); i++) { dm.add(disabledMenus[i]); }
@@ -413,6 +414,12 @@ void BruceConfig::fromFile(bool checkFS) {
     } else {
         count++;
         log_e("Fail");
+    }
+
+    if (!setting["showRamHeader"].isNull()) {
+        showRamHeader = setting["showRamHeader"].as<bool>();
+    } else {
+        showRamHeader = false;
     }
 
     if (!setting["disabledMenus"].isNull()) {

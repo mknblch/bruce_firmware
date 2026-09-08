@@ -302,6 +302,7 @@ JSValue native_httpFetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *a
             ctx, headersObj, http.headerName(i).c_str(), JS_NewString(ctx, http.header(i).c_str())
         );
     }
+    http.end(); // Release network socket and HTTPClient stream buffers early
 
     JSValue obj = JS_NewObject(ctx);
 
@@ -325,10 +326,11 @@ JSValue native_httpFetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *a
             DeserializationError error = deserializeJson(doc, payload, bytesRead);
             if (error) {
                 free(payload);
-                http.end();
                 return JS_ThrowInternalError(ctx, "deserializeJson failed: %s", error.c_str());
             }
-            JS_SetPropertyStr(ctx, obj, "body", js_value_from_json_variant(ctx, doc.as<JsonVariantConst>()));
+            JSValue bodyVal = js_value_from_json_variant(ctx, doc.as<JsonVariantConst>());
+            doc.clear();
+            JS_SetPropertyStr(ctx, obj, "body", bodyVal);
         }
     }
 
@@ -384,7 +386,6 @@ JSValue native_httpFetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *a
     JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, httpResponseCode));
     JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(httpResponseCode >= 200 && httpResponseCode < 300));
 
-    http.end();
     return obj;
 }
 

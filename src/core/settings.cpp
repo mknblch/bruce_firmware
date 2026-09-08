@@ -1758,6 +1758,10 @@ void installAppStoreJS() {
         return;
     }
 
+    if (fs->exists("/BruceJS/Tools/App Store.js")) {
+        fs->remove("/BruceJS/Tools/App Store.js");
+    }
+
     File file = fs->open("/BruceJS/Tools/App Store.js", FILE_WRITE);
     if (!file) {
         displayWarning("Failed to save App Store", true);
@@ -1767,7 +1771,7 @@ void installAppStoreJS() {
     http.end();
     file.close();
 
-    displaySuccess("App Store installed", true);
-    displaySuccess("Goto JS Interpreter -> Tools -> App Store", true);
+    displaySuccess("App Store installed");
+    displaySuccess("Goto JS Interpreter -> Tools -> App Store");
 }
 #endif

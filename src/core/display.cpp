@@ -1289,7 +1289,14 @@ void drawStatusBar() {
         );
     }
 
-    if (clock_set) {
+    if (bruceConfig.showRamHeader) {
+        setTftDisplay(BORDER_PAD_X, BORDER_PAD_X, bruceConfig.priColor, FP, bruceConfig.bgColor);
+        tft.fillRect(BORDER_PAD_X, BORDER_PAD_X, LW * FP * 12, LH * FP, bruceConfig.bgColor);
+        size_t freeH = ESP.getFreeHeap() / 1024;
+        size_t maxA = ESP.getMaxAllocHeap() / 1024;
+        String ramStr = String(freeH) + "k/" + String(maxA) + "k";
+        tft.print(ramStr);
+    } else if (clock_set) {
         setTftDisplay(BORDER_PAD_X, BORDER_PAD_X, bruceConfig.priColor, FP, bruceConfig.bgColor);
         tft.fillRect(BORDER_PAD_X, BORDER_PAD_X, LW * FP * 10, LH * FP, bruceConfig.bgColor);
 #if defined(HAS_RTC)

@@ -1,6 +1,7 @@
 #include "OthersMenu.h"
 
 #include "core/display.h"
+#include "core/memory_monitor.h"
 #include "core/utils.h"
 #include "modules/badusb_ble/ducky_typer.h"
 #include "modules/bjs_interpreter/interpreter.h"
@@ -14,6 +15,7 @@
 
 void OthersMenu::optionsMenu() {
     options = {
+        {"Memory Monitor", showMemoryMonitor          },
         {"QRCodes",      qrcode_menu                  },
         {"Megalodon",    shark_setup                  },
 

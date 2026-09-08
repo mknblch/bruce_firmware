@@ -22,7 +22,6 @@ SRC = [
 CFLAGS = [
     "-Wall",
     "-O2",
-    "-m32",
     "-I" + MQJS_PATH,
 ]
 
@@ -214,6 +213,7 @@ def generate_headers():
 
         with open(os.path.join(BUILD_DIR, "mquickjs_atom.h"), "w") as f:
             subprocess.check_call([GEN, "-a", "-m32"], stdout=f, env=sub_env)
+        shutil.copyfile(os.path.join(BUILD_DIR, "mquickjs_atom.h"), os.path.join(MQJS_PATH, "mquickjs_atom.h"))
 
     except Exception as e:
         print("\nError generating MicroQuickJS headers (gen_mqjs_headers.py).")
