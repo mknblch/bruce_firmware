@@ -73,3 +73,56 @@ bool rf_raw_save(RawRecording recorded) {
     displaySuccess(filename, true);
     return true;
 }
+
+bool rf_raw_save_durations(const std::vector<int> &durations, float frequency, String *outFilename) {
+    if (durations.empty()) return false;
+    FS *fs = nullptr;
+    if (!getFsStorage(fs) || fs == nullptr) {
+        displayError("No space left on device", true);
+        return false;
+    }
+
+    char filename[32];
+    int index = 0;
+
+    if (!fs->exists("/BruceRF")) {
+        if (!fs->mkdir("/BruceRF")) {
+            displayError("Error creating directory", true);
+            return false;
+        }
+    }
+
+    do { snprintf(filename, sizeof(filename), "/BruceRF/raw_%d.sub", index++); } while (fs->exists(filename));
+
+    File file = fs->open(filename, FILE_WRITE, true);
+    if (!file) {
+        displayError("Error creating file", true);
+        return false;
+    }
+
+    file.write((const uint8_t *)"Filetype: Bruce SubGhz File\n", 28);
+    file.write((const uint8_t *)"Version 1\n", 10);
+
+    char line[64];
+    int len = snprintf(line, sizeof(line), "Frequency: %d\n", (int)(frequency * 1000000));
+    file.write((const uint8_t *)line, len);
+
+    file.write((const uint8_t *)"Preset: 0\n", 10);
+    file.write((const uint8_t *)"Protocol: RAW\n", 14);
+    file.write((const uint8_t *)"RAW_Data: ", 10);
+
+    uint16_t values = 0;
+    for (int dur : durations) {
+        if (dur == 0) continue;
+        len = snprintf(line, sizeof(line), "%d ", dur);
+        file.write((const uint8_t *)line, len);
+        values++;
+        if (values % 512 == 0) file.write((const uint8_t *)"\nRAW_Data: ", 11);
+    }
+
+    file.flush();
+    file.close();
+    if (outFilename != nullptr) *outFilename = filename;
+    displaySuccess(filename, false);
+    return true;
+}

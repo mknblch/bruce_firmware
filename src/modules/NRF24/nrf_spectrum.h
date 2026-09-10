@@ -5,6 +5,6 @@
 
 void nrf_spectrum();
 
-String scanChannels(bool web = false);
+String scanChannels(bool web = false, int multiplier = 1);
 
 #endif

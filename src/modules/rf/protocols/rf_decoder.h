@@ -49,10 +49,29 @@ public:
     bool active() const { return _ch != nullptr || _m5Isr; }
     ~RfRxSession() { end(); }
 
+    void setSensitivity(int minTransitions) {
+        _minTransitions = minTransitions;
+    }
+
+    void setIdleTimeout(uint32_t timeoutNs) {
+        _idleTimeoutNs = timeoutNs;
+    }
+
+    void flush() {
+        if (_queue != nullptr) {
+            rmt_rx_done_event_data_t rx_ev;
+            while (xQueueReceive(_queue, &rx_ev, 0) == pdPASS) {}
+        }
+        arm();
+    }
+
 private:
     rmt_channel_handle_t _ch = nullptr;
     QueueHandle_t _queue = nullptr;
     bool _m5Isr = false;
+    bool _armed = false;
+    int _minTransitions = 16;
+    uint32_t _idleTimeoutNs = 30000000;
     // Heap-allocated capture buffer: keeping ~1KB off the (8KB) serialcmds task
     // stack, where rfReceiveSignal runs, avoids stack overflow / corruption.
     rmt_symbol_word_t *_buf = nullptr;

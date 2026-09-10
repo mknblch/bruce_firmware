@@ -6,29 +6,31 @@
 #define CHANNELS 80
 uint8_t channel[CHANNELS];
 
-// The RPD accumulator settles toward 125, so that is full scale for the plot.
-#define NRF_FULL_SCALE 125
-
 // Sweeps the whole 2.4GHz band once and updates the smoothed per-channel
 // levels. Drawing lives in nrf_draw() so the WebUI can scan without a screen.
-String scanChannels(bool web) {
+String scanChannels(bool web, int multiplier) {
     String result = "{";
 
     uint8_t rpdValues[CHANNELS] = {0};
-    digitalWrite(bruceConfigPins.NRF24_bus.io0, LOW);
+    int step = constrain(25 * multiplier, 0, 100);
 
     for (int i = 0; i < CHANNELS; i++) {
+        if (EscPress || AnyKeyPress) break;
         NRFradio.setChannel(i);
         NRFradio.startListening();
-        delayMicroseconds(128);
+        delayMicroseconds(130);
+        int rpd = NRFradio.testRPD() ? 1 : 0;
         NRFradio.stopListening();
 
-        int rpd = NRFradio.testRPD() ? 1 : 0;
-        channel[i] = (channel[i] * 3 + rpd * NRF_FULL_SCALE) / 4;
+        if (rpd) {
+            int newLvl = channel[i] + step;
+            if (newLvl > 100) newLvl = 100;
+            channel[i] = (uint8_t)newLvl;
+        } else {
+            channel[i] = (uint8_t)((channel[i] * 3) / 4);
+        }
         rpdValues[i] = channel[i];
     }
-
-    digitalWrite(bruceConfigPins.NRF24_bus.io0, HIGH);
 
     if (web) {
         for (int i = 0; i < CHANNELS; i++) {
@@ -52,8 +54,7 @@ static void nrf_envelope(const uint8_t *lvl, uint8_t *env, int plotW) {
             frac = 256;
         }
         int v = lvl[ci] + (lvl[ci + 1] - lvl[ci]) * frac / 256;
-        v = v * 100 / NRF_FULL_SCALE;
-        env[i] = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
+        env[i] = (uint8_t)constrain(v, 0, 100);
     }
 }
 
@@ -113,34 +114,58 @@ void nrf_spectrum() {
     NRFradio.setDataRate(RF24_1MBPS);
 
     uint32_t lastFrame = 0, lastRow = 0;
-    while (!check(EscPress)) {
-        scanChannels();
+    int multiplier = 2;
+    memset(channel, 0, sizeof(channel));
+
+    while (1) {
+        if (check(EscPress)) { break; }
+
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == 'g') {
+                    multiplier = (multiplier >= 5) ? 1 : multiplier + 1;
+                    memset(channel, 0, sizeof(channel));
+                    memset(peak, 0, sizeof(peak));
+                }
+            }
+        }
+
+        scanChannels(false, multiplier);
 
         int maxCh = 0;
+        uint8_t maxLvl = 0;
         for (int i = 0; i < CHANNELS; i++) {
             if (channel[i] > peak[i]) peak[i] = channel[i];
-            else if (peak[i]) peak[i]--; // slow decay keeps the hold line readable
-            if (channel[i] > channel[maxCh]) maxCh = i;
+            if (channel[i] > maxLvl) {
+                maxLvl = channel[i];
+                maxCh = i;
+            }
         }
 
         // A full sweep is far quicker than the panel needs to be repainted, so
         // cap the redraw rate and let the radio keep integrating in between.
         if (millis() - lastFrame >= 40) {
             lastFrame = millis();
+            for (int i = 0; i < CHANNELS; i++) {
+                if (peak[i] > channel[i]) peak[i]--; // slow decay keeps the hold line readable
+            }
             nrf_envelope(channel, env, plotW);
             nrf_envelope(peak, envPeak, plotW);
 
             // highlight the busiest carrier and its immediate neighbours
             int hlC = maxCh * (plotW - 1) / (CHANNELS - 1);
-            int hlSpan = (2 * (plotW - 1)) / (CHANNELS - 1);
+            int hlSpan = max(2, (2 * (plotW - 1)) / (CHANNELS - 1));
             plot.trace(env, envPeak, hlC - hlSpan, hlC + hlSpan);
 
             if (millis() - lastRow >= 120) {
                 lastRow = millis();
                 plot.pushRow(env);
+                float peakFreq = 2.400f + maxCh * 0.001f;
                 plot.status(
-                    "peak ch" + String(maxCh) + "  " + String(2.400f + maxCh * 0.001f, 3) + "GHz  " +
-                    String(env[hlC]) + "%"
+                    "pk: ch" + String(maxCh) + " " + String(peakFreq, 3) + "G " +
+                    String(env[hlC]) + "% " + String(multiplier) + "x"
                 );
             }
         }
@@ -152,5 +177,6 @@ void nrf_spectrum() {
     free(env);
     free(envPeak);
     plot.end();
+    returnToMenu = true;
     delay(250);
 }

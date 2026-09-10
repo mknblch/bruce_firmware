@@ -117,16 +117,24 @@ static void IRAM_ATTR rf_m5_edge_isr() {
 }
 
 void RfRxSession::arm() {
+    if (_ch == nullptr) return;
     rmt_receive_config_t cfg = {};
-    cfg.signal_range_min_ns = 3000; // 3µs minimum (framework-proven); noise is
-                                    // rejected by the transition-count floor below
-    // 30ms idle ends the capture. Must exceed the largest inter-frame gap so that
-    // several repeats stay in one capture (the decoder needs two gaps to lock on,
-    // exactly like the continuous OOK receiver). NICE's gap is ~25ms; the RMT
-    // hardware idle threshold maxes out near 32ms.
-    cfg.signal_range_max_ns = 30000000;
+    cfg.signal_range_min_ns = 3000; // 3µs minimum
+    cfg.signal_range_max_ns = _idleTimeoutNs;
     esp_err_t err = rmt_receive(_ch, _buf, _bufSymbols * sizeof(rmt_symbol_word_t), &cfg);
-    if (err != ESP_OK) RF_DBG("rmt_receive failed: %d", (int)err);
+    if (err == ESP_OK) {
+        _armed = true;
+    } else {
+        _armed = false;
+        if (err == ESP_ERR_INVALID_STATE) {
+            rmt_disable(_ch);
+            rmt_enable(_ch);
+            if (rmt_receive(_ch, _buf, _bufSymbols * sizeof(rmt_symbol_word_t), &cfg) == ESP_OK) {
+                _armed = true;
+            }
+        }
+        if (!_armed) RF_DBG("rmt_receive failed: %d", (int)err);
+    }
 }
 
 bool RfRxSession::begin() {
@@ -167,6 +175,7 @@ bool RfRxSession::begin() {
         return false;
     }
     rmt_enable(_ch);
+    _armed = false;
     arm();
     return true;
 }
@@ -175,10 +184,12 @@ bool RfRxSession::poll(std::vector<int> &durations) {
     if (_m5Isr) {
         int ready = 0;
         uint32_t now = micros();
+        int threshold = (_minTransitions > 0) ? _minTransitions : RF_M5_RX_MIN_TRANSITIONS;
+        uint32_t idleUs = _idleTimeoutNs / 1000;
 
         portENTER_CRITICAL(&rf_m5_mux);
-        if (rf_m5_ready_count == 0 && rf_m5_count > 0 && (uint32_t)(now - rf_m5_last_edge_us) > 30000) {
-            if (rf_m5_count >= RF_M5_RX_MIN_TRANSITIONS) {
+        if (rf_m5_ready_count == 0 && rf_m5_count > 0 && (uint32_t)(now - rf_m5_last_edge_us) > idleUs) {
+            if (rf_m5_count >= threshold) {
                 rf_m5_ready_count = rf_m5_count;
             } else {
                 rf_m5_count = 0;
@@ -210,14 +221,36 @@ bool RfRxSession::poll(std::vector<int> &durations) {
     }
 
     if (_ch == nullptr) return false;
+
+    // CC1101 MARCSTATE watchdog: ensure radio stays in RX mode (state 0x0D)
+    if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+        static uint32_t lastCcCheck = 0;
+        uint32_t now = millis();
+        if (now - lastCcCheck > 100) {
+            lastCcCheck = now;
+            uint8_t marcstate = ELECHOUSE_cc1101.SpiReadStatus(CC1101_MARCSTATE) & 0x1F;
+            if (marcstate != 0x0D) { // Not in RX state (e.g. idle, overflow)
+                ELECHOUSE_cc1101.SpiStrobe(CC1101_SIDLE);
+                ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
+                ELECHOUSE_cc1101.SpiStrobe(CC1101_SRX);
+            }
+        }
+    }
+
+    if (!_armed) {
+        arm();
+    }
+
     rmt_rx_done_event_data_t rx;
     if (xQueueReceive(_queue, &rx, 0) == pdPASS) {
+        _armed = false;
         rf_symbols_to_durations(rx.received_symbols, rx.num_symbols, durations);
         rf_filter_m5_rx_glitches(durations);
         arm(); // re-arm for the next signal
 
         // Reject noise bursts: too few edges to be a real frame.
-        if ((int)durations.size() < RF_RX_MIN_TRANSITIONS) {
+        int threshold = (_minTransitions > 0) ? _minTransitions : RF_RX_MIN_TRANSITIONS;
+        if ((int)durations.size() < threshold) {
             RF_DBG("capture ignored (noise): %u durations", (unsigned)durations.size());
             durations.clear();
             return false;

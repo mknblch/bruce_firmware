@@ -121,10 +121,10 @@ void SpectrumPlot::trace(const uint8_t *env, const uint8_t *envPeak, int hlL, in
     for (int i = 0; i < _plotW; i++) {
         int x = _plotL + i;
 
-        int hLive = (int)env[i] * (_specH - 1) / 100;
+        int hLive = constrain((int)env[i] * (_specH - 1) / 100, 0, _specH - 1);
         int grass = (int)(sp_rnd() % 3); // animated noise floor
         if (hLive < grass) hLive = grass;
-        int hPeak = envPeak ? (int)envPeak[i] * (_specH - 1) / 100 : 0;
+        int hPeak = envPeak ? constrain((int)envPeak[i] * (_specH - 1) / 100, 0, _specH - 1) : 0;
         if (hPeak < hLive) hPeak = hLive;
 
         int yLive = _specBot - hLive;
@@ -161,10 +161,12 @@ void SpectrumPlot::drawWaterfall() {
 
         // flush equal-coloured columns as single spans, the rows are wide
         int runStart = 0;
-        uint16_t runCol = sp_heat[row[0] * (SP_HEAT_N - 1) / 100];
+        int heatIdx0 = constrain((int)row[0] * (SP_HEAT_N - 1) / 100, 0, SP_HEAT_N - 1);
+        uint16_t runCol = sp_heat[heatIdx0];
         for (int i = 1; i <= _plotW; i++) {
             bool last = (i == _plotW);
-            uint16_t c = last ? runCol : sp_heat[row[i] * (SP_HEAT_N - 1) / 100];
+            int heatIdx = last ? 0 : constrain((int)row[i] * (SP_HEAT_N - 1) / 100, 0, SP_HEAT_N - 1);
+            uint16_t c = last ? runCol : sp_heat[heatIdx];
             if (last || c != runCol) {
                 tft.drawFastHLine(_plotL + runStart, y, i - runStart, runCol);
                 runStart = i;

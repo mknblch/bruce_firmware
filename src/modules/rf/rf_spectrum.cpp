@@ -5,6 +5,7 @@
 #include "protocols/rf_config.h"
 #include "protocols/rf_decoder.h"
 #include "rf_utils.h"
+#include "save.h"
 #include "structs.h"
 
 // Plot band, derived from the panel so the graph never collides with the title
@@ -18,7 +19,7 @@ static inline uint16_t rf_grid_color() {
     return blendColors(bruceConfig.bgColor, bruceConfig.priColor, 55);
 }
 static inline uint16_t rf_label_color() {
-    return blendColors(bruceConfig.bgColor, bruceConfig.priColor, 170);
+    return blendColors(bruceConfig.priColor, TFT_WHITE, 120);
 }
 
 // Frame plus a single status line at the bottom. Drawn once, and again only
@@ -108,6 +109,7 @@ void rf_spectrum() {
     uint8_t channelLvl[64] = {0};
     uint8_t channelPeak[64] = {0};
     uint32_t lastFrame = 0, lastRow = 0;
+    int multiplier = 2;
 
     while (1) {
         if (check(EscPress)) { break; }
@@ -121,6 +123,18 @@ void rf_spectrum() {
             continue;
         }
 
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == 'g') {
+                    multiplier = (multiplier >= 5) ? 1 : multiplier + 1;
+                    memset(channelLvl, 0, sizeof(channelLvl));
+                    memset(channelPeak, 0, sizeof(channelPeak));
+                }
+            }
+        }
+
         int startIdx = range_limits[bruceConfigPins.rfScanRange][0];
         int endIdx = range_limits[bruceConfigPins.rfScanRange][1];
         int numFreqs = endIdx - startIdx + 1;
@@ -130,18 +144,23 @@ void rf_spectrum() {
         int maxRssiDbm = -120;
 
         for (int i = 0; i < numFreqs; i++) {
-            if (EscPress || SelPress) break;
+            if (EscPress || SelPress || AnyKeyPress) break;
             float freq = subghz_frequency_list[startIdx + i];
             setMHZ(freq);
-            delayMicroseconds(500);
+            delayMicroseconds(900);
             int rssi = ELECHOUSE_cc1101.getRssi();
             tft.drawPixel(0, 0, 0);
 
-            int rawPct = map(constrain(rssi, -95, -20), -95, -20, 0, 100);
-            channelLvl[i] = (channelLvl[i] * 3 + rawPct) / 4;
+            int rawPct = (rssi <= -88) ? 0 : map(constrain(rssi, -88, -25), -88, -25, 0, 100);
+            rawPct = constrain(rawPct * multiplier, 0, 100);
+
+            if (rawPct > channelLvl[i]) {
+                channelLvl[i] = (uint8_t)rawPct;
+            } else {
+                channelLvl[i] = (uint8_t)((channelLvl[i] * 3 + rawPct) / 4);
+            }
 
             if (channelLvl[i] > channelPeak[i]) channelPeak[i] = channelLvl[i];
-            else if (channelPeak[i]) channelPeak[i]--;
 
             if (rssi > maxRssiDbm) {
                 maxRssiDbm = rssi;
@@ -151,6 +170,9 @@ void rf_spectrum() {
 
         if (millis() - lastFrame >= 40) {
             lastFrame = millis();
+            for (int i = 0; i < numFreqs; i++) {
+                if (channelPeak[i] > channelLvl[i]) channelPeak[i]--;
+            }
             rf_envelope(channelLvl, numFreqs, env, plotW);
             rf_envelope(channelPeak, numFreqs, envPeak, plotW);
 
@@ -163,7 +185,8 @@ void rf_spectrum() {
                 plot.pushRow(env);
                 float peakFreq = subghz_frequency_list[startIdx + maxIdx];
                 plot.status(
-                    "peak: " + String(peakFreq, 2) + "MHz " + String(maxRssiDbm) + "dBm [" +
+                    "pk: " + String(peakFreq, 2) + "M " + String(maxRssiDbm) + "dBm " +
+                    String(multiplier) + "x [" +
                     String(subghz_frequency_ranges[bruceConfigPins.rfScanRange]) + "]"
                 );
             }
@@ -186,10 +209,26 @@ static String format_timebase(uint32_t usPerPx) {
     return String(usPerPx) + "us/px";
 }
 
+struct SensiLevel {
+    const char *label;
+    int minTransitions;
+};
+
+static const SensiLevel sensiLevels[] = {
+    { "Hi", 4 },    // High sensitivity: catches any burst (4+ transitions)
+    { "Norm", 10 }, // Normal: standard balanced sensitivity (10+ transitions)
+    { "Med", 18 },  // Medium: filters noise spikes (18+ transitions)
+    { "Low", 30 }   // Low: strict, multi-byte / long frame transmissions only (30+ transitions)
+};
+static const size_t numSensi = sizeof(sensiLevels) / sizeof(sensiLevels[0]);
+
 static void render_rf_squarewave(
     const std::vector<int> &durations,
     uint32_t usPerPx,
+    int32_t offsetUs,
     bool isHeld,
+    bool holdNext,
+    const char *sensiLabel,
     bool showInitialPrompt
 ) {
     const int top = rf_plot_top();
@@ -215,12 +254,16 @@ static void render_rf_squarewave(
 
     // Compose bottom info line
     String info = String(bruceConfigPins.rfFreq, 2) + "M " + format_timebase(usPerPx);
+    if (offsetUs > 0) {
+        info += " +" + (offsetUs >= 1000 ? String(offsetUs / 1000.0, 1) + "ms" : String(offsetUs) + "us");
+    }
+    info += " " + String(sensiLabel);
 
     if (durations.empty()) {
         if (showInitialPrompt) {
             tft.setTextSize(FP);
             tft.setTextColor(rf_label_color(), bruceConfig.bgColor);
-            String prompt = "Waiting for RF signal...";
+            String prompt = holdNext ? "Waiting for signal [HOLD]..." : "Waiting for RF signal...";
             int tw = prompt.length() * 6 * FP;
             int tx = left + (width - tw) / 2;
             int ty = top + (bot - top) / 2 - 4;
@@ -244,6 +287,8 @@ static void render_rf_squarewave(
 
     if (isHeld) {
         info += " [HOLD]";
+    } else if (holdNext) {
+        info += " [ARMED]";
     }
 
     // Draw bottom status bar
@@ -254,16 +299,31 @@ static void render_rf_squarewave(
 
     if (durations.empty() || numRows <= 0) return;
 
-    // Draw waveform trace
+    // Draw waveform trace with offset translation
     int curRow = 0;
     int curX = left;
     int curLevel = -1; // -1: uninitialized, 0: LOW, 1: HIGH
     uint32_t remainderUs = 0;
+    uint32_t elapsedUs = 0;
 
     for (int dur : durations) {
         if (dur == 0) continue;
         int level = (dur > 0) ? 1 : 0;
         uint32_t us = (uint32_t)abs(dur);
+
+        if (elapsedUs + us <= (uint32_t)offsetUs) {
+            elapsedUs += us;
+            curLevel = level;
+            continue;
+        }
+
+        uint32_t visibleUs = us;
+        if (elapsedUs < (uint32_t)offsetUs) {
+            visibleUs = (elapsedUs + us) - (uint32_t)offsetUs;
+            elapsedUs = offsetUs;
+        } else {
+            elapsedUs += us;
+        }
 
         int rowY = top + curRow * rowPitch;
 
@@ -274,10 +334,10 @@ static void render_rf_squarewave(
         curLevel = level;
 
         // Calculate pixel length with timing remainder accumulator
-        uint32_t totalDur = us + remainderUs;
+        uint32_t totalDur = visibleUs + remainderUs;
         int px = totalDur / usPerPx;
         remainderUs = totalDur % usPerPx;
-        if (px == 0 && us > 0) px = 1;
+        if (px == 0 && visibleUs > 0) px = 1;
 
         while (px > 0 && curRow < numRows) {
             rowY = top + curRow * rowPitch;
@@ -310,25 +370,106 @@ static void render_rf_squarewave(
 
 //@Pirata
 void rf_SquareWave() {
+    bruceConfigPins.setRfFreq(bruceConfigPins.rfFreq, 1);
     if (!initRfModule("rx", bruceConfigPins.rfFreq)) return;
+    if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+        ELECHOUSE_cc1101.setDcFilterOff(true);
+    }
 
     RfRxSession rx;
+    rx.setIdleTimeout(12000000); // 12ms for snappy real-time visualizer updates
     if (!rx.begin()) {
         deinitRfModule();
         return;
     }
 
-    const uint32_t zoomLevels[] = { 10, 20, 50, 100, 250, 500, 1000, 2500, 5000 };
+    const uint32_t zoomLevels[] = { 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000, 2500, 5000, 10000 };
     const size_t numZoom = sizeof(zoomLevels) / sizeof(zoomLevels[0]);
-    size_t zoomIdx = 2; // default 50 us/px
+    size_t zoomIdx = 5; // default 50 us/px
+    int32_t offsetUs = 0;
+    size_t sensiIdx = 0; // default Hi (maximum sensitivity)
+    rx.setSensitivity(sensiLevels[sensiIdx].minTransitions);
     bool isHeld = false;
+    bool holdNext = false;
     std::vector<int> durations;
     std::vector<int> lastDurations;
 
-PRINT:
+    const int numFreqs = sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]);
+    int freqIdx = 0;
+    for (int i = 0; i < numFreqs; i++) {
+        if (fabs(subghz_frequency_list[i] - bruceConfigPins.rfFreq) < 0.001f) {
+            freqIdx = i;
+            break;
+        }
+    }
+
     tft.drawPixel(0, 0, 0);
     draw_rf_header("RF SquareWave", String(bruceConfigPins.rfFreq, 2) + " MHz");
-    render_rf_squarewave(lastDurations, zoomLevels[zoomIdx], isHeld, lastDurations.empty());
+    render_rf_squarewave(
+        lastDurations,
+        zoomLevels[zoomIdx],
+        offsetUs,
+        isHeld,
+        holdNext,
+        sensiLevels[sensiIdx].label,
+        lastDurations.empty()
+    );
+
+    auto changeFreq = [&](int delta) {
+        freqIdx = (freqIdx + delta + numFreqs) % numFreqs;
+        float newFreq = subghz_frequency_list[freqIdx];
+        bruceConfigPins.setRfFreq(newFreq, 1);
+        setMHZ(newFreq);
+        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+            ELECHOUSE_cc1101.setDcFilterOff(true);
+        }
+        rx.flush();
+        lastDurations.clear();
+        offsetUs = 0;
+        if (isHeld) {
+            isHeld = false;
+            holdNext = false;
+        }
+        tft.drawPixel(0, 0, 0);
+        draw_rf_header("RF SquareWave", String(bruceConfigPins.rfFreq, 2) + " MHz");
+        return true;
+    };
+
+    auto zoomWaveform = [&](int delta) {
+        if (delta < 0) { // Zoom In
+            if (zoomIdx > 0) {
+                zoomIdx--;
+                return true;
+            }
+        } else if (delta > 0) { // Zoom Out
+            if (zoomIdx + 1 < numZoom) {
+                zoomIdx++;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto translateWaveform = [&](int dir) {
+        if (lastDurations.empty()) return false;
+        uint32_t totalUs = 0;
+        for (int d : lastDurations) totalUs += abs(d);
+        int32_t stepUs = (int32_t)(rf_plot_width() * zoomLevels[zoomIdx] / 4);
+        if (stepUs < 1) stepUs = 1;
+
+        if (dir < 0) { // Left (earlier in time)
+            if (offsetUs > 0) {
+                offsetUs = max((int32_t)0, offsetUs - stepUs);
+                return true;
+            }
+        } else if (dir > 0) { // Right (later in time)
+            if (offsetUs + stepUs < (int32_t)totalUs) {
+                offsetUs += stepUs;
+                return true;
+            }
+        }
+        return false;
+    };
 
     while (1) {
         bool reRender = false;
@@ -336,61 +477,124 @@ PRINT:
         if (!isHeld && rx.poll(durations)) {
             if (!durations.empty()) {
                 lastDurations = durations;
+                offsetUs = 0;
+                if (holdNext) {
+                    isHeld = true;
+                    holdNext = false;
+                }
                 reRender = true;
             }
         }
 
         if (check(EscPress)) { break; }
 
-        if (check(NextPress) || check(UpPress)) {
-            if (zoomIdx > 0) {
-                zoomIdx--;
-                reRender = true;
-            }
-        } else if (check(PrevPress) || check(DownPress)) {
-            if (zoomIdx + 1 < numZoom) {
-                zoomIdx++;
-                reRender = true;
-            }
+        if (check(UpPress)) {
+            if (zoomWaveform(-1)) reRender = true;
+        } else if (check(DownPress)) {
+            if (zoomWaveform(+1)) reRender = true;
         }
 
-        char key = checkLetterShortcutPress();
-        if (key > 0) {
-            char lowerKey = tolower(key);
-            if (lowerKey == 'h' || lowerKey == 'p' || key == ' ') {
-                isHeld = !isHeld;
-                reRender = true;
-            } else if (key == '+' || key == '=') {
-                if (zoomIdx > 0) {
-                    zoomIdx--;
-                    reRender = true;
-                }
-            } else if (key == '-' || key == '_') {
-                if (zoomIdx + 1 < numZoom) {
-                    zoomIdx++;
-                    reRender = true;
-                }
-            } else if (lowerKey == 'c') {
-                lastDurations.clear();
-                reRender = true;
-            }
+        if (check(PrevPagePress)) {
+            if (translateWaveform(-1)) reRender = true;
+        } else if (check(NextPagePress)) {
+            if (translateWaveform(+1)) reRender = true;
+        } else if (check(PrevPress)) {
+            if (translateWaveform(-1)) reRender = true;
+        } else if (check(NextPress)) {
+            if (translateWaveform(+1)) reRender = true;
         }
 
         if (setMHZMenu()) {
-            rx.end();
-            rx.begin();
+            for (int i = 0; i < numFreqs; i++) {
+                if (fabs(subghz_frequency_list[i] - bruceConfigPins.rfFreq) < 0.001f) {
+                    freqIdx = i;
+                    break;
+                }
+            }
+            if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+                ELECHOUSE_cc1101.setDcFilterOff(true);
+            }
+            rx.flush();
             lastDurations.clear();
-            goto PRINT;
-        } else if (check(SelPress)) {
-            isHeld = !isHeld;
+            offsetUs = 0;
+            isHeld = false;
+            holdNext = false;
+            tft.drawPixel(0, 0, 0);
+            draw_rf_header("RF SquareWave", String(bruceConfigPins.rfFreq, 2) + " MHz");
             reRender = true;
         }
 
-        if (reRender) {
-            render_rf_squarewave(lastDurations, zoomLevels[zoomIdx], isHeld, lastDurations.empty());
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            for (auto i : k.word) {
+                char lowerKey = tolower((char)i);
+                if (i == '[' || i == '{') {
+                    if (changeFreq(-1)) reRender = true;
+                } else if (i == ']' || i == '}') {
+                    if (changeFreq(+1)) reRender = true;
+                } else if (i == ';' || (uint8_t)i == 0xDA || i == '+' || i == '=') {
+                    if (zoomWaveform(-1)) reRender = true;
+                } else if (i == '.' || (uint8_t)i == 0xD9 || i == '-' || i == '_') {
+                    if (zoomWaveform(+1)) reRender = true;
+                } else if (i == ',' || (uint8_t)i == 0xD8) {
+                    if (translateWaveform(-1)) reRender = true;
+                } else if (i == '/' || (uint8_t)i == 0xD7) {
+                    if (translateWaveform(+1)) reRender = true;
+                } else if (lowerKey == 'h' || lowerKey == 'p') {
+                    if (isHeld) {
+                        isHeld = false;
+                        holdNext = false;
+                    } else if (holdNext) {
+                        holdNext = false;
+                    } else if (!lastDurations.empty()) {
+                        isHeld = true;
+                    } else {
+                        holdNext = true;
+                    }
+                    reRender = true;
+                } else if (lowerKey == 's') {
+                    if (lastDurations.empty()) {
+                        displayWarning("No signal to save!", false);
+                        delay(700);
+                    } else {
+                        String savedFile;
+                        if (rf_raw_save_durations(lastDurations, bruceConfigPins.rfFreq, &savedFile)) {
+                            delay(1200);
+                        }
+                    }
+                    draw_rf_header("RF SquareWave", String(bruceConfigPins.rfFreq, 2) + " MHz");
+                    reRender = true;
+                } else if (lowerKey == 'c') {
+                    lastDurations.clear();
+                    offsetUs = 0;
+                    isHeld = false;
+                    holdNext = false;
+                    reRender = true;
+                } else if (lowerKey == 'g' || lowerKey == 't') {
+                    sensiIdx = (sensiIdx + 1) % numSensi;
+                    rx.setSensitivity(sensiLevels[sensiIdx].minTransitions);
+                    reRender = true;
+                } else if (i == ' ') {
+                    isHeld = false;
+                    holdNext = false;
+                    reRender = true;
+                }
+            }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        if (reRender) {
+            render_rf_squarewave(
+                lastDurations,
+                zoomLevels[zoomIdx],
+                offsetUs,
+                isHeld,
+                holdNext,
+                sensiLevels[sensiIdx].label,
+                lastDurations.empty()
+            );
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
     rx.end();
     returnToMenu = true;
@@ -495,18 +699,21 @@ void rf_CC1101_rssi() {
                         range_limits[bruceConfigPins.rfScanRange][0] + 1;
 
             int space = rf_plot_width() / range;
+            int barW = max(1, space - 1);
             int max_idx = 0;
             for (int i = 0; i < range; i++) {
                 if (EscPress || SelPress) break;
                 setMHZ(subghz_frequency_list[range_limits[bruceConfigPins.rfScanRange][0] + i]);
-                vTaskDelay(pdMS_TO_TICKS(5));
+                delayMicroseconds(900);
                 int rssi = ELECHOUSE_cc1101.getRssi();
                 tft.drawPixel(0, 0, 0); // To make sure CC1101 shared with TFT works properly
-                int size = map(rssi, -95, -20, 0, max_bar_size);
+                int size = map(constrain(rssi, -95, -20), -95, -20, 0, max_bar_size);
+                size = constrain(size, 0, max_bar_size);
                 if (size > bar_size[i]) bar_size[i] = size;
                 else bar_size[i] = bar_size[i] - (bar_size[i] - size) / 2; // slow down decrease
+                bar_size[i] = constrain(bar_size[i], 0, max_bar_size);
                 tft.fillRect(
-                    rf_plot_left() + i * space, bot - bar_size[i], space - 2, bar_size[i], bruceConfig.priColor
+                    rf_plot_left() + i * space, bot - bar_size[i], barW, bar_size[i], bruceConfig.priColor
                 );
                 tft.fillRect(
                     rf_plot_left() + i * space, top, space, max_bar_size - bar_size[i], bruceConfig.bgColor

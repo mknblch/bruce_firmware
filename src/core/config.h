@@ -54,7 +54,7 @@ public:
 
 #ifdef HAS_RGB_LED
     // Led
-    int ledBright = 50;
+    int ledBright = 0;
     uint32_t ledColor = 0x960064;
     int ledBlinkEnabled = 1;
     int ledEffect = 0;

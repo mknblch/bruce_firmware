@@ -149,7 +149,7 @@ void cc1101ApplyFixedFreqOokPreset(bool isTx) {
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_FSCTRL1, 0x06);
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_MDMCFG0, 0x00);
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_MDMCFG1, 0x00);
-    ELECHOUSE_cc1101.SpiWriteReg(CC1101_MDMCFG2, 0x30);
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_MDMCFG2, 0x30 | 0x80); // 0xB0: DC filter OFF (DEM_DCFILT_OFF = 1)
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_MDMCFG3, 0x32);
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_MDMCFG4, 0x67);
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_MCSM0, 0x18);
@@ -160,8 +160,8 @@ void cc1101ApplyFixedFreqOokPreset(bool isTx) {
         ELECHOUSE_cc1101.setPA(12);
     } else {
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FIFOTHR, 0x07);
-        ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL0, 0x40);
-        ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL1, 0x01);
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL0, 0x91); // DC filter OFF, proper averaging
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL1, 0x00);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL2, 0xC7);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND1, 0xB6);
     }
@@ -415,20 +415,29 @@ void setMHZ(float frequency) {
         }
 #endif
         const bool preciseCalibration = (bruceConfigPins.rfFxdFreq);
-        const uint8_t previousMode = preciseCalibration ? ELECHOUSE_cc1101.getMode() : 0;
-        const uint8_t targetMode =
-            preciseCalibration ? (previousMode != 0 ? previousMode : cc1101_mode_hint) : 0;
-        const bool isTxProfile = (targetMode == 1);
+        uint8_t currentMode = ELECHOUSE_cc1101.getMode();
+        if (currentMode == 0 && cc1101_mode_hint != 0) {
+            currentMode = cc1101_mode_hint;
+        }
+        const bool isTxProfile = (currentMode == 1);
 
-        if (preciseCalibration && previousMode != 0) ELECHOUSE_cc1101.setSidle();
+        if (currentMode != 0) {
+            ELECHOUSE_cc1101.setSidle();
+            if (currentMode == 2) {
+                ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
+            }
+        }
 
         ELECHOUSE_cc1101.setMHZ(frequency);
 
         if (preciseCalibration) {
             cc1101ApplyPreciseCalibration(frequency, isTxProfile);
+        }
 
-            if (previousMode == 1) ELECHOUSE_cc1101.SetTx();
-            else if (previousMode == 2) ELECHOUSE_cc1101.SetRx();
+        if (currentMode == 1) {
+            ELECHOUSE_cc1101.SetTx();
+        } else if (currentMode == 2) {
+            ELECHOUSE_cc1101.SetRx();
         }
     }
 }
@@ -534,15 +543,14 @@ rmt_channel_handle_t setup_rf_rx() {
 }
 
 bool setMHZMenu() {
-    if (bruceConfigPins.rfModule != CC1101_SPI_MODULE) return false;
     if (check(SelPress)) {
         options = {};
         int ind = 0;
         int arraySize = sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]);
         for (int i = 0; i < arraySize; i++) {
-            if (subghz_frequency_list[i] - bruceConfigPins.rfFreq < 0.1) ind = i;
+            if (fabs(subghz_frequency_list[i] - bruceConfigPins.rfFreq) < 0.001f) ind = i;
             String tmp = String(subghz_frequency_list[i], 2) + "Mhz";
-            options.push_back({tmp.c_str(), [=]() { bruceConfigPins.rfFreq = subghz_frequency_list[i]; }});
+            options.push_back({tmp.c_str(), [=]() { bruceConfigPins.setRfFreq(subghz_frequency_list[i], 1); }});
         }
         loopOptions(options, ind);
         options.clear();

@@ -242,6 +242,9 @@ struct box_t {
 // This function is used in loopTask to get the latest key press.
 keyStroke _getKeyPress() {
 #ifndef USE_TFT_eSPI_TOUCH
+    if (!KeyStroke.pressed && !AnyKeyPress && KeyStroke.word.empty()) {
+        return KeyStroke;
+    }
     vTaskSuspend(xHandle);
     keyStroke key = KeyStroke;
     KeyStroke.Clear();
