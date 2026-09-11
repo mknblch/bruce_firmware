@@ -325,14 +325,25 @@ bool txSubFile(RfCodes &selected_code, bool hideDefaultUI) {
             }
         }
 
-        // RAW_Data / Data_RAW: one (long) signal per data line, BinRAW pairs it
-        // with Bit_RAW. RAW protocol ignores Bit.
-        for (size_t i = 0; i < rawDataList.size(); i++) {
-            selected_code.data = rawDataList[i];
-            if (i < bitRawList.size()) selected_code.Bit = bitRawList[i];
+        // RAW_Data / Data_RAW: for RAW protocol, concatenate all lines and send once;
+        // for BinRAW, pair each line with Bit_RAW.
+        if (selected_code.protocol == "RAW" && !rawDataList.empty()) {
+            String combinedData = "";
+            for (size_t i = 0; i < rawDataList.size(); i++) {
+                if (i > 0) combinedData += " ";
+                combinedData += rawDataList[i];
+            }
+            selected_code.data = combinedData;
             sendRfCommand(selected_code, hideDefaultUI);
             sent++;
-            if (check(EscPress)) break;
+        } else {
+            for (size_t i = 0; i < rawDataList.size(); i++) {
+                selected_code.data = rawDataList[i];
+                if (i < bitRawList.size()) selected_code.Bit = bitRawList[i];
+                sendRfCommand(selected_code, hideDefaultUI);
+                sent++;
+                if (check(EscPress)) break;
+            }
         }
         addToRecentCodes(selected_code);
     }
@@ -405,23 +416,20 @@ void sendRfCommand(struct RfCodes rfcode, bool hideDefaultUI) {
         }
     }
 
+    float freqMhz = (frequency > 10000) ? (frequency / 1000000.0f) : (float)frequency;
+    if (freqMhz < 280.0f || freqMhz > 928.0f) {
+        freqMhz = bruceConfigPins.rfFreq;
+    }
+
     // init transmitter
-    if (!initRfModule("", frequency / 1000000.0)) return;
+    if (!initRfModule("tx", freqMhz)) return;
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) { // CC1101 in use
-        // derived from
-        // https://github.com/LSatan/SmartRC-CC1101-Driver-Lib/blob/master/examples/Rc-Switch%20examples%20cc1101/SendDemo_cc1101/SendDemo_cc1101.ino
-        ELECHOUSE_cc1101.setModulation(modulation);
-        if (deviation) ELECHOUSE_cc1101.setDeviation(deviation);
-        if (rxBW)
-            ELECHOUSE_cc1101.setRxBW(
-                rxBW
-            ); // Set the Receive Bandwidth in kHz. Value from 58.03 to 812.50. Default is 812.50 kHz.
-        if (dataRate) ELECHOUSE_cc1101.setDRate(dataRate);
+        if (modulation != 2) ELECHOUSE_cc1101.setModulation(modulation);
+        if (deviation != 1.58f && deviation > 0) ELECHOUSE_cc1101.setDeviation(deviation);
+        if (rxBW != 270.83f && rxBW > 0) ELECHOUSE_cc1101.setRxBW(rxBW);
+        if (dataRate != 10.0f && dataRate > 0) ELECHOUSE_cc1101.setDRate(dataRate);
         pinMode(bruceConfigPins.CC1101_bus.io0, OUTPUT);
-        ELECHOUSE_cc1101.setPA(
-            12
-        ); // set TxPower. The following settings are possible depending on the frequency band.  (-30  -20 -15
-        // -10  -6    0    5    7    10   11   12)   Default is max!
+        ELECHOUSE_cc1101.setPA(12);
         ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
         ioExpander.turnPinOnOff(IO_EXP_CC_TX, HIGH);
         ELECHOUSE_cc1101.SetTx();
@@ -432,40 +440,26 @@ void sendRfCommand(struct RfCodes rfcode, bool hideDefaultUI) {
             Serial.println(modulation);
             return;
         }
-        initRfModule("tx", frequency / 1000000.0);
     }
 
     if (protocol == "RAW") {
-        // count the number of elements of RAW_Data
-        int buff_size = 0;
-        int index = 0;
-        while (index >= 0) {
-            index = data.indexOf(' ', index + 1);
-            buff_size++;
-        }
-        // alloc buffer for transmittimings
-        int *transmittimings =
-            (int *)calloc(sizeof(int), buff_size + 1); // should be smaller the data.length()
-        size_t transmittimings_idx = 0;
-
-        // split data into words, convert to int, and store them in transmittimings
+        std::vector<int> durs;
         int startIndex = 0;
-        index = 0;
-        for (transmittimings_idx = 0; transmittimings_idx < buff_size; transmittimings_idx++) {
-            index = data.indexOf(' ', startIndex);
-            if (index == -1) {
-                transmittimings[transmittimings_idx] = data.substring(startIndex).toInt();
-            } else {
-                transmittimings[transmittimings_idx] = data.substring(startIndex, index).toInt();
+        int len = data.length();
+        while (startIndex < len) {
+            int spaceIdx = data.indexOf(' ', startIndex);
+            String token = (spaceIdx == -1) ? data.substring(startIndex) : data.substring(startIndex, spaceIdx);
+            token.trim();
+            if (token.length() > 0) {
+                int d = token.toInt();
+                if (d != 0) durs.push_back(d);
             }
-            startIndex = index + 1;
+            if (spaceIdx == -1) break;
+            startIndex = spaceIdx + 1;
         }
-        transmittimings[transmittimings_idx] = 0; // termination
 
-        // send rf command
         if (!hideDefaultUI) { displayTextLine("Sending.."); }
-        rfTransmitRawTimings(transmittimings);
-        free(transmittimings);
+        rf_tx_durations(durs);
     } else if (protocol == "BinRAW") {
         // transform from "00 01 02 ... FF" into "00000000 00000001 00000010 .... 11111111"
         rfcode.data = hexStrToBinStr(rfcode.data);

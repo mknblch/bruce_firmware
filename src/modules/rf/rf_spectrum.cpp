@@ -4,6 +4,7 @@
 #include "core/spectrum_plot.h"
 #include "protocols/rf_config.h"
 #include "protocols/rf_decoder.h"
+#include "protocols/rf_encoder.h"
 #include "rf_utils.h"
 #include "save.h"
 #include "structs.h"
@@ -564,11 +565,35 @@ void rf_SquareWave() {
                     }
                     draw_rf_header("RF SquareWave", String(bruceConfigPins.rfFreq, 2) + " MHz");
                     reRender = true;
+                } else if (lowerKey == 'r') {
+                    if (lastDurations.empty()) {
+                        displayWarning("No signal to replay!", false);
+                        delay(700);
+                    } else {
+                        displayTextLine("Replaying...");
+                        rx.end();
+                        initRfModule("tx", bruceConfigPins.rfFreq);
+                        rf_tx_durations(lastDurations);
+                        deinitRfModule();
+                        rx.begin();
+                        rx.setSensitivity(sensiLevels[sensiIdx].minTransitions);
+                        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+                            ELECHOUSE_cc1101.setDcFilterOff(true);
+                        }
+                        rx.flush();
+                        displayTextLine("Replayed!");
+                        delay(400);
+                    }
+                    draw_rf_header("RF SquareWave", String(bruceConfigPins.rfFreq, 2) + " MHz");
+                    reRender = true;
                 } else if (lowerKey == 'c') {
                     lastDurations.clear();
                     offsetUs = 0;
-                    isHeld = false;
-                    holdNext = false;
+                    if (isHeld) {
+                        isHeld = false;
+                        holdNext = true;
+                    }
+                    rx.flush();
                     reRender = true;
                 } else if (lowerKey == 'g' || lowerKey == 't') {
                     sensiIdx = (sensiIdx + 1) % numSensi;

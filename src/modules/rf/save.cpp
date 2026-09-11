@@ -6,7 +6,7 @@ bool rf_raw_save(RawRecording recorded) {
         return false;
     }
 
-    char filename[32];
+    char filename[64];
     int index = 0;
 
     if (!fs->exists("/BruceRF")) {
@@ -16,7 +16,9 @@ bool rf_raw_save(RawRecording recorded) {
         }
     }
 
-    do { snprintf(filename, sizeof(filename), "/BruceRF/raw_%d.sub", index++); } while (fs->exists(filename));
+    do {
+        snprintf(filename, sizeof(filename), "/BruceRF/raw_%.2f_%d.sub", recorded.frequency, index++);
+    } while (fs->exists(filename));
 
     File file = fs->open(filename, FILE_WRITE, true);
     if (!file) {
@@ -24,14 +26,14 @@ bool rf_raw_save(RawRecording recorded) {
         return false;
     }
 
-    file.write((const uint8_t *)"Filetype: Bruce SubGhz File\n", 28);
-    file.write((const uint8_t *)"Version 1\n", 10);
+    file.write((const uint8_t *)"Filetype: Flipper SubGhz RAW File\n", 34);
+    file.write((const uint8_t *)"Version: 1\n", 11);
 
     char line[64];
     int len = snprintf(line, sizeof(line), "Frequency: %d\n", (int)(recorded.frequency * 1000000));
     file.write((const uint8_t *)line, len);
 
-    file.write((const uint8_t *)"Preset: 0\n", 10);
+    file.write((const uint8_t *)"Preset: FuriHalSubGhzPresetOok650Async\n", 39);
     file.write((const uint8_t *)"Protocol: RAW\n", 14);
     file.write((const uint8_t *)"RAW_Data: ", 10);
 
@@ -82,7 +84,7 @@ bool rf_raw_save_durations(const std::vector<int> &durations, float frequency, S
         return false;
     }
 
-    char filename[32];
+    char filename[64];
     int index = 0;
 
     if (!fs->exists("/BruceRF")) {
@@ -92,7 +94,9 @@ bool rf_raw_save_durations(const std::vector<int> &durations, float frequency, S
         }
     }
 
-    do { snprintf(filename, sizeof(filename), "/BruceRF/raw_%d.sub", index++); } while (fs->exists(filename));
+    do {
+        snprintf(filename, sizeof(filename), "/BruceRF/raw_%.2f_%d.sub", frequency, index++);
+    } while (fs->exists(filename));
 
     File file = fs->open(filename, FILE_WRITE, true);
     if (!file) {
@@ -100,14 +104,14 @@ bool rf_raw_save_durations(const std::vector<int> &durations, float frequency, S
         return false;
     }
 
-    file.write((const uint8_t *)"Filetype: Bruce SubGhz File\n", 28);
-    file.write((const uint8_t *)"Version 1\n", 10);
+    file.write((const uint8_t *)"Filetype: Flipper SubGhz RAW File\n", 34);
+    file.write((const uint8_t *)"Version: 1\n", 11);
 
     char line[64];
     int len = snprintf(line, sizeof(line), "Frequency: %d\n", (int)(frequency * 1000000));
     file.write((const uint8_t *)line, len);
 
-    file.write((const uint8_t *)"Preset: 0\n", 10);
+    file.write((const uint8_t *)"Preset: FuriHalSubGhzPresetOok650Async\n", 39);
     file.write((const uint8_t *)"Protocol: RAW\n", 14);
     file.write((const uint8_t *)"RAW_Data: ", 10);
 

@@ -102,7 +102,11 @@ bool rf_tx_durations(const std::vector<int> &durations) {
             RF_DBG("rmt_transmit failed: %d", (int)err);
             ok = false;
         } else {
-            err = rmt_tx_wait_all_done(ch, 2000); // up to 2s for the frame to flush
+            uint32_t totalUs = 0;
+            for (int d : durations) totalUs += abs(d);
+            int waitMs = (int)(totalUs / 1000) + 1000;
+            if (waitMs < 2000) waitMs = 2000;
+            err = rmt_tx_wait_all_done(ch, waitMs);
             if (err != ESP_OK) {
                 RF_DBG("rmt_tx_wait_all_done failed: %d", (int)err);
                 ok = false;
