@@ -727,6 +727,7 @@ void setRFModuleMenu() {
     }
     // fallback to "M5 RF433T/R" on errors
     bruceConfigPins.setRfModule(M5_RF_MODULE);
+    bruceConfigPins.setRfFreq(433.92, 1);
 }
 
 /*********************************************************************
@@ -739,7 +740,8 @@ void setRFFreqMenu() {
     if (freq_str == "\x1B") return;
     if (freq_str.length() > 1) {
         result = freq_str.toFloat();          // returns 0 if not valid
-        if (result >= 280 && result <= 928) { // TODO: check valid freq according to current module?
+        if ((result >= 280 && result <= 350) || (result >= 387 && result <= 468) ||
+            (result >= 779 && result <= 928)) {
             bruceConfigPins.setRfFreq(result);
             return;
         }

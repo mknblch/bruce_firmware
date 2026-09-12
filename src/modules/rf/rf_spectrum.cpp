@@ -107,8 +107,8 @@ void rf_spectrum() {
 
     updateRuler();
 
-    uint8_t channelLvl[64] = {0};
-    uint8_t channelPeak[64] = {0};
+    uint8_t channelLvl[128] = {0};
+    uint8_t channelPeak[128] = {0};
     uint32_t lastFrame = 0, lastRow = 0;
     int multiplier = 2;
 
@@ -139,7 +139,7 @@ void rf_spectrum() {
         int startIdx = range_limits[bruceConfigPins.rfScanRange][0];
         int endIdx = range_limits[bruceConfigPins.rfScanRange][1];
         int numFreqs = endIdx - startIdx + 1;
-        if (numFreqs > 64) numFreqs = 64;
+        if (numFreqs > 128) numFreqs = 128;
 
         int maxIdx = 0;
         int maxRssiDbm = -120;

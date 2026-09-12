@@ -43,13 +43,16 @@ void RFMenu::optionsMenu() {
 }
 
 void RFMenu::configMenu() {
-    options = {
-        {"RF TX Pin", lambdaHelper(gsetRfTxPin, true)},
-        {"RF RX Pin", lambdaHelper(gsetRfRxPin, true)},
-        {"RF Module", setRFModuleMenu},
-        {"RF Frequency", setRFFreqMenu},
-        {"Back", [this]() { optionsMenu(); }},
-    };
+    options.clear();
+    if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+        options.push_back({"RF Module", setRFModuleMenu});
+        options.push_back({"RF Frequency", setRFFreqMenu});
+    } else {
+        options.push_back({"RF TX Pin", lambdaHelper(gsetRfTxPin, true)});
+        options.push_back({"RF RX Pin", lambdaHelper(gsetRfRxPin, true)});
+        options.push_back({"RF Module", setRFModuleMenu});
+    }
+    options.push_back({"Back", [this]() { optionsMenu(); }});
 
     loopOptions(options, MENU_TYPE_SUBMENU, "RF Config");
 }

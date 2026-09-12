@@ -14,7 +14,7 @@ rmt_channel_handle_t setup_rf_rx();
 #define RMT_1MS_TICKS (RMT_1US_TICKS * 1000)
 #define SIGNAL_STRENGTH_THRESHOLD 1500 // Adjust this threshold as needed
 
-extern const float subghz_frequency_list[57];
+extern const float subghz_frequency_list[93];
 extern const char *subghz_frequency_ranges[];
 extern const int range_limits[4][2];
 extern bool rmtInstalled;
