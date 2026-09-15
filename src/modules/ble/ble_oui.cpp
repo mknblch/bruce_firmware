@@ -35,6 +35,7 @@ static const BleCompanyIdEntry BLE_SIG_COMPANIES[] PROGMEM = {
     {0x006B, "Polar"},
     {0x0075, "Samsung"},
     {0x0087, "Garmin"},
+    {0x0094, "Airoha"},
     {0x009B, "Realtek"},
     {0x009E, "Bose"},
     {0x00B5, "Casio"},
@@ -63,6 +64,7 @@ static const BleCompanyIdEntry BLE_SIG_COMPANIES[] PROGMEM = {
     {0x05A7, "Sonos"},
     {0x0594, "Nothing"},
     {0x07D7, "Tuya Smart"},
+    {0x07E3, "Airoha"},
     {0x0822, "Realme"},
     {0x08A9, "OnePlus"},
     {0x09C5, "Anker"},
@@ -271,6 +273,15 @@ static const BleOuiEntry COMMON_BLE_OUIS[] PROGMEM = {
     {0x00074D, "Zebra"},
     {0x00A0F8, "Zebra"},
     {0x84248D, "Zebra"},
+
+    // Airoha / MediaTek
+    {0x000CBF, "Airoha"},
+    {0x001EDC, "Airoha"},
+    {0x6055F9, "Airoha"},
+    {0x94F6D6, "Airoha"},
+    {0xF44EFD, "Airoha"},
+    {0x404E36, "Airoha"},
+    {0x001B66, "Airoha"},
 };
 static const size_t COMMON_BLE_OUIS_COUNT = sizeof(COMMON_BLE_OUIS) / sizeof(COMMON_BLE_OUIS[0]);
 

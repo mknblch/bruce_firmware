@@ -643,11 +643,54 @@ void rf_CC1101_rssi() {
     std::vector<int> bar_size(freq_count, 0);
     const int max_bar_size = bot - top;
     bool redraw = true;
+    int multiplier = 2;
     const int min_value = map(-70, -95, -20, 0, max_bar_size);
-    // dBm -> screen row, so the scale follows the plot band on every device
-    auto rssiY = [&](int rssi) { return (int)map(constrain(rssi, -95, -20), -95, -20, bot, top); };
+    // dBm -> screen row (static grid axis)
+    auto axisY = [&](int dbm) { return (int)map(constrain(dbm, -95, -20), -95, -20, bot, top); };
+    // dBm -> screen row scaled with multiplier for fixed frequency signal line
+    auto rssiY = [&](int rssi) {
+        int h = map(constrain(rssi, -95, -20), -95, -20, 0, max_bar_size);
+        return bot - constrain(h * multiplier, 0, max_bar_size);
+    };
 
     while (1) {
+        if (check(EscPress)) { break; }
+        if (check(SelPress)) {
+            deinitRfModule();
+            rf_range_selection(bruceConfigPins.rfFreq);
+            redraw = true;
+        }
+
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == 'g') {
+                    multiplier = (multiplier >= 5) ? 1 : multiplier + 1;
+                    if (bruceConfigPins.rfFxdFreq) {
+                        draw_rf_header("RF RSSI " + String(multiplier) + "x", String(bruceConfigPins.rfFreq, 2) + " MHz");
+                        std::fill(signal.begin(), signal.end(), -95);
+                        tft.fillRect(rf_plot_left(), top, rf_plot_width(), bot - top, bruceConfig.bgColor);
+                        tft.drawFastVLine(axisX, top, bot - top, bruceConfig.priColor);
+                        tft.setTextColor(rf_label_color(), bruceConfig.bgColor);
+                        for (int dbm = -95; dbm <= -20; dbm += 15) {
+                            int y = axisY(dbm) - (8 * FP) / 2;
+                            tft.drawString(String(dbm), 8, y, 1);
+                            tft.drawFastHLine(axisX - 2, axisY(dbm), 3, rf_grid_color());
+                        }
+                    } else {
+                        draw_rf_header(
+                            String("RF RSSI ") + subghz_frequency_ranges[bruceConfigPins.rfScanRange] + " " +
+                                String(multiplier) + "x",
+                            ""
+                        );
+                        std::fill(bar_size.begin(), bar_size.end(), 0);
+                        tft.fillRect(rf_plot_left(), top, rf_plot_width(), bot - top, bruceConfig.bgColor);
+                    }
+                }
+            }
+        }
+
         if (redraw) {
             redraw = false;
             tft.drawPixel(0, 0, 0);
@@ -656,14 +699,14 @@ void rf_CC1101_rssi() {
             if (bruceConfigPins.rfFxdFreq) {
                 if (!initRfModule("rx", bruceConfigPins.rfFreq))
                     displayError("Error setting frequency", true);
-                draw_rf_header("RF RSSI", String(bruceConfigPins.rfFreq, 2) + " MHz");
+                draw_rf_header("RF RSSI " + String(multiplier) + "x", String(bruceConfigPins.rfFreq, 2) + " MHz");
                 tft.fillRect(rf_plot_left(), top, rf_plot_width(), bot - top, bruceConfig.bgColor);
                 tft.drawFastVLine(axisX, top, bot - top, bruceConfig.priColor);
                 tft.setTextColor(rf_label_color(), bruceConfig.bgColor);
                 for (int dbm = -95; dbm <= -20; dbm += 15) {
-                    int y = rssiY(dbm) - (8 * FP) / 2;
+                    int y = axisY(dbm) - (8 * FP) / 2;
                     tft.drawString(String(dbm), 8, y, 1);
-                    tft.drawFastHLine(axisX - 2, rssiY(dbm), 3, rf_grid_color());
+                    tft.drawFastHLine(axisX - 2, axisY(dbm), 3, rf_grid_color());
                 }
                 // resets signal array
                 std::fill(signal.begin(), signal.end(), -95);
@@ -673,7 +716,9 @@ void rf_CC1101_rssi() {
                 if (!initRfModule("rx", bruceConfigPins.rfFreq)) displayError("Error starting module", true);
                 // the band edges are drawn on the bottom row, so keep it empty here
                 draw_rf_header(
-                    String("RF RSSI ") + subghz_frequency_ranges[bruceConfigPins.rfScanRange], ""
+                    String("RF RSSI ") + subghz_frequency_ranges[bruceConfigPins.rfScanRange] + " " +
+                        String(multiplier) + "x",
+                    ""
                 );
                 tft.fillRect(rf_plot_left(), top, rf_plot_width(), bot - top, bruceConfig.bgColor);
                 tft.drawFastHLine(rf_plot_left(), bot, rf_plot_width(), bruceConfig.priColor);
@@ -727,13 +772,13 @@ void rf_CC1101_rssi() {
             int barW = max(1, space - 1);
             int max_idx = 0;
             for (int i = 0; i < range; i++) {
-                if (EscPress || SelPress) break;
+                if (EscPress || SelPress || AnyKeyPress) break;
                 setMHZ(subghz_frequency_list[range_limits[bruceConfigPins.rfScanRange][0] + i]);
                 delayMicroseconds(900);
                 int rssi = ELECHOUSE_cc1101.getRssi();
                 tft.drawPixel(0, 0, 0); // To make sure CC1101 shared with TFT works properly
                 int size = map(constrain(rssi, -95, -20), -95, -20, 0, max_bar_size);
-                size = constrain(size, 0, max_bar_size);
+                size = constrain(size * multiplier, 0, max_bar_size);
                 if (size > bar_size[i]) bar_size[i] = size;
                 else bar_size[i] = bar_size[i] - (bar_size[i] - size) / 2; // slow down decrease
                 bar_size[i] = constrain(bar_size[i], 0, max_bar_size);
@@ -753,12 +798,6 @@ void rf_CC1101_rssi() {
                 tft.drawCentreString("Max=       ", tftWidth / 2, bot + 2, 1);
                 tft.drawCentreString("Max=" + String(buf), tftWidth / 2, bot + 2, 1);
             }
-        }
-        if (check(EscPress)) { break; }
-        if (check(SelPress)) {
-            deinitRfModule();
-            rf_range_selection(bruceConfigPins.rfFreq);
-            redraw = true;
         }
     }
     deinitRfModule();

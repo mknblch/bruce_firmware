@@ -1,6 +1,7 @@
 #include "ble_commands.h"
 #include "modules/ble/gatt_server.h"
 #include "modules/ble/gatt_explorer.h"
+#include "modules/ble/race_client.h"
 #include "modules/ble/ble_oui.h"
 #include <globals.h>
 
@@ -20,6 +21,18 @@ static uint32_t bleCallback(cmd *c) {
     Argument param2Arg = cmd.getArgument("param2");
     String param2 = param2Arg.getValue();
     param2.trim();
+
+    Argument param3Arg = cmd.getArgument("param3");
+    String param3 = param3Arg.getValue();
+    param3.trim();
+
+    Argument param4Arg = cmd.getArgument("param4");
+    String param4 = param4Arg.getValue();
+    param4.trim();
+
+    Argument param5Arg = cmd.getArgument("param5");
+    String param5 = param5Arg.getValue();
+    param5.trim();
 
     if (action == "server") {
         if (param1 == "stop") {
@@ -51,6 +64,38 @@ static uint32_t bleCallback(cmd *c) {
         }
         bool ok = gattConnectCli(param1, addrType);
         return ok;
+    } else if (action == "race") {
+        if (param1 == "") {
+            serialDevice->println("Usage: ble race <MAC> [pub|rnd] <check|info|ram|flash|parttable|raw> [args...]");
+            return false;
+        }
+        uint8_t addrType = 0;
+        String subCmd = "";
+        String arg1 = "";
+        String arg2 = "";
+        String arg3 = "";
+
+        if (param2.equalsIgnoreCase("rnd") || param2.equalsIgnoreCase("random") || param2 == "1") {
+            addrType = 1;
+            subCmd = param3;
+            arg1 = param4;
+            arg2 = param5;
+        } else if (param2.equalsIgnoreCase("pub") || param2.equalsIgnoreCase("public") || param2 == "0") {
+            addrType = 0;
+            subCmd = param3;
+            arg1 = param4;
+            arg2 = param5;
+        } else {
+            // param2 is the subcommand directly
+            addrType = 0;
+            subCmd = param2;
+            arg1 = param3;
+            arg2 = param4;
+            arg3 = param5;
+        }
+
+        if (subCmd.isEmpty()) subCmd = "check";
+        return raceCli(param1, addrType, subCmd, arg1, arg2, arg3);
     } else if (action == "scan") {
         int timeoutSec = param1.toInt();
         if (timeoutSec <= 0) timeoutSec = 5;
@@ -94,6 +139,7 @@ static uint32_t bleCallback(cmd *c) {
         "  ble server status\n"
         "  ble scan [seconds]\n"
         "  ble connect <MAC> [pub|rnd]\n"
+        "  ble race <MAC> [pub|rnd] <check|info|media|ram|flash|parttable|raw>\n"
         "  ble oui [status|<MAC|OUI>]"
     );
     return false;
@@ -104,6 +150,9 @@ void createBleCommands(SimpleCLI *cli) {
     bleCmd.addPosArg("action", "");
     bleCmd.addPosArg("param1", "");
     bleCmd.addPosArg("param2", "");
+    bleCmd.addPosArg("param3", "");
+    bleCmd.addPosArg("param4", "");
+    bleCmd.addPosArg("param5", "");
 }
 
 #else

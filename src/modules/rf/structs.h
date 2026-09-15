@@ -6,10 +6,47 @@
 #include <driver/rmt_tx.h>
 
 struct RawRecording {
-    float frequency;
+    float frequency = 0.0f;
     std::vector<rmt_symbol_word_t *> codes;
     std::vector<uint16_t> codeLengths;
     std::vector<uint16_t> gaps;
+
+    void clear() {
+        for (auto &code : codes) {
+            if (code) {
+                free(code);
+                code = nullptr;
+            }
+        }
+        codes.clear();
+        codeLengths.clear();
+        gaps.clear();
+        frequency = 0.0f;
+    }
+
+    RawRecording() = default;
+    ~RawRecording() { clear(); }
+
+    RawRecording(const RawRecording &) = delete;
+    RawRecording &operator=(const RawRecording &) = delete;
+    RawRecording(RawRecording &&o) noexcept
+        : frequency(o.frequency),
+          codes(std::move(o.codes)),
+          codeLengths(std::move(o.codeLengths)),
+          gaps(std::move(o.gaps)) {
+        o.frequency = 0.0f;
+    }
+    RawRecording &operator=(RawRecording &&o) noexcept {
+        if (this != &o) {
+            clear();
+            frequency = o.frequency;
+            codes = std::move(o.codes);
+            codeLengths = std::move(o.codeLengths);
+            gaps = std::move(o.gaps);
+            o.frequency = 0.0f;
+        }
+        return *this;
+    }
 };
 
 struct RawRecordingStatus {

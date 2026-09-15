@@ -128,4 +128,5 @@ void rf_listen() {
     }
 
     detachInterrupt(digitalPinToInterrupt(bruceConfigPins.CC1101_bus.io0));
+    deinitRfModule();
 }

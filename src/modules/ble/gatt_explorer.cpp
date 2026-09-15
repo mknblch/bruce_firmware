@@ -2,6 +2,7 @@
 
 #include "gatt_explorer.h"
 #include "gatt_server.h"
+#include "race_client.h"
 #include "BLE_Suite.h"
 #include "ble_oui.h"
 #include "core/display.h"
@@ -99,7 +100,7 @@ static uint16_t gattDimColor() {
     return getColorVariation(bruceConfig.priColor, 8, -1);
 }
 
-static String gattFitText(const String &text, int maxPx) {
+String gattFitText(const String &text, int maxPx) {
     if (maxPx <= 0) return "";
     tft.setTextSize(FP);
     if (tft.textWidth(text.c_str()) <= maxPx) return text;
@@ -131,7 +132,7 @@ static void gattWrapInto(const String &text, int w, std::vector<String> &out) {
     }
 }
 
-static void gattDrawRssi(int x, int y, int rssi, uint16_t color) {
+void gattDrawRssi(int x, int y, int rssi, uint16_t color) {
     int bars = 0;
     if (rssi > -55) bars = 4;
     else if (rssi > -68) bars = 3;
@@ -146,8 +147,8 @@ static void gattDrawRssi(int x, int y, int rssi, uint16_t color) {
 
 typedef std::function<void(int idx, int x, int y, int w, bool selected)> GattRowDrawer;
 
-static int gattListLoop(
-    const char *title, int count, const String &hint, GattRowDrawer drawRow, int *cursor = nullptr
+int gattListLoop(
+    const char *title, int count, const String &hint, GattRowDrawer drawRow, int *cursor
 ) {
     if (count <= 0) return -1;
     GattUiGeom g = gattUiGeom();
@@ -155,7 +156,11 @@ static int gattListLoop(
     int off = 0, lastSel = -1, lastOff = -1;
 
     if (sel >= g.rows) off = sel - g.rows + 1;
-    drawMainBorderWithTitle(title);
+    if (title && strlen(title) > 0) {
+        drawMainBorderWithTitle(title);
+    } else {
+        drawMainBorder(true);
+    }
 
     for (;;) {
         if (sel != lastSel || off != lastOff) {
@@ -319,7 +324,14 @@ static String getGattServiceName(const String &uuidStr) {
     if (lower == "fe2c" || lower.indexOf("0000fe2c-0000-1000-8000-00805f9b34fb") != -1) return "Google FastPair";
     if (lower == "fee0" || lower.indexOf("0000fee0-0000-1000-8000-00805f9b34fb") != -1) return "Mi Band / Smart";
     if (lower == "ffe0" || lower.indexOf("0000ffe0-0000-1000-8000-00805f9b34fb") != -1) return "HM-10 / UART";
+    if (lower == "fef0" || lower.indexOf("0000fef0-0000-1000-8000-00805f9b34fb") != -1) return "Airoha FOTA / UART";
     if (lower.indexOf("6e400001") != -1) return "Nordic NUS (UART)";
+    if (lower.indexOf("5052494d-2dab-0341-6972-6f6861424c45") != -1) return "Airoha RACE (BLE)";
+    if (lower.indexOf("dc405470-a351-4a59-97d8-2e2e3b207fbb") != -1) return "Sony RACE / Audio";
+    if (lower.indexOf("49535343-fe7d-4ae5-8fa9-9fafd205e455") != -1) return "TRSPX Transparent";
+    if (lower.indexOf("00000000-0000-0000-0099-aabbccddeeff") != -1) return "Airoha Classic SPP";
+    if (lower.indexOf("8901dfa8-5c7e-4d8f-9f0c-c2b70683f5f0") != -1) return "Sony Classic RACE";
+    if (lower.indexOf("2d064aa9-32b5-4970-865c-643742bd2862") != -1) return "Bose Classic RACE";
     if (lower.indexOf("0000fff0") != -1) return "Vendor Serial";
 
     if (lower.length() > 8) return "Custom 128-bit";
@@ -352,6 +364,12 @@ static String getGattCharName(const String &uuidStr) {
     if (lower == "2a6f" || lower.indexOf("00002a6f-") != -1) return "Humidity";
     if (lower.indexOf("6e400002") != -1) return "NUS TX (Write)";
     if (lower.indexOf("6e400003") != -1) return "NUS RX (Notify)";
+    if (lower.indexOf("43484152-2dab-3241") != -1) return "RACE TX (Write)";
+    if (lower.indexOf("43484152-2dab-3141") != -1 || lower.indexOf("43484152-2dab-3041") != -1) return "RACE RX (Notify)";
+    if (lower == "fef1" || lower.indexOf("0000fef1-") != -1) return "Airoha FOTA TX";
+    if (lower == "fef2" || lower.indexOf("0000fef2-") != -1) return "Airoha FOTA RX";
+    if (lower.indexOf("bfd869fa-a3f2") != -1) return "Sony RACE TX";
+    if (lower.indexOf("2a6b6575-faf6") != -1) return "Sony RACE RX";
     if (lower == "ffe1" || lower.indexOf("0000ffe1-") != -1) return "Serial Data";
 
     return "Char 0x" + uuidStr;
@@ -828,7 +846,7 @@ static void showDiscoveredDevicesList() {
 // Robust Multi-Strategy GATT Connection
 //=============================================================================
 
-static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError, bool *outUserCancelled = nullptr) {
+bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError, bool *outUserCancelled) {
     if (outError) *outError = 0;
     if (outUserCancelled) *outUserCancelled = false;
     g_lastBleDisconnectReason = 0;
@@ -1006,17 +1024,20 @@ static bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient 
                 tft.setTextSize(FP);
                 tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
-                // Strategy line & countdown
-                String stratStatus = "[" + String(spinnerChars[spinnerIdx]) + "] Strat " +
-                                     String((int)i + 1) + "/" + String((int)totalStrats) +
-                                     " (" + String(remainSec) + "s left)";
-                tft.fillRect(BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 26, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
-                tft.drawString(gattFitText(stratStatus, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 26);
+                // Strategy line
+                String stratLine = "Strat " + String((int)i + 1) + "/" + String((int)totalStrats) + ": " + strat.name;
+                tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 40, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
+                tft.drawString(gattFitText(stratLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, BORDER_PAD_Y + 40);
 
-                // Cancel prompt line
-                tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
-                tft.fillRect(BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 13, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
-                tft.drawString("Press ESC to Cancel", BORDER_PAD_X, tftHeight - BORDER_PAD_Y - 13);
+                // Live status & countdown
+                String statusLine = "[" + String(spinnerChars[spinnerIdx]) + "] Handshake... (" + String(remainSec) + "s left)";
+                if (i > 0 && lastErr != 0) {
+                    char errTag[24];
+                    snprintf(errTag, sizeof(errTag), " (prev: 0x%02X)", (unsigned int)lastErr);
+                    statusLine += errTag;
+                }
+                tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 54, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
+                tft.drawString(gattFitText(statusLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, BORDER_PAD_Y + 54);
             }
 
             vTaskDelay(20 / portTICK_PERIOD_MS);
@@ -1120,7 +1141,7 @@ static void exploreGattDevice(GattScannedDevice &device) {
         device.vendor = resolveBleOui(device.address, true);
     }
 
-    drawMainBorderWithTitle("GATT CONNECTING");
+    drawMainBorder(true);
     tft.setTextSize(FP);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
@@ -1179,7 +1200,11 @@ static void exploreGattDevice(GattScannedDevice &device) {
             readStandardDeviceInfo(pClient);
         }});
 
-        devOps.push_back({"3. Dump GATT Tree to Storage", [pClient, &device]() {
+        devOps.push_back({"3. RACE Assessment (Airoha)", [pClient, &device]() {
+            launchRaceForDevice(pClient, device.name, device.address);
+        }});
+
+        devOps.push_back({"4. Dump GATT Tree to Storage", [pClient, &device]() {
             String path;
             if (dumpDeviceGattToStorage(pClient, device, &path)) {
                 displaySuccess("Saved: " + path, true);
@@ -1188,7 +1213,7 @@ static void exploreGattDevice(GattScannedDevice &device) {
             }
         }});
 
-        devOps.push_back({"4. Disconnect & Back", [pClient]() {
+        devOps.push_back({"5. Disconnect & Back", [pClient]() {
             if (pClient->isConnected()) pClient->disconnect();
         }});
 

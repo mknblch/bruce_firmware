@@ -161,11 +161,13 @@ bool RfRxSession::begin() {
         if (_buf == nullptr) return false;
     }
     _ch = setup_rf_rx();
-    if (_ch == nullptr) return false;
+    if (_ch == nullptr) {
+        end();
+        return false;
+    }
     _queue = xQueueCreate(1, sizeof(rmt_rx_done_event_data_t));
     if (_queue == nullptr) {
-        rmt_del_channel(_ch);
-        _ch = nullptr;
+        end();
         return false;
     }
     rmt_rx_event_callbacks_t cbs = {};

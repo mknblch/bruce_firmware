@@ -28,6 +28,7 @@ public:
     void redraw(const String &title);
     void end();
     bool ready() const { return _ok; }
+    ~SpectrumPlot() { end(); }
 
     // Number of columns the caller must fill, and where they land on screen.
     int width() const { return _plotW; }

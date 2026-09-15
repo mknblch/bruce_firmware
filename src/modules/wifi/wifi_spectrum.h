@@ -23,6 +23,7 @@ public:
     bool begin(const String &title);
     void end();
     bool ready() const { return _env != nullptr; }
+    ~WifiSpectrumView() { end(); }
 
     // One animation frame. The drawn levels ease toward `level` so the sweep
     // glides instead of snapping when a measurement lands. `alert` recolours

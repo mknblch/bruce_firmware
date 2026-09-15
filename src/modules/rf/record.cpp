@@ -396,11 +396,7 @@ void rf_raw_record() {
             rf_raw_save(recorded);
         } else if (option == 3) { // Discard
             saved = false;
-            for (auto &code : recorded.codes) free(code);
-            recorded.codes.clear();
-            recorded.codeLengths.clear();
-            recorded.gaps.clear();
-            recorded.frequency = 0;
+            recorded.clear();
             rf_raw_record_create(recorded, returnToMenu);
         }
 
@@ -408,10 +404,6 @@ void rf_raw_record() {
         option = rf_raw_record_options(saved);
         vTaskDelay(pdMS_TO_TICKS(1));
     }
-    for (auto &code : recorded.codes) free(code);
-    recorded.codes.clear();
-    recorded.codeLengths.clear();
-    recorded.gaps.clear();
-    recorded.frequency = 0;
+    recorded.clear();
     return;
 }

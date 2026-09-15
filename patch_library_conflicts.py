@@ -37,6 +37,11 @@ conflicts = [
         '#include <Arduino.h>\n#include <NimBLEDevice.h>'
     ),
     (
+        ".pio/libdeps/*/ESP Chameleon Ultra/src/chameleonUltra.cpp",
+        r'BLEScanResults foundDevices = pScan->getResults\(150\);',
+        'BLEScanResults foundDevices = pScan->getResults(4000);'
+    ),
+    (
         ".pio/libdeps/*/ESP PN32BLE/src/pn532_ble.h",
         r'#include <NimBLEDevice.h>',
         '#include <Arduino.h>\n#include <NimBLEDevice.h>'

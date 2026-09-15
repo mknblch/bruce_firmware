@@ -52,7 +52,7 @@ uint32_t getBatteryAdcMilliVolts() {
 
 uint32_t getBatteryVoltage() {
 #ifdef USE_BQ27220_VIA_I2C
-    return (uint32_t)bq.getVoltage();
+    return (uint32_t)bq.getVolt(VOLT_MODE::VOLT);
 #elif defined(ANALOG_BAT_PIN)
 #ifndef ANALOG_BAT_MULTIPLIER
 #define ANALOG_BAT_MULTIPLIER 2.0f

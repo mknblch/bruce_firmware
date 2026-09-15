@@ -165,7 +165,8 @@ void loopEmulate(RfCodes &data) {
         if (check(EscPress)) {
             keyList.clear();
             bitList.clear();
-
+            bitRawList.clear();
+            rawDataList.clear();
             return;
         }
 
@@ -175,7 +176,8 @@ void loopEmulate(RfCodes &data) {
             if (returnToMenu) {
                 keyList.clear();
                 bitList.clear();
-
+                bitRawList.clear();
+                rawDataList.clear();
                 return;
             }
 
@@ -238,6 +240,11 @@ void display_info(RfCodes &data) {
 }
 
 bool readSubFile(FS *fs, const String &filepath, RfCodes &data) {
+    bitList.clear();
+    bitRawList.clear();
+    keyList.clear();
+    rawDataList.clear();
+
     struct RfCodes selected_code;
     File databaseFile;
     String line;
