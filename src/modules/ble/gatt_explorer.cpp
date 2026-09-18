@@ -301,6 +301,9 @@ static void gattShowScrollableReport(const char *title, const std::vector<String
 static String getGattServiceName(const String &uuidStr) {
     String lower = uuidStr;
     lower.toLowerCase();
+    if (lower.startsWith("0x")) {
+        lower = lower.substring(2);
+    }
 
     // Standard 16-bit Service UUIDs (or 16-bit inside standard Bluetooth Base UUID)
     if (lower == "1800" || lower.indexOf("00001800-0000-1000-8000-00805f9b34fb") != -1) return "Generic Access";
@@ -338,31 +341,37 @@ static String getGattServiceName(const String &uuidStr) {
     if (lower.indexOf("0000fff0") != -1) return "Vendor Serial";
 
     if (lower.length() > 8) return "Custom 128-bit";
-    return "Service 0x" + uuidStr;
+    return "Service 0x" + lower;
 }
 
 static String getGattCharName(const String &uuidStr) {
     String lower = uuidStr;
     lower.toLowerCase();
+    if (lower.startsWith("0x")) {
+        lower = lower.substring(2);
+    }
 
     if (lower == "2a00" || lower.indexOf("00002a00-") != -1) return "Device Name";
     if (lower == "2a01" || lower.indexOf("00002a01-") != -1) return "Appearance";
     if (lower == "2a04" || lower.indexOf("00002a04-") != -1) return "Conn Params";
     if (lower == "2a05" || lower.indexOf("00002a05-") != -1) return "Service Changed";
     if (lower == "2a19" || lower.indexOf("00002a19-") != -1) return "Battery Level";
+    if (lower == "2a1c" || lower.indexOf("00002a1c-") != -1) return "Temperature Meas";
+    if (lower == "2a23" || lower.indexOf("00002a23-") != -1) return "System ID";
     if (lower == "2a24" || lower.indexOf("00002a24-") != -1) return "Model Number";
     if (lower == "2a25" || lower.indexOf("00002a25-") != -1) return "Serial Number";
     if (lower == "2a26" || lower.indexOf("00002a26-") != -1) return "Firmware Rev";
     if (lower == "2a27" || lower.indexOf("00002a27-") != -1) return "Hardware Rev";
     if (lower == "2a28" || lower.indexOf("00002a28-") != -1) return "Software Rev";
     if (lower == "2a29" || lower.indexOf("00002a29-") != -1) return "Manufacturer";
+    if (lower == "2a2a" || lower.indexOf("00002a2a-") != -1) return "Regulatory Cert";
+    if (lower == "2a37" || lower.indexOf("00002a37-") != -1) return "Heart Rate Meas";
     if (lower == "2a4a" || lower.indexOf("00002a4a-") != -1) return "HID Info";
     if (lower == "2a4b" || lower.indexOf("00002a4b-") != -1) return "Report Map";
     if (lower == "2a4c" || lower.indexOf("00002a4c-") != -1) return "HID Ctrl Point";
     if (lower == "2a4d" || lower.indexOf("00002a4d-") != -1) return "HID Report";
     if (lower == "2a4e" || lower.indexOf("00002a4e-") != -1) return "Protocol Mode";
-    if (lower == "2a37" || lower.indexOf("00002a37-") != -1) return "Heart Rate Meas";
-    if (lower == "2a1c" || lower.indexOf("00002a1c-") != -1) return "Temperature Meas";
+    if (lower == "2a50" || lower.indexOf("00002a50-") != -1) return "PnP ID";
     if (lower == "2a6e" || lower.indexOf("00002a6e-") != -1) return "Temperature";
     if (lower == "2a6f" || lower.indexOf("00002a6f-") != -1) return "Humidity";
     if (lower.indexOf("6e400002") != -1) return "NUS TX (Write)";
@@ -375,7 +384,8 @@ static String getGattCharName(const String &uuidStr) {
     if (lower.indexOf("2a6b6575-faf6") != -1) return "Sony RACE RX";
     if (lower == "ffe1" || lower.indexOf("0000ffe1-") != -1) return "Serial Data";
 
-    return "Char 0x" + uuidStr;
+    if (lower.length() > 8) return "Char " + uuidStr;
+    return "Char 0x" + lower;
 }
 
 static const char *getFilterModeName(GattFilterMode mode) {
