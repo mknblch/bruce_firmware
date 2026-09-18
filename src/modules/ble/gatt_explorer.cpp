@@ -32,10 +32,10 @@ enum GattFilterMode {
 };
 
 struct GattSettings {
-    int minRssi = -95;        // -95 (All), -85, -75, -65
-    int timeoutSec = 5;       // 3, 5, 8, 12
+    int minRssi = -105;        // -105 (All), -85, -75, -65
+    int timeoutSec = 3;       // 3, 5, 8, 12
     int addrTypeFilter = 0;   // 0: Any, 1: Public only, 2: Random only
-    int maxDevices = 40;      // Ring buffer capacity: 20, 40, 60, 80
+    int maxDevices = 60;      // Ring buffer capacity: 20, 40, 60, 80
 };
 
 struct GattScannedDevice {
@@ -62,11 +62,12 @@ static bool g_hasLatestScanned = false;
 static uint32_t g_scanPackets = 0;
 static volatile bool g_scanActive = false;
 static GattFilterMode g_currentFilter = FILTER_CONNECTABLE;
+static StaticSemaphore_t g_gattScanMutexBuf;
 static SemaphoreHandle_t g_gattScanMutex = nullptr;
 
 static void gattEnsureScanMutex() {
     if (!g_gattScanMutex) {
-        g_gattScanMutex = xSemaphoreCreateMutex();
+        g_gattScanMutex = xSemaphoreCreateMutexStatic(&g_gattScanMutexBuf);
     }
 }
 
@@ -393,7 +394,17 @@ static const char *getFilterModeName(GattFilterMode mode) {
 //=============================================================================
 
 class GattScanCallbacks : public NimBLEScanCallbacks {
+public:
+    void onDiscovered(const NimBLEAdvertisedDevice *dev) override {
+        processDevice(dev);
+    }
+
     void onResult(const NimBLEAdvertisedDevice *dev) override {
+        processDevice(dev);
+    }
+
+private:
+    void processDevice(const NimBLEAdvertisedDevice *dev) {
         if (!dev) return;
         g_scanPackets++;
 
@@ -409,7 +420,76 @@ class GattScanCallbacks : public NimBLEScanCallbacks {
 
         bool isConn = dev->isConnectable();
 
-        // 3. Collect service UUIDs
+        // 3. Early mutex acquisition
+        gattEnsureScanMutex();
+        if (!g_gattScanMutex || xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(15)) != pdTRUE) {
+            return;
+        }
+
+        const uint8_t *devVal = dev->getAddress().getVal();
+
+        // 4. Update existing device if already seen (fast binary MAC comparison, zero heap allocation)
+        for (auto &existing : g_discoveredDevices) {
+            if (memcmp(existing.address.getVal(), devVal, 6) == 0) {
+                existing.rssi = rssi;
+                existing.lastSeen = millis();
+                if (isConn) existing.isConnectable = true;
+
+                if (existing.name.length() == 0) {
+                    std::string dName = dev->getName();
+                    if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
+                        existing.name = String(dName.c_str());
+                        existing.name.trim();
+                    }
+                }
+                if (existing.vendor.length() == 0) {
+                    String v = resolveBleVendor(dev, false);
+                    if (v.length() > 0) existing.vendor = v;
+                }
+
+                size_t sCount = dev->getServiceUUIDCount();
+                if (sCount > 0) {
+                    for (size_t si = 0; si < sCount; si++) {
+                        NimBLEUUID u = dev->getServiceUUID(si);
+                        String uStr = String(u.toString().c_str());
+                        bool foundUuid = false;
+                        for (const auto &eu : existing.serviceUuids) {
+                            if (eu.equalsIgnoreCase(uStr)) { foundUuid = true; break; }
+                        }
+                        if (!foundUuid) {
+                            existing.serviceUuids.push_back(uStr);
+                            existing.serviceNames.push_back(getGattServiceName(uStr));
+                        }
+                    }
+                }
+
+                for (const auto &u : existing.serviceUuids) {
+                    if (u.indexOf("1812") != -1 || u.indexOf("1124") != -1) { existing.tag = "HID"; break; }
+                    if (u.indexOf("6e400001") != -1 || u.indexOf("ffe0") != -1 || u.indexOf("fff0") != -1) { existing.tag = "UART"; break; }
+                    if (u.indexOf("110e") != -1 || u.indexOf("110f") != -1 || u.indexOf("1843") != -1) { existing.tag = "AUD"; break; }
+                    if (u.indexOf("180d") != -1 || u.indexOf("181a") != -1 || u.indexOf("1809") != -1 || u.indexOf("180f") != -1) { existing.tag = "SENS"; break; }
+                    if (u.indexOf("fe2c") != -1) { existing.tag = "FP"; break; }
+                }
+                if (existing.tag.isEmpty() || existing.tag == "ADV") {
+                    if (existing.isConnectable) existing.tag = "GATT";
+                    else if (existing.tag.isEmpty()) existing.tag = "ADV";
+                }
+
+                g_latestScannedDevice.address = dev->getAddress();
+                g_latestScannedDevice.addressType = addrType;
+                g_latestScannedDevice.name = (existing.name.length() > 0) ? existing.name : String(dev->getAddress().toString().c_str());
+                g_latestScannedDevice.vendor = existing.vendor;
+                g_latestScannedDevice.rssi = rssi;
+                g_latestScannedDevice.isConnectable = existing.isConnectable;
+                g_latestScannedDevice.tag = existing.tag;
+                g_hasLatestScanned = true;
+
+                xSemaphoreGive(g_gattScanMutex);
+                return;
+            }
+        }
+
+        // 5. Collect service UUIDs for new device
         std::vector<String> serviceUuids;
         std::vector<String> serviceNames;
         size_t serviceCount = dev->getServiceUUIDCount();
@@ -441,11 +521,6 @@ class GattScanCallbacks : public NimBLEScanCallbacks {
 
         String vendor = resolveBleVendor(dev, false);
 
-        gattEnsureScanMutex();
-        if (!g_gattScanMutex || xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(15)) != pdTRUE) {
-            return;
-        }
-
         g_latestScannedDevice.address = dev->getAddress();
         g_latestScannedDevice.addressType = addrType;
         g_latestScannedDevice.name = (name.length() > 0) ? name : mac;
@@ -455,37 +530,7 @@ class GattScanCallbacks : public NimBLEScanCallbacks {
         g_latestScannedDevice.tag = tag;
         g_hasLatestScanned = true;
 
-        // 4. Update existing device if already seen
-        for (auto &existing : g_discoveredDevices) {
-            if (String(existing.address.toString().c_str()).equalsIgnoreCase(mac)) {
-                existing.rssi = rssi;
-                if (name.length() > 0) existing.name = name;
-                if (vendor.length() > 0 && existing.vendor.length() == 0) existing.vendor = vendor;
-                if (isConn) existing.isConnectable = true;
-                if (!serviceUuids.empty()) {
-                    for (size_t si = 0; si < serviceUuids.size(); si++) {
-                        bool foundUuid = false;
-                        for (const auto &eu : existing.serviceUuids) {
-                            if (eu.equalsIgnoreCase(serviceUuids[si])) { foundUuid = true; break; }
-                        }
-                        if (!foundUuid) {
-                            existing.serviceUuids.push_back(serviceUuids[si]);
-                            existing.serviceNames.push_back(serviceNames[si]);
-                        }
-                    }
-                }
-                existing.lastSeen = millis();
-                if (tag != "GATT" && tag != "ADV") {
-                    existing.tag = tag;
-                } else if (existing.tag == "ADV" && isConn) {
-                    existing.tag = "GATT";
-                }
-                xSemaphoreGive(g_gattScanMutex);
-                return;
-            }
-        }
-
-        // 5. Filter Mode Matching for new devices
+        // 6. Filter Mode Matching for new devices
         bool match = false;
         switch (g_currentFilter) {
             case FILTER_CONNECTABLE:
@@ -671,6 +716,7 @@ static void runContinuousScan(GattFilterMode filterMode) {
     pScan->setInterval(100);
     pScan->setWindow(99);
     pScan->setDuplicateFilter(false);
+    pScan->setScanResponseTimeout(250);
     pScan->setMaxResults(0);
     pScan->clearResults();
 
@@ -1413,7 +1459,7 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
         }
 
         if (pChar->canNotify() || pChar->canIndicate()) {
-            actOptions.push_back({"4. Live Notify Stream", [pChar, cName]() {
+            actOptions.push_back({"4. Live Notify Stream", [pClient, pChar, cName]() {
                 drawMainBorderWithTitle("LIVE STREAM");
                 tft.setTextSize(FP);
                 tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
@@ -1422,21 +1468,39 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
                 tft.drawString("Press [SEL] or [ESC] to stop", BORDER_PAD_X, BORDER_PAD_Y + 24);
                 tft.drawFastHLine(BORDER_PAD_X, BORDER_PAD_Y + 36, tftWidth - 2 * BORDER_PAD_X, bruceConfig.priColor);
 
+                static StaticSemaphore_t s_streamMutexBuf;
+                static SemaphoreHandle_t s_streamMutex = nullptr;
+                if (!s_streamMutex) {
+                    s_streamMutex = xSemaphoreCreateMutexStatic(&s_streamMutexBuf);
+                }
+
                 static int s_notifyCount = 0;
-                static String s_lastNotifyData = "";
-                s_notifyCount = 0;
+                static char s_lastNotifyBuf[96] = {0};
+                static bool s_hasNewNotify = false;
+
+                if (s_streamMutex && xSemaphoreTake(s_streamMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    s_notifyCount = 0;
+                    s_lastNotifyBuf[0] = '\0';
+                    s_hasNewNotify = false;
+                    xSemaphoreGive(s_streamMutex);
+                }
 
                 bool subOk = pChar->subscribe(true, [](NimBLERemoteCharacteristic *chr, uint8_t *pData, size_t length, bool isNotify) {
-                    s_notifyCount = s_notifyCount + 1;
-                    String hex = "";
-                    String ascii = "";
-                    for (size_t i = 0; i < length; i++) {
-                        if (pData[i] < 0x10) hex += "0";
-                        hex += String(pData[i], HEX) + " ";
-                        char c = (char)pData[i];
-                        ascii += (c >= 32 && c <= 126) ? c : '.';
+                    if (!s_streamMutex || xSemaphoreTake(s_streamMutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
+                    s_notifyCount++;
+                    char hexBuf[48] = {0};
+                    size_t hexLen = 0;
+                    size_t maxBytes = std::min(length, (size_t)10);
+                    for (size_t i = 0; i < maxBytes; i++) {
+                        int written = snprintf(hexBuf + hexLen, sizeof(hexBuf) - hexLen, "%02X ", pData[i]);
+                        if (written > 0) hexLen += (size_t)written;
                     }
-                    s_lastNotifyData = "#" + String(s_notifyCount) + " [" + String(length) + "B]: " + hex;
+                    if (length > maxBytes && hexLen + 3 < sizeof(hexBuf)) {
+                        strcat(hexBuf, "..");
+                    }
+                    snprintf(s_lastNotifyBuf, sizeof(s_lastNotifyBuf), "#%d [%uB]: %s", s_notifyCount, (unsigned int)length, hexBuf);
+                    s_hasNewNotify = true;
+                    xSemaphoreGive(s_streamMutex);
                 });
 
                 if (!subOk) {
@@ -1444,16 +1508,31 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
                     return;
                 }
 
-                int lastPrintedCount = 0;
                 int lineY = BORDER_PAD_Y + 42;
                 while (true) {
                     if (check(EscPress) || check(SelPress)) break;
 
-                    if (s_notifyCount != lastPrintedCount) {
-                        lastPrintedCount = s_notifyCount;
+                    if (!pClient || !pClient->isConnected()) {
+                        displayWarning("Device disconnected", true);
+                        break;
+                    }
+
+                    char drawBuf[96] = {0};
+                    bool hasNew = false;
+                    if (s_streamMutex && xSemaphoreTake(s_streamMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        if (s_hasNewNotify) {
+                            strncpy(drawBuf, s_lastNotifyBuf, sizeof(drawBuf) - 1);
+                            drawBuf[sizeof(drawBuf) - 1] = '\0';
+                            s_hasNewNotify = false;
+                            hasNew = true;
+                        }
+                        xSemaphoreGive(s_streamMutex);
+                    }
+
+                    if (hasNew) {
                         tft.fillRect(BORDER_PAD_X, lineY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
                         tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-                        tft.drawString(gattFitText(s_lastNotifyData, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, lineY);
+                        tft.drawString(gattFitText(String(drawBuf), tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, lineY);
 
                         lineY += 12;
                         if (lineY > tftHeight - 20) {
@@ -1464,8 +1543,10 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
                     vTaskDelay(30 / portTICK_PERIOD_MS);
                 }
 
-                pChar->unsubscribe();
-                displaySuccess("Unsubscribed", true);
+                if (pClient && pClient->isConnected()) {
+                    pChar->unsubscribe();
+                    displaySuccess("Unsubscribed", true);
+                }
             }});
         }
 
@@ -1721,12 +1802,12 @@ static void gattSettingsMenu() {
     while (true) {
         std::vector<GattMenuItem> setOptions;
 
-        String rssiLabel = "1. Min RSSI: " + ((g_gattSettings.minRssi <= -95) ? String("None (-95dBm)") : String(g_gattSettings.minRssi) + " dBm");
+        String rssiLabel = "1. Min RSSI: " + ((g_gattSettings.minRssi <= -105) ? String("None (-105dBm)") : String(g_gattSettings.minRssi) + " dBm");
         setOptions.push_back({rssiLabel, []() {
-            if (g_gattSettings.minRssi <= -95) g_gattSettings.minRssi = -85;
+            if (g_gattSettings.minRssi <= -105) g_gattSettings.minRssi = -85;
             else if (g_gattSettings.minRssi == -85) g_gattSettings.minRssi = -75;
             else if (g_gattSettings.minRssi == -75) g_gattSettings.minRssi = -65;
-            else g_gattSettings.minRssi = -95;
+            else g_gattSettings.minRssi = -105;
         }});
 
         String toLabel = "2. Timeout: " + String(g_gattSettings.timeoutSec) + " sec";

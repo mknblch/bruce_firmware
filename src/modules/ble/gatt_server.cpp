@@ -50,18 +50,19 @@
 struct GattServerState {
     volatile bool isRunning = false;
     volatile bool isConnected = false;
-    String peerAddress = "None";
+    char peerAddress[20] = "None";
     uint16_t peerMtu = 23;
     uint32_t readCount = 0;
     uint32_t writeCount = 0;
     uint32_t notifyCount = 0;
-    String lastWriteVal = "";
+    char lastWriteVal[32] = "";
     std::deque<String> logLines;
+    StaticSemaphore_t logMutexBuf;
     SemaphoreHandle_t logMutex = nullptr;
 
     void initMutex() {
         if (!logMutex) {
-            logMutex = xSemaphoreCreateMutex();
+            logMutex = xSemaphoreCreateMutexStatic(&logMutexBuf);
         }
     }
 
@@ -76,17 +77,56 @@ struct GattServerState {
         }
     }
 
+    void setPeer(const char *addr, uint16_t mtu) {
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (addr) {
+                strncpy(peerAddress, addr, sizeof(peerAddress) - 1);
+                peerAddress[sizeof(peerAddress) - 1] = '\0';
+            } else {
+                strcpy(peerAddress, "None");
+            }
+            peerMtu = mtu;
+            xSemaphoreGive(logMutex);
+        }
+    }
+
+    void getPeer(char *outAddr, size_t maxLen, uint16_t *outMtu = nullptr) {
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (outAddr && maxLen > 0) {
+                strncpy(outAddr, peerAddress, maxLen - 1);
+                outAddr[maxLen - 1] = '\0';
+            }
+            if (outMtu) *outMtu = peerMtu;
+            xSemaphoreGive(logMutex);
+        }
+    }
+
+    void setLastWrite(const char *val) {
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (val) {
+                strncpy(lastWriteVal, val, sizeof(lastWriteVal) - 1);
+                lastWriteVal[sizeof(lastWriteVal) - 1] = '\0';
+            } else {
+                lastWriteVal[0] = '\0';
+            }
+            xSemaphoreGive(logMutex);
+        }
+    }
+
     void reset() {
         isRunning = false;
         isConnected = false;
-        peerAddress = "None";
-        peerMtu = 23;
         readCount = 0;
         writeCount = 0;
         notifyCount = 0;
-        lastWriteVal = "";
         initMutex();
         if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            strcpy(peerAddress, "None");
+            peerMtu = 23;
+            lastWriteVal[0] = '\0';
             logLines.clear();
             xSemaphoreGive(logMutex);
         }
@@ -242,16 +282,18 @@ class BruceGattServerCallbacks : public NimBLEServerCallbacks {
 public:
     void onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo) override {
         g_srvState.isConnected = true;
-        g_srvState.peerAddress = String(connInfo.getAddress().toString().c_str());
-        g_srvState.peerMtu = connInfo.getMTU();
-        g_srvState.addLog("[CONN] " + g_srvState.peerAddress);
-        Serial.printf("[GATT-SRV] Connected by: %s (MTU: %d)\n", g_srvState.peerAddress.c_str(), g_srvState.peerMtu);
+        std::string pAddr = connInfo.getAddress().toString();
+        uint16_t mtu = connInfo.getMTU();
+        g_srvState.setPeer(pAddr.c_str(), mtu);
+        g_srvState.addLog("[CONN] " + String(pAddr.c_str()));
+        Serial.printf("[GATT-SRV] Connected by: %s (MTU: %d)\n", pAddr.c_str(), mtu);
     }
 
     void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
         g_srvState.isConnected = false;
-        String peer = String(connInfo.getAddress().toString().c_str());
-        g_srvState.addLog("[DISC] " + peer + " (0x" + String(reason, HEX) + ")");
+        std::string peer = connInfo.getAddress().toString();
+        g_srvState.setPeer("None", 23);
+        g_srvState.addLog("[DISC] " + String(peer.c_str()) + " (0x" + String(reason, HEX) + ")");
         Serial.printf("[GATT-SRV] Disconnected by %s (Reason: 0x%02X)\n", peer.c_str(), reason);
 
         // Automatically resume advertising
@@ -262,7 +304,9 @@ public:
     }
 
     void onMTUChange(uint16_t MTU, NimBLEConnInfo &connInfo) override {
-        g_srvState.peerMtu = MTU;
+        char addr[20] = {0};
+        g_srvState.getPeer(addr, sizeof(addr));
+        g_srvState.setPeer(addr, MTU);
         g_srvState.addLog("[MTU] Updated: " + String(MTU) + " B");
         Serial.printf("[GATT-SRV] MTU changed to: %d\n", MTU);
     }
@@ -281,15 +325,14 @@ public:
         g_srvState.writeCount++;
         String uuidStr = pChar->getUUID().toString().c_str();
         std::string raw = pChar->getValue();
-        String strVal = String(raw.c_str());
-        g_srvState.lastWriteVal = strVal;
+        g_srvState.setLastWrite(raw.c_str());
 
-        String displayVal = strVal;
+        String displayVal = String(raw.c_str());
         if (displayVal.length() > 16) {
             displayVal = displayVal.substring(0, 14) + "..";
         }
         g_srvState.addLog("[WRITE] " + uuidStr + ": \"" + displayVal + "\"");
-        Serial.printf("[GATT-SRV] Write Char %s -> '%s'\n", uuidStr.c_str(), strVal.c_str());
+        Serial.printf("[GATT-SRV] Write Char %s -> '%s'\n", uuidStr.c_str(), raw.c_str());
 
         // If this is Echo characteristic, update value and echo back via notification
         if (uuidStr.equalsIgnoreCase(UUID_CHR_ECHO_RW) || pChar == g_pEchoChar) {
@@ -307,19 +350,18 @@ public:
     void onWrite(NimBLECharacteristic *pChar, NimBLEConnInfo &connInfo) override {
         g_srvState.writeCount++;
         std::string raw = pChar->getValue();
-        String strVal = String(raw.c_str());
-        g_srvState.lastWriteVal = strVal;
+        g_srvState.setLastWrite(raw.c_str());
 
-        String displayVal = strVal;
+        String displayVal = String(raw.c_str());
         if (displayVal.length() > 18) {
             displayVal = displayVal.substring(0, 16) + "..";
         }
         g_srvState.addLog("[NUS RX] \"" + displayVal + "\"");
-        Serial.printf("[GATT-SRV] NUS RX: '%s'\n", strVal.c_str());
+        Serial.printf("[GATT-SRV] NUS RX: '%s'\n", raw.c_str());
 
         // Send ACK over NUS TX if available
         if (g_pNusTxChar && g_srvState.isConnected) {
-            String ack = "ACK: " + strVal;
+            String ack = "ACK: " + String(raw.c_str());
             g_pNusTxChar->setValue(ack.c_str());
             g_pNusTxChar->notify();
             g_srvState.notifyCount++;
@@ -663,8 +705,11 @@ void runGattServer(int profileMode) {
             // Row 3: Peer / Statistics
             int r3Y = r2Y + 8 * FP + 3;
             if (conn) {
+                char peerAddr[20] = {0};
+                uint16_t peerMtu = 23;
+                g_srvState.getPeer(peerAddr, sizeof(peerAddr), &peerMtu);
                 tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-                tft.drawString(srvFitText("Peer: " + g_srvState.peerAddress + " (MTU " + String(g_srvState.peerMtu) + ")", boxW), boxX, r3Y, 1);
+                tft.drawString(srvFitText("Peer: " + String(peerAddr) + " (MTU " + String(peerMtu) + ")", boxW), boxX, r3Y, 1);
             } else {
                 tft.setTextColor(srvDimColor(), bruceConfig.bgColor);
                 tft.drawString("Ready for connections (1M PHY)", boxX, r3Y, 1);
