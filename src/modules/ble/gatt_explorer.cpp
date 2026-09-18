@@ -767,46 +767,47 @@ static void runContinuousScan(GattFilterMode filterMode) {
                 xSemaphoreGive(g_gattScanMutex);
             }
 
+            GattUiGeom g = gattUiGeom();
             tft.setTextSize(FP);
 
             // Row 1: Filter info
-            tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 12, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+            tft.fillRect(BORDER_PAD_X, g.top, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
             tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            tft.drawString("Filter: " + String(getFilterModeName(filterMode)), BORDER_PAD_X, BORDER_PAD_Y + 12);
+            tft.drawString("Filter: " + String(getFilterModeName(filterMode)), BORDER_PAD_X, g.top);
 
             // Row 2: Live status & spinner
-            tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 26, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+            tft.fillRect(BORDER_PAD_X, g.top + 13, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
             tft.setTextColor(TFT_GREEN, bruceConfig.bgColor);
             tft.drawString(
                 "[" + String(spinner[animFrame]) + "] Scanning... Found: " + String(devCount),
                 BORDER_PAD_X,
-                BORDER_PAD_Y + 26
+                g.top + 13
             );
 
             // Row 3: Packets
-            tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 40, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+            tft.fillRect(BORDER_PAD_X, g.top + 26, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
             tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            tft.drawString("Packets RX: " + String(g_scanPackets), BORDER_PAD_X, BORDER_PAD_Y + 40);
+            tft.drawString("Packets RX: " + String(g_scanPackets), BORDER_PAD_X, g.top + 26);
 
             // Row 4-5: Latest found device
-            tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 54, tftWidth - 2 * BORDER_PAD_X, 24 * FP, bruceConfig.bgColor);
+            tft.fillRect(BORDER_PAD_X, g.top + 39, tftWidth - 2 * BORDER_PAD_X, 24 * FP, bruceConfig.bgColor);
             if (hasLatest) {
                 tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
                 String devLine = "[" + latestCopy.tag + "] " + latestCopy.name + " (" + String(latestCopy.rssi) + "dBm)";
-                tft.drawString(gattFitText(devLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, BORDER_PAD_Y + 54);
+                tft.drawString(gattFitText(devLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 39);
 
                 String addrLine = "MAC: " + String(latestCopy.address.toString().c_str()) + " " +
                                   ((latestCopy.addressType == BLE_ADDR_PUBLIC) ? "[PUB]" : "[RND]");
-                tft.drawString(gattFitText(addrLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, BORDER_PAD_Y + 66);
+                tft.drawString(gattFitText(addrLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 51);
             } else {
                 tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
-                tft.drawString("Listening for connectable beacons...", BORDER_PAD_X, BORDER_PAD_Y + 54);
+                tft.drawString("Listening for connectable beacons...", BORDER_PAD_X, g.top + 39);
             }
 
             // Footer instructions
-            tft.fillRect(BORDER_PAD_X, tftHeight - 16, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+            tft.fillRect(BORDER_PAD_X, g.footY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
             tft.setTextColor(gattDimColor(), bruceConfig.bgColor);
-            tft.drawCentreString("Press [SEL] or [ESC] to Stop", tftWidth / 2, tftHeight - 14, 1);
+            tft.drawCentreString("Press [SEL] or [ESC] to Stop", tftWidth / 2, g.footY, 1);
         }
 
         vTaskDelay(30 / portTICK_PERIOD_MS);
@@ -1081,13 +1082,17 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
                 uint32_t elapsed = now - startMs;
                 int remainSec = (elapsed < perStratTimeoutMs) ? (int)((perStratTimeoutMs - elapsed + 999) / 1000) : 0;
 
+                GattUiGeom g = gattUiGeom();
                 tft.setTextSize(FP);
                 tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
+                int stratY = g.footY - 24;
+                int statusY = g.footY - 12;
+
                 // Strategy line
                 String stratLine = "Strat " + String((int)i + 1) + "/" + String((int)totalStrats) + ": " + strat.name;
-                tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 40, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
-                tft.drawString(gattFitText(stratLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, BORDER_PAD_Y + 40);
+                tft.fillRect(BORDER_PAD_X, stratY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+                tft.drawString(gattFitText(stratLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, stratY);
 
                 // Live status & countdown
                 String statusLine = "[" + String(spinnerChars[spinnerIdx]) + "] Handshake... (" + String(remainSec) + "s left)";
@@ -1096,8 +1101,13 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
                     snprintf(errTag, sizeof(errTag), " (prev: 0x%02X)", (unsigned int)lastErr);
                     statusLine += errTag;
                 }
-                tft.fillRect(BORDER_PAD_X, BORDER_PAD_Y + 54, tftWidth - 2 * BORDER_PAD_X, 11, bruceConfig.bgColor);
-                tft.drawString(gattFitText(statusLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, BORDER_PAD_Y + 54);
+                tft.fillRect(BORDER_PAD_X, statusY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+                tft.drawString(gattFitText(statusLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, statusY);
+
+                // Cancel reminder
+                tft.fillRect(BORDER_PAD_X, g.footY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+                tft.setTextColor(gattDimColor(), bruceConfig.bgColor);
+                tft.drawCentreString("Press [ESC] to Cancel", tftWidth / 2, g.footY, 1);
             }
 
             vTaskDelay(20 / portTICK_PERIOD_MS);
@@ -1151,7 +1161,7 @@ static void showBleConnectDiagnostics(const BleConnDiagInfo &diag, const GattSca
     drawMainBorderWithTitle("BLE CONNECT DIAG");
     tft.setTextSize(FP);
 
-    int y = BORDER_PAD_Y + 16;
+    int y = gattUiGeom().top;
     const int step = 11;
 
     // Status Code & Error description
@@ -1182,7 +1192,8 @@ static void showBleConnectDiagnostics(const BleConnDiagInfo &diag, const GattSca
     tft.drawString(stratLine, BORDER_PAD_X, y); y += step + 3;
 
     tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
-    tft.drawCentreString("Press SEL or ESC to return", tftWidth / 2, tftHeight - BORDER_PAD_Y - 9, 1);
+    tft.fillRect(BORDER_PAD_X, gattUiGeom().footY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+    tft.drawCentreString("Press SEL or ESC to return", tftWidth / 2, gattUiGeom().footY, 1);
 
     while (true) {
         if (check(EscPress) || check(SelPress) || check(PrevPress) || check(NextPress)) {
@@ -1201,11 +1212,12 @@ static void exploreGattDevice(GattScannedDevice &device) {
         device.vendor = resolveBleOui(device.address, true);
     }
 
-    drawMainBorder(true);
+    drawMainBorderWithTitle("GATT CONNECT");
     tft.setTextSize(FP);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
-    int rowY = BORDER_PAD_Y + 16;
+    GattUiGeom g = gattUiGeom();
+    int rowY = g.top;
     const int step = 11;
     tft.drawString("Target: " + gattFitText(device.name, tftWidth - 20), BORDER_PAD_X, rowY); rowY += step;
     if (device.vendor.length() > 0) {
@@ -1213,8 +1225,7 @@ static void exploreGattDevice(GattScannedDevice &device) {
     }
     tft.drawString("MAC:    " + String(device.address.toString().c_str()), BORDER_PAD_X, rowY); rowY += step;
     tft.drawString("Type:   " + String((device.addressType == BLE_ADDR_PUBLIC) ? "PUBLIC" : "RANDOM"), BORDER_PAD_X, rowY); rowY += step;
-    tft.drawString("Signal: " + String(device.rssi) + " dBm", BORDER_PAD_X, rowY); rowY += step + 2;
-    tft.drawString("Connecting to GATT server...", BORDER_PAD_X, rowY);
+    tft.drawString("Signal: " + String(device.rssi) + " dBm", BORDER_PAD_X, rowY);
 
     NimBLEClient *pClient = nullptr;
     int connError = 0;
@@ -1231,7 +1242,10 @@ static void exploreGattDevice(GattScannedDevice &device) {
         return;
     }
 
-    tft.drawString("Connected! Discovering attributes...", BORDER_PAD_X, rowY + step);
+    int statusY = g.footY - 12;
+    tft.fillRect(BORDER_PAD_X, statusY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+    tft.setTextColor(TFT_GREEN, bruceConfig.bgColor);
+    tft.drawString(gattFitText("Connected! Discovering attributes...", tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, statusY);
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
     pClient->discoverAttributes();
@@ -1474,13 +1488,14 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
 
         if (pChar->canNotify() || pChar->canIndicate()) {
             actOptions.push_back({"4. Live Notify Stream", [pClient, pChar, cName]() {
+                GattUiGeom sg = gattUiGeom();
                 drawMainBorderWithTitle("LIVE STREAM");
                 tft.setTextSize(FP);
                 tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
-                tft.drawString("Stream: " + gattFitText(cName, tftWidth - 20), BORDER_PAD_X, BORDER_PAD_Y + 12);
-                tft.drawString("Press [SEL] or [ESC] to stop", BORDER_PAD_X, BORDER_PAD_Y + 24);
-                tft.drawFastHLine(BORDER_PAD_X, BORDER_PAD_Y + 36, tftWidth - 2 * BORDER_PAD_X, bruceConfig.priColor);
+                tft.drawString("Stream: " + gattFitText(cName, tftWidth - 20), BORDER_PAD_X, sg.top);
+                tft.drawString("Press [SEL] or [ESC] to stop", BORDER_PAD_X, sg.top + 11);
+                tft.drawFastHLine(BORDER_PAD_X, sg.top + 23, tftWidth - 2 * BORDER_PAD_X, bruceConfig.priColor);
 
                 static StaticSemaphore_t s_streamMutexBuf;
                 static SemaphoreHandle_t s_streamMutex = nullptr;
@@ -1522,7 +1537,7 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
                     return;
                 }
 
-                int lineY = BORDER_PAD_Y + 42;
+                int lineY = sg.top + 27;
                 while (true) {
                     if (check(EscPress) || check(SelPress)) break;
 
@@ -1550,7 +1565,7 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
 
                         lineY += 12;
                         if (lineY > tftHeight - 20) {
-                            lineY = BORDER_PAD_Y + 42;
+                            lineY = sg.top + 27;
                             tft.fillRect(BORDER_PAD_X, lineY, tftWidth - 2 * BORDER_PAD_X, tftHeight - lineY - 18, bruceConfig.bgColor);
                         }
                     }
@@ -1600,7 +1615,7 @@ static void readStandardDeviceInfo(NimBLEClient *pClient) {
     drawMainBorderWithTitle("DEVICE REPORT");
     tft.setTextSize(FP);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-    tft.drawString("Querying Device Information...", BORDER_PAD_X, BORDER_PAD_Y + 16);
+    tft.drawString("Querying Device Information...", BORDER_PAD_X, gattUiGeom().top);
 
     String manufacturer = "N/A";
     String model = "N/A";
@@ -1755,13 +1770,14 @@ static void runAutoDumpAll() {
         return;
     }
 
+    GattUiGeom sg = gattUiGeom();
     drawMainBorderWithTitle("AUTO-DUMP ALL");
     tft.setTextSize(FP);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
     int total = g_discoveredDevices.size();
     int successCount = 0;
-    int lineY = BORDER_PAD_Y + 14;
+    int lineY = sg.top;
 
     for (int i = 0; i < total; i++) {
         if (check(EscPress)) {
@@ -1794,7 +1810,7 @@ static void runAutoDumpAll() {
         vTaskDelay(100 / portTICK_PERIOD_MS);
 
         if (lineY > tftHeight - 24) {
-            lineY = BORDER_PAD_Y + 14;
+            lineY = sg.top;
             tft.fillRect(BORDER_PAD_X, lineY, tftWidth - 2 * BORDER_PAD_X, tftHeight - lineY - 14, bruceConfig.bgColor);
         }
     }
