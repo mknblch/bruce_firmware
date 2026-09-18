@@ -32,8 +32,10 @@ enum GattFilterMode {
 };
 
 struct GattSettings {
-    int minRssi = -105;        // -105 (All), -85, -75, -65
-    int timeoutSec = 3;       // 3, 5, 8, 12
+    int minRssi = -100;        // -100 (All), -85, -75, -65
+    int timeoutSec = 3;       // 3, 5, 8, 12, 15
+    int scanRespTimeout = 50;  // 0 (Off), 50, 100, 250, 500 ms
+    bool includeOnDiscovered = true; // false (onResult only), true (include onDiscovered)
     int addrTypeFilter = 0;   // 0: Any, 1: Public only, 2: Random only
     int maxDevices = 60;      // Ring buffer capacity: 20, 40, 60, 80
 };
@@ -396,7 +398,9 @@ static const char *getFilterModeName(GattFilterMode mode) {
 class GattScanCallbacks : public NimBLEScanCallbacks {
 public:
     void onDiscovered(const NimBLEAdvertisedDevice *dev) override {
-        processDevice(dev);
+        if (g_gattSettings.includeOnDiscovered) {
+            processDevice(dev);
+        }
     }
 
     void onResult(const NimBLEAdvertisedDevice *dev) override {
@@ -422,7 +426,7 @@ private:
 
         // 3. Early mutex acquisition
         gattEnsureScanMutex();
-        if (!g_gattScanMutex || xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(15)) != pdTRUE) {
+        if (!g_gattScanMutex || xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
             return;
         }
 
@@ -716,7 +720,7 @@ static void runContinuousScan(GattFilterMode filterMode) {
     pScan->setInterval(100);
     pScan->setWindow(99);
     pScan->setDuplicateFilter(false);
-    pScan->setScanResponseTimeout(250);
+    pScan->setScanResponseTimeout(g_gattSettings.scanRespTimeout);
     pScan->setMaxResults(0);
     pScan->clearResults();
 
@@ -1802,12 +1806,12 @@ static void gattSettingsMenu() {
     while (true) {
         std::vector<GattMenuItem> setOptions;
 
-        String rssiLabel = "1. Min RSSI: " + ((g_gattSettings.minRssi <= -105) ? String("None (-105dBm)") : String(g_gattSettings.minRssi) + " dBm");
+        String rssiLabel = "1. Min RSSI: " + ((g_gattSettings.minRssi <= -100) ? String("None (-100dBm)") : String(g_gattSettings.minRssi) + " dBm");
         setOptions.push_back({rssiLabel, []() {
-            if (g_gattSettings.minRssi <= -105) g_gattSettings.minRssi = -85;
+            if (g_gattSettings.minRssi <= -100) g_gattSettings.minRssi = -85;
             else if (g_gattSettings.minRssi == -85) g_gattSettings.minRssi = -75;
             else if (g_gattSettings.minRssi == -75) g_gattSettings.minRssi = -65;
-            else g_gattSettings.minRssi = -105;
+            else g_gattSettings.minRssi = -100;
         }});
 
         String toLabel = "2. Timeout: " + String(g_gattSettings.timeoutSec) + " sec";
@@ -1815,10 +1819,25 @@ static void gattSettingsMenu() {
             if (g_gattSettings.timeoutSec == 3) g_gattSettings.timeoutSec = 5;
             else if (g_gattSettings.timeoutSec == 5) g_gattSettings.timeoutSec = 8;
             else if (g_gattSettings.timeoutSec == 8) g_gattSettings.timeoutSec = 12;
+            else if (g_gattSettings.timeoutSec == 12) g_gattSettings.timeoutSec = 15;
             else g_gattSettings.timeoutSec = 3;
         }});
 
-        String addrLabel = "3. Addr Type: ";
+        String respToLabel = "3. Resp Timeout: " + ((g_gattSettings.scanRespTimeout == 0) ? String("Off (0ms)") : String(g_gattSettings.scanRespTimeout) + " ms");
+        setOptions.push_back({respToLabel, []() {
+            if (g_gattSettings.scanRespTimeout == 0) g_gattSettings.scanRespTimeout = 50;
+            else if (g_gattSettings.scanRespTimeout == 50) g_gattSettings.scanRespTimeout = 100;
+            else if (g_gattSettings.scanRespTimeout == 100) g_gattSettings.scanRespTimeout = 250;
+            else if (g_gattSettings.scanRespTimeout == 250) g_gattSettings.scanRespTimeout = 500;
+            else g_gattSettings.scanRespTimeout = 0;
+        }});
+
+        String discLabel = "4. Inc onDiscovered: " + String(g_gattSettings.includeOnDiscovered ? "Yes" : "No");
+        setOptions.push_back({discLabel, []() {
+            g_gattSettings.includeOnDiscovered = !g_gattSettings.includeOnDiscovered;
+        }});
+
+        String addrLabel = "5. Addr Type: ";
         if (g_gattSettings.addrTypeFilter == 0) addrLabel += "Any";
         else if (g_gattSettings.addrTypeFilter == 1) addrLabel += "Public Only";
         else addrLabel += "Random Only";
@@ -1826,7 +1845,7 @@ static void gattSettingsMenu() {
             g_gattSettings.addrTypeFilter = (g_gattSettings.addrTypeFilter + 1) % 3;
         }});
 
-        String maxLabel = "4. Max Devices (RSSI): " + String(g_gattSettings.maxDevices) + " dev";
+        String maxLabel = "6. Max Devices (RSSI): " + String(g_gattSettings.maxDevices) + " dev";
         setOptions.push_back({maxLabel, []() {
             if (g_gattSettings.maxDevices == 20) g_gattSettings.maxDevices = 40;
             else if (g_gattSettings.maxDevices == 40) g_gattSettings.maxDevices = 60;
