@@ -32,16 +32,26 @@ enum Rtl433Preset {
     RTL433_PRESET_COUNT
 };
 
-enum Rtl433HopGroup {
-    RTL433_HOP_433_ALL = 0,       // 433.92 MHz: OOK + 2-FSK + GFSK + MSK
-    RTL433_HOP_868_ALL,           // 868 MHz: OOK + 2-FSK + GFSK + MSK Mode T/S
-    RTL433_HOP_ALL_PRESETS,       // All Presets across all bands and modulations
-    RTL433_HOP_WEATHER,           // Weather: 433 OOK, 433 FSK, 433 GFSK, 868 OOK, 868 FSK, 868 GFSK
-    RTL433_HOP_TPMS,              // TPMS: 433 OOK, 433 FSK, 315 OOK, 315 FSK, 315 GFSK
-    RTL433_HOP_METERS,            // Smart Meters (wM-Bus): 868 MSK Mode T, 868 MSK Mode S, 433 MSK
-    RTL433_HOP_315_ALL,           // 315.00 MHz: OOK + 2-FSK + GFSK
-    RTL433_HOP_GROUP_COUNT
+enum Rtl433ChangingPreset {
+    RTL433_CHANGING_433_ALL = 0,       // 433.92 MHz: OOK + 2-FSK + GFSK + MSK
+    RTL433_CHANGING_868_ALL,           // 868 MHz: OOK + 2-FSK + GFSK + MSK Mode T/S
+    RTL433_CHANGING_ALL_PRESETS,       // All Presets across all bands and modulations
+    RTL433_CHANGING_WEATHER,           // Weather: 433 OOK, 433 FSK, 433 GFSK, 868 OOK, 868 FSK, 868 GFSK
+    RTL433_CHANGING_TPMS,              // TPMS: 433 OOK, 433 FSK, 315 OOK, 315 FSK, 315 GFSK
+    RTL433_CHANGING_METERS,            // Smart Meters (wM-Bus): 868 MSK Mode T, 868 MSK Mode S, 433 MSK
+    RTL433_CHANGING_315_ALL,           // 315.00 MHz: OOK + 2-FSK + GFSK
+    RTL433_CHANGING_PRESET_COUNT
 };
+
+typedef Rtl433ChangingPreset Rtl433HopGroup;
+#define RTL433_HOP_433_ALL RTL433_CHANGING_433_ALL
+#define RTL433_HOP_868_ALL RTL433_CHANGING_868_ALL
+#define RTL433_HOP_ALL_PRESETS RTL433_CHANGING_ALL_PRESETS
+#define RTL433_HOP_WEATHER RTL433_CHANGING_WEATHER
+#define RTL433_HOP_TPMS RTL433_CHANGING_TPMS
+#define RTL433_HOP_METERS RTL433_CHANGING_METERS
+#define RTL433_HOP_315_ALL RTL433_CHANGING_315_ALL
+#define RTL433_HOP_GROUP_COUNT RTL433_CHANGING_PRESET_COUNT
 
 struct Rtl433PresetDef {
     const char *name;
@@ -55,8 +65,10 @@ struct Rtl433PresetDef {
 
 const Rtl433PresetDef *rtl433_get_preset_def(int preset);
 const char *rtl433_get_preset_name(int preset);
-std::vector<int> rtl433_get_hop_presets(int hopGroup);
-const char *rtl433_get_hop_group_name(int hopGroup);
+std::vector<int> rtl433_get_changing_presets(int changingPreset);
+const char *rtl433_get_changing_preset_name(int changingPreset);
+inline std::vector<int> rtl433_get_hop_presets(int hopGroup) { return rtl433_get_changing_presets(hopGroup); }
+inline const char *rtl433_get_hop_group_name(int hopGroup) { return rtl433_get_changing_preset_name(hopGroup); }
 
 // ---------------------------------------------------------------------------
 // Decoded Telemetry Reading
@@ -313,6 +325,7 @@ public:
     // Signal Replay & .sub Export
     bool replayReading(const Rtl433Reading &reading, int repeatCount = 0);
     bool saveSubFile(const Rtl433Reading &reading, String *outFilename = nullptr);
+    size_t saveAllSubFiles(int *savedCount = nullptr);
 
     // Stats
     uint32_t getPacketsReceived() const { return _packetsReceived; }
@@ -321,12 +334,14 @@ public:
 
     int currentPreset = RTL433_PRESET_OOK_433;
     float currentFrequency = 433.92f;
-    bool sdLoggingEnabled = false;
-
-    // Hopping settings
-    int hopGroup = RTL433_HOP_433_ALL;
+    bool isChangingPreset = false;
+    int changingPreset = RTL433_CHANGING_433_ALL;
+    int hopGroup = RTL433_CHANGING_433_ALL;
     uint32_t hopTimeoutMs = 10000;
     bool hopStayOnSignal = true;
+    bool sdLoggingEnabled = false;
+
+    String getActivePresetName() const;
 
     // Replay settings
     bool replayPreamble = true;      // Synthesize clean lead-in preamble before payload

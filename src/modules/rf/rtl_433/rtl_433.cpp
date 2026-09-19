@@ -31,42 +31,49 @@ const char *rtl433_get_preset_name(int preset) {
     return rtl433_get_preset_def(preset)->name;
 }
 
-std::vector<int> rtl433_get_hop_presets(int hopGroup) {
-    switch (hopGroup) {
-        case RTL433_HOP_433_ALL:
+std::vector<int> rtl433_get_changing_presets(int changingPreset) {
+    switch (changingPreset) {
+        case RTL433_CHANGING_433_ALL:
             return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_FSK_433_19K, RTL433_PRESET_GFSK_433_17K, RTL433_PRESET_MSK_433_100K};
-        case RTL433_HOP_868_ALL:
+        case RTL433_CHANGING_868_ALL:
             return {RTL433_PRESET_OOK_868, RTL433_PRESET_FSK_868_17K, RTL433_PRESET_GFSK_868_17K, RTL433_PRESET_MSK_868_T, RTL433_PRESET_MSK_868_S};
-        case RTL433_HOP_ALL_PRESETS:
+        case RTL433_CHANGING_ALL_PRESETS:
             return {
                 RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_FSK_433_19K, RTL433_PRESET_GFSK_433_17K, RTL433_PRESET_MSK_433_100K,
                 RTL433_PRESET_OOK_868, RTL433_PRESET_FSK_868_17K, RTL433_PRESET_GFSK_868_17K, RTL433_PRESET_MSK_868_T, RTL433_PRESET_MSK_868_S,
                 RTL433_PRESET_OOK_345, RTL433_PRESET_OOK_315, RTL433_PRESET_FSK_315_19K, RTL433_PRESET_GFSK_315_19K
             };
-        case RTL433_HOP_WEATHER:
+        case RTL433_CHANGING_WEATHER:
             return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_GFSK_433_17K, RTL433_PRESET_OOK_868, RTL433_PRESET_FSK_868_17K, RTL433_PRESET_GFSK_868_17K};
-        case RTL433_HOP_TPMS:
+        case RTL433_CHANGING_TPMS:
             return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_19K, RTL433_PRESET_OOK_315, RTL433_PRESET_FSK_315_19K, RTL433_PRESET_GFSK_315_19K};
-        case RTL433_HOP_METERS:
+        case RTL433_CHANGING_METERS:
             return {RTL433_PRESET_MSK_868_T, RTL433_PRESET_MSK_868_S, RTL433_PRESET_MSK_433_100K};
-        case RTL433_HOP_315_ALL:
+        case RTL433_CHANGING_315_ALL:
             return {RTL433_PRESET_OOK_315, RTL433_PRESET_FSK_315_19K, RTL433_PRESET_GFSK_315_19K};
         default:
             return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_GFSK_433_17K};
     }
 }
 
-const char *rtl433_get_hop_group_name(int hopGroup) {
-    switch (hopGroup) {
-        case RTL433_HOP_433_ALL: return "433M (All Modes)";
-        case RTL433_HOP_868_ALL: return "868M (All Modes)";
-        case RTL433_HOP_ALL_PRESETS: return "All Presets";
-        case RTL433_HOP_WEATHER: return "Weather Sensors";
-        case RTL433_HOP_TPMS: return "TPMS Sensors";
-        case RTL433_HOP_METERS: return "Smart Meters / wM-Bus";
-        case RTL433_HOP_315_ALL: return "315M (All Modes)";
+const char *rtl433_get_changing_preset_name(int changingPreset) {
+    switch (changingPreset) {
+        case RTL433_CHANGING_433_ALL: return "433M (All Modes)";
+        case RTL433_CHANGING_868_ALL: return "868M (All Modes)";
+        case RTL433_CHANGING_ALL_PRESETS: return "All Presets";
+        case RTL433_CHANGING_WEATHER: return "Weather Sensors";
+        case RTL433_CHANGING_TPMS: return "TPMS Sensors";
+        case RTL433_CHANGING_METERS: return "Smart Meters / wM-Bus";
+        case RTL433_CHANGING_315_ALL: return "315M (All Modes)";
         default: return "433M (All Modes)";
     }
+}
+
+String Rtl433Engine::getActivePresetName() const {
+    if (isChangingPreset) {
+        return String("Changing: ") + rtl433_get_changing_preset_name(changingPreset);
+    }
+    return String("Fixed: ") + rtl433_get_preset_name(currentPreset);
 }
 
 // ---------------------------------------------------------------------------
@@ -563,10 +570,19 @@ bool Rtl433Engine::saveSubFile(const Rtl433Reading &reading, String *outFilename
 
     if (!fs->exists("/BruceRF")) fs->mkdir("/BruceRF");
 
-    String cleanName = reading.decoder_name;
+    String cleanName = reading.decoder_name.length() > 0 ? reading.decoder_name : "RTL433";
     cleanName.replace(" ", "_");
     cleanName.replace("/", "_");
-    String base = "/BruceRF/" + cleanName + "_" + String(reading.device_id);
+
+    String cleanMod = reading.modulation.length() > 0 ? reading.modulation : "OOK";
+    cleanMod.replace(" ", "_");
+    cleanMod.replace("/", "_");
+    cleanMod.replace("-", "");
+
+    char freqBuf[16];
+    snprintf(freqBuf, sizeof(freqBuf), "%.2fM", reading.frequency);
+
+    String base = "/BruceRF/" + cleanName + "_" + String(freqBuf) + "_" + cleanMod + "_" + String(reading.device_id);
     String path = base + ".sub";
     int idx = 1;
     while (fs->exists(path)) {
@@ -579,7 +595,7 @@ bool Rtl433Engine::saveSubFile(const Rtl433Reading &reading, String *outFilename
     file.println("Filetype: Bruce SubGhz File");
     file.println("Version 1");
     file.println("Frequency: " + String((int)(reading.frequency * 1000000)));
-    file.println("Preset: " + String((reading.modulation == "2-FSK") ? "2FSKDev238Async" : "Ook270Async"));
+    file.println("Preset: " + String((reading.modulation == "2-FSK" || reading.modulation == "FSK" || reading.modulation == "GFSK" || reading.modulation == "MSK") ? "2FSKDev238Async" : "Ook270Async"));
     file.println("Protocol: RAW");
 
     String rawStr = "RAW_Data: ";
@@ -595,6 +611,17 @@ bool Rtl433Engine::saveSubFile(const Rtl433Reading &reading, String *outFilename
     file.close();
     if (outFilename) *outFilename = path;
     return true;
+}
+
+size_t Rtl433Engine::saveAllSubFiles(int *savedCount) {
+    int saved = 0;
+    for (const auto &reading : _recentReadings) {
+        if (saveSubFile(reading)) {
+            saved++;
+        }
+    }
+    if (savedCount) *savedCount = saved;
+    return saved;
 }
 
 // ---------------------------------------------------------------------------

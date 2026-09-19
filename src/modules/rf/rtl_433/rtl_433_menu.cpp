@@ -77,27 +77,28 @@ static void show_reading_details(int index) {
 
         tft.setTextColor(getColorVariation(bruceConfig.priColor), bruceConfig.bgColor);
         tft.drawCentreString(
-            "[OK] Menu   [ESC] Back", tftWidth / 2, tftHeight - BORDER_PAD_X - FP * LH, SMOOTH_FONT
+            "[OK] Menu   [< / ESC] Back", tftWidth / 2, tftHeight - BORDER_PAD_X - FP * LH, SMOOTH_FONT
         );
 
         rf_clear_nav_state();
         delay(100);
 
         while (1) {
-            if (check(EscPress)) {
+            if (check(EscPress) || check(PrevPress) || check(UpPress) || check(PrevPagePress)) {
                 exitView = true;
                 break;
             }
             if (check(SelPress)) {
-                enum Action { ACT_NONE, ACT_REPLAY, ACT_SAVE, ACT_DUMP, ACT_CLEAR, ACT_BACK };
+                enum Action { ACT_NONE, ACT_REPLAY, ACT_SAVE_ONE, ACT_SAVE_ALL, ACT_DUMP, ACT_CLEAR, ACT_BACK };
                 Action chosenAction = ACT_NONE;
 
                 std::vector<Option> opts = {
-                    {"Replay RF",     [&]() { chosenAction = ACT_REPLAY; }},
-                    {"Save to .SUB",  [&]() { chosenAction = ACT_SAVE; }},
-                    {"Dump JSON",     [&]() { chosenAction = ACT_DUMP; }},
-                    {"Clear Results", [&]() { chosenAction = ACT_CLEAR; }},
-                    {"Go Back",       [&]() { chosenAction = ACT_BACK; }},
+                    {"Replay RF",        [&]() { chosenAction = ACT_REPLAY; }},
+                    {"Save Packet",      [&]() { chosenAction = ACT_SAVE_ONE; }},
+                    {"Save All",         [&]() { chosenAction = ACT_SAVE_ALL; }},
+                    {"Dump JSON",        [&]() { chosenAction = ACT_DUMP; }},
+                    {"Clear Results",    [&]() { chosenAction = ACT_CLEAR; }},
+                    {"Go Back",          [&]() { chosenAction = ACT_BACK; }},
                 };
 
                 loopOptions(opts, MENU_TYPE_SUBMENU, r.protocol.c_str());
@@ -108,10 +109,20 @@ static void show_reading_details(int index) {
                         engine.replayReading(r);
                         delay(600);
                         break;
-                    case ACT_SAVE: {
+                    case ACT_SAVE_ONE: {
                         String savedPath;
                         if (engine.saveSubFile(r, &savedPath)) {
                             displaySuccess("Saved: " + savedPath, true);
+                        } else {
+                            displayError("Save failed", true);
+                        }
+                        break;
+                    }
+                    case ACT_SAVE_ALL: {
+                        int saved = 0;
+                        engine.saveAllSubFiles(&saved);
+                        if (saved > 0) {
+                            displaySuccess("Saved " + String(saved) + " in BruceRF", true);
                         } else {
                             displayError("Save failed", true);
                         }
@@ -162,6 +173,15 @@ static void view_recent_packets_menu() {
                 opts.push_back({line, [idx]() { show_reading_details(idx); }});
             }
         }
+        opts.push_back({"Save All (.SUB)", [&]() {
+            int saved = 0;
+            engine.saveAllSubFiles(&saved);
+            if (saved > 0) {
+                displaySuccess("Saved " + String(saved) + " in BruceRF", true);
+            } else {
+                displayError("Save failed", true);
+            }
+        }});
         opts.push_back({"Clear Results", [&]() {
             Rtl433Engine::instance().clearRecent();
             displaySuccess("Cleared List", true);
@@ -178,21 +198,95 @@ static void view_recent_packets_menu() {
     }
 }
 
-static void select_preset_menu() {
+static void select_fixed_preset_menu() {
     Rtl433Engine &engine = Rtl433Engine::instance();
     std::vector<Option> opts;
 
     for (int p = 0; p < RTL433_PRESET_COUNT; p++) {
         const Rtl433PresetDef *pdef = rtl433_get_preset_def(p);
         String label = String(pdef->name) + " (" + String(pdef->default_freq, 2) + "M)";
-        opts.push_back({label, [p, &engine]() {
+        opts.push_back({label, [p, &engine, pdef]() {
+            engine.isChangingPreset = false;
             engine.currentPreset = p;
-            engine.currentFrequency = rtl433_get_preset_def(p)->default_freq;
-            displaySuccess("Set: " + String(rtl433_get_preset_name(p)), true);
+            engine.currentFrequency = pdef->default_freq;
+            displaySuccess("Fixed: " + String(rtl433_get_preset_name(p)), true);
         }});
     }
     opts.push_back({"Go Back", []() {}});
-    loopOptions(opts, engine.currentPreset);
+    loopOptions(opts, engine.isChangingPreset ? 0 : engine.currentPreset);
+}
+
+static void select_changing_preset_menu() {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    std::vector<Option> opts;
+
+    for (int g = 0; g < RTL433_CHANGING_PRESET_COUNT; g++) {
+        const char *name = rtl433_get_changing_preset_name(g);
+        opts.push_back({name, [&engine, g, name]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = g;
+            engine.hopGroup = g;
+            displaySuccess("Changing: " + String(name), true);
+        }});
+    }
+    opts.push_back({"Go Back", []() {}});
+    loopOptions(opts, engine.isChangingPreset ? engine.changingPreset : 0);
+}
+
+static void select_hop_timeout_menu() {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    struct TimeoutOpt {
+        uint32_t ms;
+        const char *name;
+    };
+    static const TimeoutOpt timeoutOpts[] = {
+        {3000,   "3 seconds (Fast)"},
+        {5000,   "5 seconds"},
+        {10000,  "10 seconds (Standard)"},
+        {15000,  "15 seconds"},
+        {30000,  "30 seconds (Sensor Cycle)"},
+        {60000,  "60 seconds (1 minute)"},
+        {120000, "120 seconds (2 minutes)"},
+    };
+    std::vector<Option> opts;
+    for (size_t i = 0; i < sizeof(timeoutOpts) / sizeof(timeoutOpts[0]); i++) {
+        uint32_t ms = timeoutOpts[i].ms;
+        const char *label = timeoutOpts[i].name;
+        opts.push_back({label, [&engine, ms, label]() {
+            engine.hopTimeoutMs = ms;
+            displaySuccess(String("Interval: ") + label, true);
+        }});
+    }
+    opts.push_back({"Go Back", []() {}});
+    loopOptions(opts, MENU_TYPE_SUBMENU, "Hop Interval");
+}
+
+void rtl433_presets_menu() {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    bool exitPresets = false;
+
+    while (!exitPresets) {
+        String fixedLabel = String("Fixed Presets") + (!engine.isChangingPreset ? " [*]" : "");
+        String changingLabel = String("Changing Presets") + (engine.isChangingPreset ? " [*]" : "");
+        String intervalStr = "Hop Interval (" + String(engine.hopTimeoutMs / 1000) + "s)";
+
+        std::vector<Option> opts = {
+            {fixedLabel,                                                                select_fixed_preset_menu   },
+            {changingLabel,                                                             select_changing_preset_menu},
+            {intervalStr,                                                               select_hop_timeout_menu    },
+            {String("Extend on Signal: ") + (engine.hopStayOnSignal ? "[ON]" : "[OFF]"), [&]() {
+                engine.hopStayOnSignal = !engine.hopStayOnSignal;
+                displayInfo(String("Extend on Signal: ") + (engine.hopStayOnSignal ? "ON" : "OFF"), true);
+            }},
+            {"Go Back",                                                                 [&]() { exitPresets = true; }},
+        };
+
+        int res = loopOptions(opts, MENU_TYPE_SUBMENU, "RTL433 Presets");
+        if (check(EscPress) || res < 0 || returnToMenu || exitPresets) {
+            returnToMenu = false;
+            break;
+        }
+    }
 }
 
 static void select_frequency_menu() {
@@ -262,71 +356,6 @@ static void show_decoders_info() {
     rf_clear_nav_state();
 }
 
-static void select_hop_timeout_menu() {
-    Rtl433Engine &engine = Rtl433Engine::instance();
-    struct TimeoutOpt {
-        uint32_t ms;
-        const char *name;
-    };
-    static const TimeoutOpt timeoutOpts[] = {
-        {3000,   "3 seconds (Fast)"},
-        {5000,   "5 seconds"},
-        {10000,  "10 seconds (Standard)"},
-        {15000,  "15 seconds"},
-        {30000,  "30 seconds (Sensor Cycle)"},
-        {60000,  "60 seconds (1 minute)"},
-        {120000, "120 seconds (2 minutes)"},
-    };
-    std::vector<Option> opts;
-    for (size_t i = 0; i < sizeof(timeoutOpts) / sizeof(timeoutOpts[0]); i++) {
-        uint32_t ms = timeoutOpts[i].ms;
-        const char *label = timeoutOpts[i].name;
-        opts.push_back({label, [&engine, ms, label]() {
-            engine.hopTimeoutMs = ms;
-            displaySuccess(String("Timeout: ") + label, true);
-        }});
-    }
-    opts.push_back({"Go Back", []() {}});
-    loopOptions(opts, MENU_TYPE_SUBMENU, "Hop Timeout");
-}
-
-static void select_hop_group_menu() {
-    Rtl433Engine &engine = Rtl433Engine::instance();
-    std::vector<Option> opts;
-    for (int g = 0; g < RTL433_HOP_GROUP_COUNT; g++) {
-        const char *name = rtl433_get_hop_group_name(g);
-        opts.push_back({name, [&engine, g, name]() {
-            engine.hopGroup = g;
-            displaySuccess(String("Group: ") + name, true);
-        }});
-    }
-    opts.push_back({"Go Back", []() {}});
-    loopOptions(opts, engine.hopGroup);
-}
-
-void rtl433_hop_menu() {
-    Rtl433Engine &engine = Rtl433Engine::instance();
-    bool exitHop = false;
-    while (!exitHop) {
-        String timeoutStr = String(engine.hopTimeoutMs / 1000) + "s";
-        std::vector<Option> opts = {
-            {"Start Hop Sniff",   []() { rtl433_sniff_screen(true); }                                           },
-            {"Hop Timeout (" + timeoutStr + ")", select_hop_timeout_menu                                         },
-            {"Hop Band (" + String(rtl433_get_hop_group_name(engine.hopGroup)) + ")", select_hop_group_menu   },
-            {String("Extend on Hit: ") + (engine.hopStayOnSignal ? "[ON]" : "[OFF]"), [&]() {
-                engine.hopStayOnSignal = !engine.hopStayOnSignal;
-                displayInfo(String("Extend on Hit: ") + (engine.hopStayOnSignal ? "ON" : "OFF"), true);
-            }},
-            {"Go Back",           [&]() { exitHop = true; }                                                     },
-        };
-        int res = loopOptions(opts, MENU_TYPE_SUBMENU, "RTL433 Hopping");
-        if (check(EscPress) || res < 0 || returnToMenu || exitHop) {
-            returnToMenu = false;
-            break;
-        }
-    }
-}
-
 void rtl433_replay_menu() {
     Rtl433Engine &engine = Rtl433Engine::instance();
     bool exitReplay = false;
@@ -378,14 +407,15 @@ void rtl433_replay_menu() {
 
 void rtl433_sniff_screen(bool hopping) {
     Rtl433Engine &engine = Rtl433Engine::instance();
+    bool isHopping = hopping || engine.isChangingPreset;
 
     std::vector<int> hopList;
     size_t currentHopIdx = 0;
     int currentPreset = engine.currentPreset;
     float currentFreq = engine.currentFrequency;
 
-    if (hopping) {
-        hopList = rtl433_get_hop_presets(engine.hopGroup);
+    if (isHopping) {
+        hopList = rtl433_get_changing_presets(engine.changingPreset);
         if (hopList.empty()) hopList.push_back(RTL433_PRESET_OOK_433);
         currentPreset = hopList[0];
         currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
@@ -418,7 +448,7 @@ void rtl433_sniff_screen(bool hopping) {
         uint32_t now = millis();
 
         // Hopping timer
-        if (hopping) {
+        if (isHopping) {
             uint32_t elapsed = now - hopStart;
             if (elapsed >= engine.hopTimeoutMs) {
                 currentHopIdx = (currentHopIdx + 1) % hopList.size();
@@ -430,7 +460,7 @@ void rtl433_sniff_screen(bool hopping) {
             } else if (now - lastTimerUpdate >= 1000) {
                 lastTimerUpdate = now;
                 uint32_t remSec = (elapsed >= engine.hopTimeoutMs) ? 0 : ((engine.hopTimeoutMs - elapsed + 999) / 1000);
-                String headerTitle = "HOP [" + String(remSec) + "s] " + String(currentFreq, 2) + "M " +
+                String headerTitle = "SCAN [" + String(remSec) + "s] " + String(currentFreq, 2) + "M " +
                                      String(rtl433_get_preset_name(currentPreset));
                 printTitle(headerTitle);
                 tft.drawPixel(0, 0, 0);
@@ -451,7 +481,7 @@ void rtl433_sniff_screen(bool hopping) {
                 blinkLed();
                 engine.addRecent(reading);
                 engine.logJson(reading, engine.sdLoggingEnabled);
-                if (hopping && engine.hopStayOnSignal) {
+                if (isHopping && engine.hopStayOnSignal) {
                     hopStart = millis(); // Extend stay on active channel
                 }
                 dirty = true;
@@ -503,7 +533,7 @@ void rtl433_sniff_screen(bool hopping) {
                 // Restart reception
                 engine.initRadio(currentFreq, currentPreset);
                 rx.begin();
-                if (hopping) hopStart = millis();
+                if (isHopping) hopStart = millis();
                 rf_clear_nav_state();
                 dirty = true;
             }
@@ -511,10 +541,10 @@ void rtl433_sniff_screen(bool hopping) {
 
         if (dirty) {
             dirty = false;
-            if (hopping) {
+            if (isHopping) {
                 uint32_t elapsed = millis() - hopStart;
                 uint32_t remSec = (elapsed >= engine.hopTimeoutMs) ? 0 : ((engine.hopTimeoutMs - elapsed + 999) / 1000);
-                String headerTitle = "HOP [" + String(remSec) + "s] " + String(currentFreq, 2) + "M " +
+                String headerTitle = "SCAN [" + String(remSec) + "s] " + String(currentFreq, 2) + "M " +
                                      String(rtl433_get_preset_name(currentPreset));
                 drawMainBorderWithTitle(headerTitle);
             } else {
@@ -534,8 +564,8 @@ void rtl433_sniff_screen(bool hopping) {
             size_t count = engine.getRecentCount();
             if (count == 0) {
                 tft.setTextColor(getColorVariation(bruceConfig.priColor), bruceConfig.bgColor);
-                if (hopping) {
-                    padprintln("\n  Hopping modulations...\n  (Listening on " + String(currentFreq, 2) + "M)");
+                if (isHopping) {
+                    padprintln("\n  Scanning modulations...\n  (Listening on " + String(currentFreq, 2) + "M)");
                 } else {
                     padprintln("\n  Listening for sensors...\n  (Weather, TPMS, Alarms)");
                 }
@@ -584,17 +614,15 @@ void rtl433_menu() {
 
     while (!exitMain) {
         std::vector<Option> opts = {
-            {"Sniff Live",       []() { rtl433_sniff_screen(false); }              },
-            {"Hop Sniffer",      []() { rtl433_sniff_screen(true); }               },
-            {"Hop Settings",     rtl433_hop_menu                                   },
-            {"Replay Settings",  rtl433_replay_menu                                },
+            {"Sniff Live",       []() { rtl433_sniff_screen(); }                   },
+            {"Presets",          rtl433_presets_menu                               },
+            {"Frequency",        select_frequency_menu                             },
             {"Recent Packets",   view_recent_packets_menu                          },
             {"Clear Results",    [&]() {
                 engine.clearRecent();
                 displaySuccess("Cleared List", true);
             }},
-            {"Modulation",       select_preset_menu                                },
-            {"Frequency",        select_frequency_menu                             },
+            {"Replay Settings",  rtl433_replay_menu                                },
             {String("SD Logging: ") + (engine.sdLoggingEnabled ? "[ON]" : "[OFF]"), [&]() {
                 engine.sdLoggingEnabled = !engine.sdLoggingEnabled;
                 displayInfo(String("SD Logging: ") + (engine.sdLoggingEnabled ? "ON" : "OFF"), true);
