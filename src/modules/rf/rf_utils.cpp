@@ -1,4 +1,5 @@
 #include "rf_utils.h"
+#include "protocols/rf_presets.h"
 #include "core/bus_HAL.h"
 #include "core/sd_functions.h"
 #include "core/settings.h"
@@ -438,12 +439,12 @@ void setMHZ(float frequency) {
             digitalWrite(CC1101_SW0_PIN, LOW);
             antenna = 0;
             vTaskDelay(10 / portTICK_PERIOD_MS); // time to settle the antenna signal
-        } else if (frequency > 350 && frequency < 468 && antenna != 1 && change) {
+        } else if (frequency > 350 && frequency < 700 && antenna != 1 && change) {
             digitalWrite(CC1101_SW1_PIN, HIGH);
             digitalWrite(CC1101_SW0_PIN, HIGH);
             antenna = 1;
             vTaskDelay(10 / portTICK_PERIOD_MS); // time to settle the antenna signal
-        } else if (frequency > 778 && antenna != 2 && change) {
+        } else if (frequency >= 700 && antenna != 2 && change) {
             digitalWrite(CC1101_SW1_PIN, LOW);
             digitalWrite(CC1101_SW0_PIN, HIGH);
             antenna = 2;
@@ -596,14 +597,31 @@ bool setMHZMenu() {
     return false;
 }
 
+void selectRFPresetMenu() {
+    options = {};
+    int count = rf_presets_count();
+    for (int i = 0; i < count; i++) {
+        const RfPreset *p = rf_preset_at(i);
+        if (!p) continue;
+        String label = (p->label && strlen(p->label) > 0) ? String(p->label) : String(p->name);
+        options.push_back({label.c_str(), [p]() {
+            rf_apply_preset(p);
+            displayTextLine("Preset: " + String(p->name));
+        }});
+    }
+    loopOptions(options, MENU_TYPE_SUBMENU, "RF Presets");
+    options.clear();
+}
+
 void rf_range_selection(float currentFrequency) {
     int option = 0;
     float freq = currentFrequency > 0 ? currentFrequency : bruceConfigPins.rfFreq;
-    int idx = bruceConfigPins.rfFxdFreq ? 0 : 2 + constrain(bruceConfigPins.rfScanRange, 0, 3);
+    int idx = bruceConfigPins.rfFxdFreq ? 0 : 3 + constrain(bruceConfigPins.rfScanRange, 0, 3);
     options = {
         {String("Fixed [" + String(bruceConfigPins.rfFreq) + "]").c_str(),
          [=]() { bruceConfigPins.setRfFreq(bruceConfigPins.rfFreq, 1); }                                               },
         {String("Choose Fixed").c_str(),                                   [&]() { option = 1; }                       },
+        {String("Choose Preset (Freq+Mod)").c_str(),                       [&]() { option = 2; }                       },
         {subghz_frequency_ranges[0],                                       [=]() { bruceConfigPins.setRfScanRange(0); }},
         {subghz_frequency_ranges[1],                                       [=]() { bruceConfigPins.setRfScanRange(1); }},
         {subghz_frequency_ranges[2],                                       [=]() { bruceConfigPins.setRfScanRange(2); }},
@@ -626,6 +644,8 @@ void rf_range_selection(float currentFrequency) {
         }
         loopOptions(options, ind);
         options.clear();
+    } else if (option == 2) {
+        selectRFPresetMenu();
     }
 
     if (bruceConfigPins.rfFxdFreq) displayTextLine("Scan freq set to " + String(bruceConfigPins.rfFreq));

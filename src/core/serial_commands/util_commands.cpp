@@ -176,6 +176,24 @@ uint32_t helpCallback(cmd *c) {
         "  subghz tx_from_file <sub file path> [hide default UI true/false] - Send an RF signal "
         "saved in storage. Optionally hide the default UI."
     );
+    serialDevice->println(
+        "  subghz preset [name/index] - List or switch Sub-GHz scanner presets (frequency + modulation)."
+    );
+    serialDevice->println(
+        "  rtl433 rx [frequency] [preset] [count] [timeout] - Sniff/decode Sub-GHz sensors (Weather, TPMS, Meters, Alarms) as JSON."
+    );
+    serialDevice->println(
+        "  rtl433 hop [timeout] [group] [total] - Auto-hop through modulation presets (OOK, 2-FSK, GFSK, MSK) listening for sensors."
+    );
+    serialDevice->println(
+        "  rtl433 list               - View recently decoded RTL433 packets."
+    );
+    serialDevice->println(
+        "  rtl433 dump               - Dump captured SD/LittleFS JSON log."
+    );
+    serialDevice->println(
+        "  rtl433 test               - Run RTL433 decoders self-test."
+    );
 
     serialDevice->println("\nAudio Commands:");
     serialDevice->println("  music_player <audio file path>  - Play an audio file.");

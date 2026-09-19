@@ -43,9 +43,11 @@ void _setup_gpio() {
     pinMode(SEL_BTN, INPUT);
 #ifdef T_EMBED_1101
     // T-Embed CC1101 has a antenna circuit optimized to each frequency band, controlled by SW0 and SW1
-    // Set antenna frequency settings
+    // Set antenna frequency settings (default 433 MHz band: SW1: HIGH, SW0: HIGH)
     pinMode(CC1101_SW1_PIN, OUTPUT);
     pinMode(CC1101_SW0_PIN, OUTPUT);
+    digitalWrite(CC1101_SW1_PIN, HIGH);
+    digitalWrite(CC1101_SW0_PIN, HIGH);
 
     // Chip Select CC1101, SD and TFT to HIGH State to fix SD initialization
     pinMode(CC1101_SS_PIN, OUTPUT);

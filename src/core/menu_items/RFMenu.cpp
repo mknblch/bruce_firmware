@@ -11,10 +11,12 @@
 #include "modules/rf/rf_utils.h"
 #include "modules/rf/rf_spectrum.h"
 #include "modules/rf/rf_waterfall.h"
+#include "modules/rf/rtl_433/rtl_433_menu.h"
 
 void RFMenu::optionsMenu() {
     options = {
         {"Scan/copy",       [=]() { RFScan(); }       },
+        {"RTL_433",         rtl433_menu               },
 #if !defined(LITE_VERSION)
         {"Record RAW",      rf_raw_record             }, // Pablo-Ortiz-Lopez
         {"Custom SubGhz",   sendCustomRF              },
@@ -47,6 +49,7 @@ void RFMenu::configMenu() {
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
         options.push_back({"RF Module", setRFModuleMenu});
         options.push_back({"RF Frequency", setRFFreqMenu});
+        options.push_back({"RF Preset", selectRFPresetMenu});
     } else {
         options.push_back({"RF TX Pin", lambdaHelper(gsetRfTxPin, true)});
         options.push_back({"RF RX Pin", lambdaHelper(gsetRfRxPin, true)});

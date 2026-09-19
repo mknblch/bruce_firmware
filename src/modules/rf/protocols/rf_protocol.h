@@ -21,6 +21,8 @@ struct RfPreset {
     uint8_t legacyProto;  // default legacy protocol no. for OOK presets
                           // (kept so the legacy TX path stays bit-identical;
                           //  irrelevant for FSK/MSK/GFSK presets)
+    float defaultFreq;    // default carrier frequency in MHz
+    const char *label;    // human-readable UI label
 };
 
 // ---------------------------------------------------------------------------

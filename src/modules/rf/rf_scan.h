@@ -32,6 +32,7 @@ public:
         SCAN_OPTIONS,
         RESET,
         RANGE,
+        PRESET,
         THRESHOLD,
         CLOSE_MENU,
         MAIN_MENU,
@@ -71,6 +72,7 @@ private:
     float found_freq = 0.f;
     int rssi = -80;
     int rssiThreshold = -65;
+    int activePresetIdx = -1;
 
     // Capture list shown on the scan screen: every signal kept in memory until
     // the user deletes it or leaves the feature.
@@ -101,6 +103,7 @@ private:
     void show_signal_info(int index);
     void reset_signals();
     void set_threshold();
+    void set_preset();
     // void set_range(); // Using similar function from rf_utils.h
 
     /////////////////////////////////////////////////////////////////////////////////////

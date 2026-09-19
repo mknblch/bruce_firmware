@@ -31,6 +31,7 @@ void addToRecentCodes(struct RfCodes rfcode);
 struct RfCodes selectRecentRfMenu();
 bool setMHZMenu();
 void rf_range_selection(float currentFrequency = 0.0);
+void selectRFPresetMenu();
 
 uint64_t reverse_bits(uint64_t num, uint8_t bits);
 

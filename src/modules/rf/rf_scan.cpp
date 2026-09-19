@@ -1,4 +1,5 @@
 #include "rf_scan.h"
+#include "protocols/rf_presets.h"
 #include "core/led_control.h"
 #include "core/sd_functions.h"
 #include "core/type_convertion.h"
@@ -70,6 +71,14 @@ void RFScan::setup() {
     if (!initRfModule("rx", bruceConfigPins.rfFreq)) {
         initFailed = true;
         return;
+    }
+
+    if (activePresetIdx >= 0 && activePresetIdx < rf_presets_count()) {
+        const RfPreset *p = rf_preset_at(activePresetIdx);
+        if (p) {
+            rf_apply_preset(p);
+            frequency = p->defaultFreq;
+        }
     }
 
     enable_receive();
@@ -300,6 +309,13 @@ bool RFScan::decode_signal(const std::vector<int> &durations) {
     if (rf_try_keeloq(durations, received) || rf_decode_ook(durations, received)) {
         if (is_m5_duplicate_capture(received)) return false;
 
+        String pName = "Ook270Async";
+        if (activePresetIdx >= 0 && activePresetIdx < rf_presets_count()) {
+            const RfPreset *p = rf_preset_at(activePresetIdx);
+            if (p) pName = p->name;
+        }
+        received.preset = pName;
+
         found_freq = frequency;
         received.frequency = long(frequency * 1000000);
         received.filepath = "signal_" + String(captures.size() + 1);
@@ -379,7 +395,12 @@ bool RFScan::read_raw(const std::vector<int> &durations) {
             );
             return false;
         }
-        received.preset = "Ook270Async";
+        String pName = "Ook270Async";
+        if (activePresetIdx >= 0 && activePresetIdx < rf_presets_count()) {
+            const RfPreset *p = rf_preset_at(activePresetIdx);
+            if (p) pName = p->name;
+        }
+        received.preset = pName;
         received.protocol = "RAW";
         received.key = crc;
         if (is_m5_duplicate_capture(received)) return false;
@@ -400,7 +421,12 @@ bool RFScan::read_raw(const std::vector<int> &durations) {
             RF_DBG("m5 raw discard: crc=0 bits=%d te=%d", rawBits, rawTe);
             return false;
         }
-        received.preset = "Ook270Async";
+        String pName = "Ook270Async";
+        if (activePresetIdx >= 0 && activePresetIdx < rf_presets_count()) {
+            const RfPreset *p = rf_preset_at(activePresetIdx);
+            if (p) pName = p->name;
+        }
+        received.preset = pName;
         received.protocol = "RAW";
         received.key = 0;
         received.indexed_durations = {};
@@ -625,8 +651,10 @@ void RFScan::open_scan_options() {
         reopen = false;
         options = {};
 
-        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE)
+        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
             options.emplace_back("Range", [&]() { action = RANGE; });
+            options.emplace_back("Preset", [&]() { action = PRESET; });
+        }
         if (bruceConfigPins.rfModule == CC1101_SPI_MODULE && !bruceConfigPins.rfFxdFreq)
             options.emplace_back("Threshold", [&]() { action = THRESHOLD; });
 
@@ -699,6 +727,7 @@ void RFScan::set_option(RFMenuOption option, int index) {
         case SAVE_RAW: save_signal(index, option == SAVE_RAW); break;
 
         case RANGE: rf_range_selection(); break; // using a common function to other features
+        case PRESET: set_preset(); break;
         case THRESHOLD: set_threshold(); break;
 
         case MAIN_MENU:
@@ -778,6 +807,24 @@ void RFScan::reset_signals() {
     received.cnt = 0;
     received.mf_name = "Unknown";
     received.encrypted = 0;
+}
+
+void RFScan::set_preset() {
+    options = {};
+    int count = rf_presets_count();
+    for (int i = 0; i < count; i++) {
+        const RfPreset *p = rf_preset_at(i);
+        if (!p) continue;
+        String label = (p->label && strlen(p->label) > 0) ? String(p->label) : String(p->name);
+        options.push_back({label.c_str(), [this, p, i]() {
+            activePresetIdx = i;
+            rf_apply_preset(p);
+            frequency = p->defaultFreq;
+            displayTextLine("Preset: " + String(p->name));
+        }});
+    }
+    loopOptions(options, MENU_TYPE_SUBMENU, "Scanner Presets");
+    options.clear();
 }
 
 void RFScan::set_threshold() {
@@ -868,13 +915,21 @@ void display_info(
 }
 
 void display_signal_data(RfCodes received, bool headless) {
-    std::string txt = received.data.c_str();
-    std::stringstream ss(txt);
-    std::string palavra;
     int transitions = 0;
+    const char *p = received.data.c_str();
+    bool inToken = false;
+    while (p && *p) {
+        if (!isspace((unsigned char)*p)) {
+            if (!inToken) {
+                transitions++;
+                inToken = true;
+            }
+        } else {
+            inToken = false;
+        }
+        p++;
+    }
     char hexString[64];
-
-    while (ss >> palavra) transitions++;
 
     if (received.preset != "") {
         if (received.fix != 0) {
@@ -890,8 +945,13 @@ void display_signal_data(RfCodes received, bool headless) {
         } else {
             if (received.fix == 0) {
                 rf_info_line(headless, "Length: " + String(received.Bit) + " bits");
-                const char *b = dec2binWzerofill(received.key, min(received.Bit, 40));
-                rf_info_line(headless, "Binary: " + String(b));
+                if (received.Bit > 0) {
+                    char *b = dec2binWzerofill(received.key, min(received.Bit, 40));
+                    if (b) {
+                        rf_info_line(headless, "Binary: " + String(b));
+                        free(b);
+                    }
+                }
             }
         }
     } else {

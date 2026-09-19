@@ -6,7 +6,9 @@
 #include "modules/rf/protocols/rf_config.h"   // RF_DEBUG
 #include "modules/rf/protocols/rf_encoder.h"  // rf_tx_protocol, rf_encoder_selftest
 #include "modules/rf/protocols/rf_keeloq.h"   // rf_keeloq_selftest
+#include "modules/rf/protocols/rf_presets.h"
 #include "modules/rf/protocols/rf_registry.h" // rf_find_protocol
+#include "modules/rf/rtl_433/rtl_433.h"
 #include "modules/rf/rf_scan.h"
 #include "modules/rf/rf_send.h"
 #include "modules/rf/rf_utils.h"
@@ -435,6 +437,345 @@ void createRfTxBufferCommand(Command *rfCmd) {
     Command cmd = rfCmd->addCommand("tx_from_buffer", rfTxBufferCallback);
 }
 
+uint32_t rtl433SniffCallback(cmd *c) {
+    Command cmd(c);
+    Argument freqArg = cmd.getArgument("frequency");
+    Argument modArg = cmd.getArgument("preset");
+    Argument cntArg = cmd.getArgument("count");
+    Argument timeoutArg = cmd.getArgument("timeout");
+
+    float freq = 433.92f;
+    if (freqArg.isSet() && freqArg.getValue().length() > 0) {
+        String sf = freqArg.getValue();
+        freq = sf.toFloat();
+        if (freq > 10000.0f) freq /= 1000000.0f;
+    }
+
+    int preset = (freq > 800.0f) ? RTL433_PRESET_OOK_868 :
+                 (freq < 330.0f) ? RTL433_PRESET_OOK_315 :
+                 (freq > 330.0f && freq < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+
+    if (modArg.isSet()) {
+        String m = modArg.getValue();
+        m.toLowerCase();
+        if (m == "fsk" || m == "2fsk" || m == "fsk17" || m == "fsk17k" || m == "wh65") {
+            preset = (freq > 800.0f) ? RTL433_PRESET_FSK_868_17K :
+                     (freq < 330.0f) ? RTL433_PRESET_FSK_315_19K : RTL433_PRESET_FSK_433_17K;
+        } else if (m == "fsk19" || m == "fsk19k" || m == "toyota") {
+            preset = (freq < 330.0f) ? RTL433_PRESET_FSK_315_19K : RTL433_PRESET_FSK_433_19K;
+        } else if (m == "gfsk" || m == "gfsk17" || m == "bresser") {
+            preset = (freq > 800.0f) ? RTL433_PRESET_GFSK_868_17K :
+                     (freq < 330.0f) ? RTL433_PRESET_GFSK_315_19K : RTL433_PRESET_GFSK_433_17K;
+        } else if (m == "msk" || m == "wmbus") {
+            preset = (freq > 800.0f) ? (abs(freq - 868.30f) < 0.15f ? RTL433_PRESET_MSK_868_S : RTL433_PRESET_MSK_868_T) :
+                     RTL433_PRESET_MSK_433_100K;
+        } else if (m == "ook") {
+            preset = (freq > 800.0f) ? RTL433_PRESET_OOK_868 :
+                     (freq < 330.0f) ? RTL433_PRESET_OOK_315 :
+                     (freq > 330.0f && freq < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+        } else if (m == "ook868" || m == "868") preset = RTL433_PRESET_OOK_868;
+        else if (m == "fsk868") preset = RTL433_PRESET_FSK_868_17K;
+        else if (m == "gfsk868") preset = RTL433_PRESET_GFSK_868_17K;
+        else if (m == "wmbust" || m == "mskt" || m == "wmbus_t") preset = RTL433_PRESET_MSK_868_T;
+        else if (m == "wmbuss" || m == "msks" || m == "wmbus_s") preset = RTL433_PRESET_MSK_868_S;
+        else if (m == "honeywell" || m == "345" || m == "ook345") preset = RTL433_PRESET_OOK_345;
+        else if (m == "315" || m == "ook315") preset = RTL433_PRESET_OOK_315;
+        else if (m == "fsk315") preset = RTL433_PRESET_FSK_315_19K;
+        else if (m == "gfsk315") preset = RTL433_PRESET_GFSK_315_19K;
+        else if (m.toInt() > 0 || m == "0") preset = constrain(m.toInt(), 0, RTL433_PRESET_COUNT - 1);
+    }
+
+    int maxCount = cntArg.isSet() ? cntArg.getValue().toInt() : 10;
+    if (maxCount <= 0) maxCount = 1000000;
+    int timeoutSec = timeoutArg.isSet() ? timeoutArg.getValue().toInt() : 30;
+    uint32_t startMs = millis();
+    uint32_t maxDurationMs = (uint32_t)timeoutSec * 1000;
+
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    if (!engine.initRadio(freq, preset)) {
+        serialDevice->println("{\"error\":\"radio init failed\"}");
+        return false;
+    }
+
+    RfRxSession rx;
+    if (!rx.begin()) {
+        engine.deinitRadio();
+        serialDevice->println("{\"error\":\"rx session begin failed\"}");
+        return false;
+    }
+
+    serialDevice->println(String("{\"status\":\"sniffing\",\"frequency\":") + String(freq, 4) +
+                          ",\"preset\":\"" + String(rtl433_get_preset_name(preset)) + "\"}");
+
+    int captured = 0;
+    while (captured < maxCount && (millis() - startMs < maxDurationMs)) {
+        if (serialDevice->available()) {
+            char ch = serialDevice->read();
+            if (ch == 3 || ch == 27 || ch == 'q' || ch == 'Q') break; // Ctrl+C, ESC, q
+        }
+
+        std::vector<int> durations;
+        if (rx.poll(durations)) {
+            Rtl433Reading r;
+            int rssi = -70;
+            if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) rssi = ELECHOUSE_cc1101.getRssi();
+            if (engine.decode(durations, freq, preset, rssi, r)) {
+                engine.addRecent(r);
+                engine.logJson(r, engine.sdLoggingEnabled);
+                captured++;
+            }
+        }
+        vTaskDelay(5 / portTICK_PERIOD_MS);
+    }
+
+    rx.end();
+    engine.deinitRadio();
+    serialDevice->println(String("{\"status\":\"stopped\",\"packets_captured\":") + String(captured) + "}");
+    return true;
+}
+
+uint32_t rtl433HopCallback(cmd *c) {
+    Command cmd(c);
+    Argument timeoutArg = cmd.getArgument("timeout");
+    Argument groupArg = cmd.getArgument("group");
+    Argument totalTimeArg = cmd.getArgument("total");
+
+    int hopTimeoutSec = timeoutArg.isSet() ? timeoutArg.getValue().toInt() : 10;
+    if (hopTimeoutSec < 1) hopTimeoutSec = 1;
+
+    int totalDurationSec = totalTimeArg.isSet() ? totalTimeArg.getValue().toInt() : 120;
+    if (totalDurationSec < 1) totalDurationSec = 120;
+
+    int group = RTL433_HOP_433_ALL;
+    if (groupArg.isSet()) {
+        String g = groupArg.getValue();
+        g.toLowerCase();
+        if (g == "all" || g == "all_presets") group = RTL433_HOP_ALL_PRESETS;
+        else if (g == "weather" || g == "wx") group = RTL433_HOP_WEATHER;
+        else if (g == "tpms") group = RTL433_HOP_TPMS;
+        else if (g == "meters" || g == "wmbus" || g == "smartmeters") group = RTL433_HOP_METERS;
+        else if (g == "868") group = RTL433_HOP_868_ALL;
+        else if (g == "315") group = RTL433_HOP_315_ALL;
+        else if (g.toInt() >= 0 && g.toInt() < RTL433_HOP_GROUP_COUNT) group = g.toInt();
+    }
+
+    std::vector<int> hopList = rtl433_get_hop_presets(group);
+    if (hopList.empty()) hopList.push_back(RTL433_PRESET_OOK_433);
+
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    size_t currentHopIdx = 0;
+    int currentPreset = hopList[0];
+    float currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
+
+    if (!engine.initRadio(currentFreq, currentPreset)) {
+        serialDevice->println("{\"error\":\"radio init failed\"}");
+        return false;
+    }
+
+    RfRxSession rx;
+    if (!rx.begin()) {
+        engine.deinitRadio();
+        serialDevice->println("{\"error\":\"rx session begin failed\"}");
+        return false;
+    }
+
+    serialDevice->println(String("{\"status\":\"hopping\",\"group\":\"") + String(rtl433_get_hop_group_name(group)) +
+                          "\",\"hop_timeout_s\":" + String(hopTimeoutSec) + "}");
+
+    uint32_t sessionStartMs = millis();
+    uint32_t hopStartMs = sessionStartMs;
+    uint32_t hopDurationMs = (uint32_t)hopTimeoutSec * 1000;
+    uint32_t totalDurationMs = (uint32_t)totalDurationSec * 1000;
+    int captured = 0;
+
+    while (millis() - sessionStartMs < totalDurationMs) {
+        if (serialDevice->available()) {
+            char ch = serialDevice->read();
+            if (ch == 3 || ch == 27 || ch == 'q' || ch == 'Q') break;
+        }
+
+        uint32_t now = millis();
+        if (now - hopStartMs >= hopDurationMs) {
+            currentHopIdx = (currentHopIdx + 1) % hopList.size();
+            currentPreset = hopList[currentHopIdx];
+            currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
+            engine.switchPreset(currentFreq, currentPreset);
+            hopStartMs = millis();
+            serialDevice->println(String("{\"hop_switch\":\"") + String(rtl433_get_preset_name(currentPreset)) +
+                                  "\",\"freq\":" + String(currentFreq, 2) + "}");
+        }
+
+        std::vector<int> durations;
+        if (rx.poll(durations)) {
+            Rtl433Reading r;
+            int rssi = -70;
+            if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) rssi = ELECHOUSE_cc1101.getRssi();
+            if (engine.decode(durations, currentFreq, currentPreset, rssi, r)) {
+                engine.addRecent(r);
+                engine.logJson(r, engine.sdLoggingEnabled);
+                captured++;
+                serialDevice->println(r.toJson());
+            }
+        }
+        vTaskDelay(5 / portTICK_PERIOD_MS);
+    }
+
+    rx.end();
+    engine.deinitRadio();
+    serialDevice->println(String("{\"status\":\"stopped\",\"packets_captured\":") + String(captured) + "}");
+    return true;
+}
+
+uint32_t rtl433ListCallback(cmd *c) {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    size_t count = engine.getRecentCount();
+    serialDevice->println(String("{\"recent_count\":") + String(count) + ",\"readings\":[");
+    for (size_t i = 0; i < count; i++) {
+        const Rtl433Reading *r = engine.getRecentAt(i);
+        if (r) {
+            serialDevice->print("  " + r->toJson());
+            if (i + 1 < count) serialDevice->print(",");
+            serialDevice->println();
+        }
+    }
+    serialDevice->println("]}");
+    return true;
+}
+
+uint32_t rtl433DumpCallback(cmd *c) {
+    FS *fs = nullptr;
+    if (!getFsStorage(fs) || fs == nullptr) {
+        serialDevice->println("{\"error\":\"storage not available\"}");
+        return false;
+    }
+    String path = "/rtl433/traffic.json";
+    if (!fs->exists(path)) path = "/rtl433_traffic.json";
+    if (!fs->exists(path)) {
+        serialDevice->println("{\"error\":\"log file not found\"}");
+        return false;
+    }
+    File f = fs->open(path, FILE_READ);
+    if (!f) {
+        serialDevice->println("{\"error\":\"failed to open log file\"}");
+        return false;
+    }
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() > 0) serialDevice->println(line);
+    }
+    f.close();
+    return true;
+}
+
+uint32_t rtl433ClearCallback(cmd *c) {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    engine.clearRecent();
+    FS *fs = nullptr;
+    if (getFsStorage(fs) && fs != nullptr) {
+        if (fs->exists("/rtl433/traffic.json")) fs->remove("/rtl433/traffic.json");
+        if (fs->exists("/rtl433_traffic.json")) fs->remove("/rtl433_traffic.json");
+    }
+    serialDevice->println("{\"status\":\"cleared\"}");
+    return true;
+}
+
+uint32_t rtl433ReplayCallback(cmd *c) {
+    Command cmd(c);
+    Argument idxArg = cmd.getArgument("index");
+    int index = idxArg.isSet() ? idxArg.getValue().toInt() : 0;
+
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    const Rtl433Reading *r = engine.getRecentAt(index);
+    if (!r) {
+        serialDevice->println("{\"error\":\"invalid index\"}");
+        return false;
+    }
+    if (engine.replayReading(*r)) {
+        serialDevice->println("{\"status\":\"replayed\",\"protocol\":\"" + r->protocol + "\"}");
+        return true;
+    }
+    serialDevice->println("{\"error\":\"replay failed\"}");
+    return false;
+}
+
+uint32_t rtl433TestCallback(cmd *c) {
+    String report;
+    bool ok = rtl433_selftest(report);
+    serialDevice->println(report);
+    return ok;
+}
+
+uint32_t rfPresetCallback(cmd *c) {
+    Command cmd(c);
+    Argument nameArg = cmd.getArgument("preset");
+    String name = nameArg.isSet() ? nameArg.getValue() : "";
+
+    if (name.length() == 0) {
+        serialDevice->println("Sub-GHz Scanner Presets (Freq + Modulation):");
+        int count = rf_presets_count();
+        for (int i = 0; i < count; i++) {
+            const RfPreset *p = rf_preset_at(i);
+            if (!p) continue;
+            const char *modStr = (p->modulation == 0) ? "2-FSK" :
+                                 (p->modulation == 1) ? "GFSK" :
+                                 (p->modulation == 4) ? "MSK" : "OOK";
+            String line = "  [" + String(i) + "] " + String(p->name) + " - " +
+                          String(p->defaultFreq, 2) + " MHz (Mod: " + String(modStr) +
+                          ", BW: " + String(p->rxBW, 1) + " kHz)";
+            serialDevice->println(line);
+        }
+        return true;
+    }
+
+    const RfPreset *p = nullptr;
+    if (isDigit(name[0])) {
+        int idx = name.toInt();
+        if (idx >= 0 && idx < rf_presets_count()) p = rf_preset_at(idx);
+    }
+    if (!p) p = rf_find_preset(name);
+
+    if (!p) {
+        serialDevice->println("Unknown preset: " + name);
+        return false;
+    }
+
+    rf_apply_preset(p);
+    const char *modStr = (p->modulation == 0) ? "2-FSK" :
+                         (p->modulation == 1) ? "GFSK" :
+                         (p->modulation == 4) ? "MSK" : "OOK";
+    serialDevice->println("Applied preset: " + String(p->name) + " (" + String(p->defaultFreq, 2) + " MHz, " + String(modStr) + ")");
+    return true;
+}
+
+void createRfPresetCommand(Command *rfCmd) {
+    Command cmd = rfCmd->addCommand("preset,presets", rfPresetCallback);
+    cmd.addPosArg("preset", "");
+}
+
+void createRtl433Command(Command *rfCmd) {
+    Command cmd = rfCmd->addCompositeCmd("rtl433");
+
+    Command rxCmd = cmd.addCommand("rx,sniff", rtl433SniffCallback);
+    rxCmd.addPosArg("frequency", "433.92");
+    rxCmd.addPosArg("preset", "ook");
+    rxCmd.addPosArg("count", "10");
+    rxCmd.addPosArg("timeout", "30");
+
+    Command hopCmd = cmd.addCommand("hop,hop_sniff", rtl433HopCallback);
+    hopCmd.addPosArg("timeout", "10");
+    hopCmd.addPosArg("group", "433");
+    hopCmd.addPosArg("total", "120");
+
+    cmd.addCommand("list,recent", rtl433ListCallback);
+    cmd.addCommand("dump", rtl433DumpCallback);
+    cmd.addCommand("clear", rtl433ClearCallback);
+    cmd.addCommand("test,selftest", rtl433TestCallback);
+
+    Command replayCmd = cmd.addCommand("replay,tx", rtl433ReplayCallback);
+    replayCmd.addPosArg("index", "0");
+}
+
 void createRfCommands(SimpleCLI *cli) {
     Command cmd = cli->addCompositeCmd("rf,subghz");
 
@@ -442,10 +783,12 @@ void createRfCommands(SimpleCLI *cli) {
     createRfTxCommand(&cmd);
     createRfTxByNameCommand(&cmd);
     createRfScanCommand(&cmd);
+    createRfPresetCommand(&cmd);
     createRfTxFileCommand(&cmd);
     createRfTxBufferCommand(&cmd);
     createRfMfcodesCommand(&cmd);
     createRfKeeloqTxCommand(&cmd);
+    createRtl433Command(&cmd);
 #if RF_DEBUG
     createRfSelftestCommand(&cmd);
     createRfKeeloqTestCommand(&cmd);
@@ -453,4 +796,25 @@ void createRfCommands(SimpleCLI *cli) {
 #endif
 
     cli->addSingleArgCmd("RfSend", rfSendCallback);
+
+    Command topPreset = cli->addCommand("rf_preset,subghz_preset", rfPresetCallback);
+    topPreset.addPosArg("preset", "");
+
+    // Also register top-level rtl433 command
+    Command topRtl = cli->addCompositeCmd("rtl433");
+    Command topRx = topRtl.addCommand("rx,sniff", rtl433SniffCallback);
+    topRx.addPosArg("frequency", "433.92");
+    topRx.addPosArg("preset", "ook");
+    topRx.addPosArg("count", "10");
+    topRx.addPosArg("timeout", "30");
+    Command topHop = topRtl.addCommand("hop,hop_sniff", rtl433HopCallback);
+    topHop.addPosArg("timeout", "10");
+    topHop.addPosArg("group", "433");
+    topHop.addPosArg("total", "120");
+    topRtl.addCommand("list,recent", rtl433ListCallback);
+    topRtl.addCommand("dump", rtl433DumpCallback);
+    topRtl.addCommand("clear", rtl433ClearCallback);
+    topRtl.addCommand("test,selftest", rtl433TestCallback);
+    Command topReplay = topRtl.addCommand("replay,tx", rtl433ReplayCallback);
+    topReplay.addPosArg("index", "0");
 }
