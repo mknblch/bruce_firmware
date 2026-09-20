@@ -432,6 +432,7 @@ void rtl433_sniff_screen(bool hopping) {
         displayError("Radio Init Failed", true);
         return;
     }
+    rx.flush();
 
     rf_clear_nav_state();
     bool dirty = true;
@@ -455,6 +456,7 @@ void rtl433_sniff_screen(bool hopping) {
                 currentPreset = hopList[currentHopIdx];
                 currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
                 engine.switchPreset(currentFreq, currentPreset);
+                rx.flush();
                 hopStart = millis();
                 dirty = true;
             } else if (now - lastTimerUpdate >= 1000) {
@@ -530,9 +532,13 @@ void rtl433_sniff_screen(bool hopping) {
                 if (targetIdx >= (int)count) targetIdx = (int)count - 1;
                 show_reading_details(targetIdx);
 
-                // Restart reception
+                // Restart reception. The CC1101 was never deinitialized while viewing the
+                // details screen (only the RMT capture session was torn down via rx.end()
+                // above), so re-arm the capture without re-running engine.initRadio() —
+                // that would needlessly reconfigure the radio (incl. a setMHZ() frequency
+                // re-write) even though frequency/preset never changed.
                 rx.begin();
-                engine.initRadio(currentFreq, currentPreset);
+                rx.flush();
                 if (isHopping) hopStart = millis();
                 rf_clear_nav_state();
                 dirty = true;
