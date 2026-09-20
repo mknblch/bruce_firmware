@@ -19,9 +19,23 @@ extern const char *subghz_frequency_ranges[];
 extern const int range_limits[4][2];
 extern bool rmtInstalled;
 
-bool initRfModule(String mode = "", float frequency = 0);
+// modulation: -1 = unspecified (defaults to OOK/ASK for backward compatibility), otherwise
+// the CC1101 modulation code (0 = 2-FSK, 1 = GFSK, 2 = ASK/OOK, 3 = 4-FSK, 4 = MSK). When a
+// non-OOK modulation is requested, the FSK-family fixed-frequency register/AGC preset is
+// applied instead of the OOK-tuned one (see cc1101ApplyFixedFreqFskPreset()).
+bool initRfModule(
+    String mode = "", float frequency = 0, int modulation = -1, float deviation = 0.0f, float rxBw = 0.0f,
+    float dataRate = 0.0f
+);
 void deinitRfModule();
 void initCC1101once(SPIClass *SSPI);
+
+// Fixed-frequency CC1101 register/AGC presets applied by initRfModule() (and re-applied
+// directly by callers such as Rtl433Engine::switchPreset() that swap presets without a full
+// re-init). Keep the OOK preset untouched for OOK/ASK use; use the FSK preset for
+// 2-FSK/GFSK/MSK so non-OOK sessions don't inherit OOK-tuned AGC/bandwidth settings.
+void cc1101ApplyFixedFreqOokPreset(bool isTx);
+void cc1101ApplyFixedFreqFskPreset(bool isTx);
 
 void setMHZ(float frequency);
 int find_pulse_index(const std::vector<int> &indexed_durations, int duration);

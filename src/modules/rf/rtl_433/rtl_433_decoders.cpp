@@ -232,7 +232,11 @@ bool decode_oregon_scientific(const std::vector<int> &durations, Rtl433Reading &
 bool decode_fineoffset_fsk(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     // 17.24 kbps -> 58µs bit period
-    if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+    if (!demod_pcm_fsk(durations, 58, 45, buf, 0x2DD4, 16)) {
+        if (!demod_pcm_fsk(durations, 58, 45, buf, 0xD42D, 16)) {
+            if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+        }
+    }
     if (buf.num_bits < 120) return false;
 
     // Search for sync word 0x2DD4 (16 bits)
@@ -315,8 +319,8 @@ bool decode_fineoffset_fsk(const std::vector<int> &durations, Rtl433Reading &out
 // ===========================================================================
 bool decode_lacrosse_tx(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
-    if (!demod_pcm_fsk(durations, 104, 45, buf)) {
-        if (!demod_ppm(durations, 500, 1000, 2000, 45, buf)) return false;
+    if (!demod_pcm_fsk(durations, 104, 45, buf, 0x0A, 4)) {
+        if (!demod_pcm_fsk(durations, 104, 45, buf)) return false;
     }
     if (buf.num_bits < 40) return false;
 
@@ -607,8 +611,14 @@ bool decode_proove_nexa(const std::vector<int> &durations, Rtl433Reading &out) {
 bool decode_bresser_5in1(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     // Try 8.21 kbps (~122µs bit period) first, then 17.24 kbps (~58µs)
-    if (!demod_pcm_fsk(durations, 122, 45, buf)) {
-        if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+    if (!demod_pcm_fsk(durations, 122, 45, buf, 0x2DD4, 16)) {
+        if (!demod_pcm_fsk(durations, 122, 45, buf, 0xD42D, 16)) {
+            if (!demod_pcm_fsk(durations, 122, 45, buf)) {
+                if (!demod_pcm_fsk(durations, 58, 45, buf, 0x2DD4, 16)) {
+                    if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+                }
+            }
+        }
     }
     if (buf.num_bits < 80) return false;
 
@@ -771,11 +781,19 @@ bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out) 
 bool decode_wmbus(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     // Try Mode T (100 kbps -> 10µs bit period) first
-    bool is_mode_t = demod_pcm_fsk(durations, 10, 45, buf);
+    bool is_mode_t = demod_pcm_fsk(durations, 10, 45, buf, 0x543D, 16);
+    if (!is_mode_t || buf.num_bits < 80) {
+        is_mode_t = demod_pcm_fsk(durations, 10, 45, buf, 0x3D54, 16);
+    }
+    if (!is_mode_t || buf.num_bits < 80) {
+        is_mode_t = demod_pcm_fsk(durations, 10, 45, buf);
+    }
     if (!is_mode_t || buf.num_bits < 80) {
         // Try Mode S (32.768 kbps -> 30.5µs bit period or 15.25µs Manchester half clock)
         if (!demod_manchester(durations, 15, 45, buf, false)) {
-            if (!demod_pcm_fsk(durations, 30, 45, buf)) return false;
+            if (!demod_pcm_fsk(durations, 30, 45, buf, 0x543D, 16)) {
+                if (!demod_pcm_fsk(durations, 30, 45, buf)) return false;
+            }
         }
     }
     if (buf.num_bits < 80) return false;

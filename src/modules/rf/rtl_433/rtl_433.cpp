@@ -179,26 +179,62 @@ bool demod_ppm(const std::vector<int> &durations, int mark_us, int zero_gap_us, 
     out.clear();
     if (durations.size() < 10) return false;
 
-    for (size_t i = 0; i + 1 < durations.size(); i += 2) {
+    int eff_tol = tol_pct + 25;
+    int gap_threshold = (zero_gap_us + one_gap_us) / 2;
+    bool zero_is_shorter = zero_gap_us < one_gap_us;
+
+    BitBuffer best_buf;
+    BitBuffer cur_buf;
+
+    size_t i = 0;
+    while (i + 1 < durations.size()) {
+        if (durations[i] <= 0) {
+            i++;
+            continue;
+        }
         int mark = durations[i];
         int gap = -durations[i + 1];
 
-        if (mark <= 0 || gap <= 0) continue;
-        if (!match_range(mark, mark_us, tol_pct)) {
-            if (out.num_bits >= 16) break;
-            out.clear();
+        if (gap <= 0) {
+            i++;
             continue;
         }
 
-        if (match_range(gap, zero_gap_us, tol_pct)) {
-            out.push_bit(0);
-        } else if (match_range(gap, one_gap_us, tol_pct)) {
-            out.push_bit(1);
-        } else {
-            if (out.num_bits >= 16) break;
-            out.clear();
+        if (match_range(mark, mark_us, eff_tol)) {
+            bool is_zero = match_range(gap, zero_gap_us, eff_tol) ||
+                           (zero_is_shorter ? (gap < gap_threshold && match_range(gap, zero_gap_us, eff_tol + 20))
+                                            : (gap >= gap_threshold && match_range(gap, zero_gap_us, eff_tol + 20)));
+            bool is_one = match_range(gap, one_gap_us, eff_tol) ||
+                          (zero_is_shorter ? (gap >= gap_threshold && match_range(gap, one_gap_us, eff_tol + 20))
+                                           : (gap < gap_threshold && match_range(gap, one_gap_us, eff_tol + 20)));
+
+            if (is_zero && !is_one) {
+                cur_buf.push_bit(0);
+                i += 2;
+                continue;
+            } else if (is_one && !is_zero) {
+                cur_buf.push_bit(1);
+                i += 2;
+                continue;
+            } else if (is_zero && is_one) {
+                int diff_zero = abs(gap - zero_gap_us);
+                int diff_one = abs(gap - one_gap_us);
+                cur_buf.push_bit(diff_zero <= diff_one ? 0 : 1);
+                i += 2;
+                continue;
+            }
         }
+
+        if (cur_buf.num_bits > best_buf.num_bits) {
+            best_buf = cur_buf;
+        }
+        cur_buf.clear();
+        i++;
     }
+    if (cur_buf.num_bits > best_buf.num_bits) {
+        best_buf = cur_buf;
+    }
+    out = best_buf;
     return out.num_bits >= 16;
 }
 
@@ -206,21 +242,65 @@ bool demod_pwm(const std::vector<int> &durations, int zero_mark_us, int one_mark
     out.clear();
     if (durations.size() < 10) return false;
 
-    for (size_t i = 0; i + 1 < durations.size(); i += 2) {
+    int eff_tol = tol_pct + 25;
+    int mark_threshold = (zero_mark_us + one_mark_us) / 2;
+    bool zero_is_shorter = zero_mark_us < one_mark_us;
+
+    BitBuffer best_buf;
+    BitBuffer cur_buf;
+
+    size_t i = 0;
+    while (i + 1 < durations.size()) {
+        if (durations[i] <= 0) {
+            i++;
+            continue;
+        }
         int mark = durations[i];
         int space = -durations[i + 1];
 
-        if (mark <= 0 || space <= 0) continue;
-
-        if (match_range(mark, zero_mark_us, tol_pct) && match_range(space, space_us, tol_pct + 20)) {
-            out.push_bit(0);
-        } else if (match_range(mark, one_mark_us, tol_pct) && match_range(space, space_us, tol_pct + 20)) {
-            out.push_bit(1);
-        } else {
-            if (out.num_bits >= 16) break;
-            out.clear();
+        if (space <= 0) {
+            i++;
+            continue;
         }
+
+        bool space_ok = match_range(space, space_us, eff_tol + 15) ||
+                        (space >= (space_us - (space_us * eff_tol) / 100) && (space > 5000 || i + 2 >= durations.size()));
+
+        if (space_ok) {
+            bool is_zero = match_range(mark, zero_mark_us, eff_tol) ||
+                           (zero_is_shorter ? (mark < mark_threshold && match_range(mark, zero_mark_us, eff_tol + 20))
+                                            : (mark >= mark_threshold && match_range(mark, zero_mark_us, eff_tol + 20)));
+            bool is_one = match_range(mark, one_mark_us, eff_tol) ||
+                          (zero_is_shorter ? (mark >= mark_threshold && match_range(mark, one_mark_us, eff_tol + 20))
+                                           : (mark < mark_threshold && match_range(mark, one_mark_us, eff_tol + 20)));
+
+            if (is_zero && !is_one) {
+                cur_buf.push_bit(0);
+                i += 2;
+                continue;
+            } else if (is_one && !is_zero) {
+                cur_buf.push_bit(1);
+                i += 2;
+                continue;
+            } else if (is_zero && is_one) {
+                int diff_zero = abs(mark - zero_mark_us);
+                int diff_one = abs(mark - one_mark_us);
+                cur_buf.push_bit(diff_zero <= diff_one ? 0 : 1);
+                i += 2;
+                continue;
+            }
+        }
+
+        if (cur_buf.num_bits > best_buf.num_bits) {
+            best_buf = cur_buf;
+        }
+        cur_buf.clear();
+        i++;
     }
+    if (cur_buf.num_bits > best_buf.num_bits) {
+        best_buf = cur_buf;
+    }
+    out = best_buf;
     return out.num_bits >= 16;
 }
 
@@ -228,26 +308,62 @@ bool demod_pwm_space(const std::vector<int> &durations, int mark_us, int zero_sp
     out.clear();
     if (durations.size() < 10) return false;
 
-    for (size_t i = 0; i + 1 < durations.size(); i += 2) {
+    int eff_tol = tol_pct + 25;
+    int space_threshold = (zero_space_us + one_space_us) / 2;
+    bool zero_is_shorter = zero_space_us < one_space_us;
+
+    BitBuffer best_buf;
+    BitBuffer cur_buf;
+
+    size_t i = 0;
+    while (i + 1 < durations.size()) {
+        if (durations[i] <= 0) {
+            i++;
+            continue;
+        }
         int mark = durations[i];
         int space = -durations[i + 1];
 
-        if (mark <= 0 || space <= 0) continue;
-        if (!match_range(mark, mark_us, tol_pct)) {
-            if (out.num_bits >= 16) break;
-            out.clear();
+        if (space <= 0) {
+            i++;
             continue;
         }
 
-        if (match_range(space, zero_space_us, tol_pct)) {
-            out.push_bit(0);
-        } else if (match_range(space, one_space_us, tol_pct)) {
-            out.push_bit(1);
-        } else {
-            if (out.num_bits >= 16) break;
-            out.clear();
+        if (match_range(mark, mark_us, eff_tol)) {
+            bool is_zero = match_range(space, zero_space_us, eff_tol) ||
+                           (zero_is_shorter ? (space < space_threshold && match_range(space, zero_space_us, eff_tol + 20))
+                                            : (space >= space_threshold && match_range(space, zero_space_us, eff_tol + 20)));
+            bool is_one = match_range(space, one_space_us, eff_tol) ||
+                          (zero_is_shorter ? (space >= space_threshold && match_range(space, one_space_us, eff_tol + 20))
+                                           : (space < space_threshold && match_range(space, one_space_us, eff_tol + 20)));
+
+            if (is_zero && !is_one) {
+                cur_buf.push_bit(0);
+                i += 2;
+                continue;
+            } else if (is_one && !is_zero) {
+                cur_buf.push_bit(1);
+                i += 2;
+                continue;
+            } else if (is_zero && is_one) {
+                int diff_zero = abs(space - zero_space_us);
+                int diff_one = abs(space - one_space_us);
+                cur_buf.push_bit(diff_zero <= diff_one ? 0 : 1);
+                i += 2;
+                continue;
+            }
         }
+
+        if (cur_buf.num_bits > best_buf.num_bits) {
+            best_buf = cur_buf;
+        }
+        cur_buf.clear();
+        i++;
     }
+    if (cur_buf.num_bits > best_buf.num_bits) {
+        best_buf = cur_buf;
+    }
+    out = best_buf;
     return out.num_bits >= 16;
 }
 
@@ -256,23 +372,29 @@ bool demod_manchester(const std::vector<int> &durations, int half_clock_us, int 
     if (durations.size() < 8) return false;
 
     int clock_us = half_clock_us * 2;
-    int half_margin = (half_clock_us * tol_pct) / 100;
-    if (half_margin < 50) half_margin = 50;
-    int full_margin = (clock_us * tol_pct) / 100;
-    if (full_margin < 80) full_margin = 80;
+    int half_min = (half_clock_us * 30) / 100;
+    if (half_min < 35) half_min = 35;
+    int half_max = (half_clock_us * 170) / 100;
 
+    int full_min = (clock_us * 60) / 100;
+    int full_max = (clock_us * 150) / 100;
+
+    BitBuffer best_buf;
+    BitBuffer cur_buf;
     int state = 0; // 0 = start/sync, 1 = bit middle
 
     for (int d : durations) {
         int len = abs(d);
         int level = (d > 0) ? 1 : 0;
 
-        bool is_half = (len >= (half_clock_us - half_margin) && len <= (half_clock_us + half_margin));
-        bool is_full = (len >= (clock_us - full_margin) && len <= (clock_us + full_margin));
+        bool is_half = (len >= half_min && len <= half_max);
+        bool is_full = (len >= full_min && len <= full_max);
 
         if (!is_half && !is_full) {
-            if (out.num_bits >= 16) break;
-            out.clear();
+            if (cur_buf.num_bits > best_buf.num_bits) {
+                best_buf = cur_buf;
+            }
+            cur_buf.clear();
             state = 0;
             continue;
         }
@@ -281,23 +403,33 @@ bool demod_manchester(const std::vector<int> &durations, int half_clock_us, int 
             state = 1;
         } else {
             if (is_half) {
-                out.push_bit(invert ? !level : level);
+                cur_buf.push_bit(invert ? !level : level);
                 state = 0;
             } else if (is_full) {
-                out.push_bit(invert ? !level : level);
+                cur_buf.push_bit(invert ? !level : level);
                 state = 1;
             }
         }
     }
+    if (cur_buf.num_bits > best_buf.num_bits) {
+        best_buf = cur_buf;
+    }
+    out = best_buf;
     return out.num_bits >= 16;
 }
 
-bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out) {
+bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out, uint32_t sync_word, uint8_t sync_len) {
     out.clear();
     if (durations.size() < 6 || bit_period_us <= 0) return false;
 
     int min_period = (bit_period_us * (100 - tol_pct)) / 100;
-    if (min_period < 15) min_period = 15;
+    if (min_period < 4) min_period = 4;
+
+    BitBuffer best_buf;
+    BitBuffer cur_buf;
+    uint32_t shift_reg = 0;
+    uint32_t sync_mask = (sync_len >= 32) ? 0xFFFFFFFF : ((1UL << sync_len) - 1);
+    bool capturing_synced = false;
 
     for (int d : durations) {
         int len = abs(d);
@@ -307,16 +439,42 @@ bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol
 
         int count = (len + bit_period_us / 2) / bit_period_us;
         if (count == 0) count = 1;
-        if (count > 64) {
-            if (out.num_bits >= 16) break;
-            out.clear();
+        if (count > 128) {
+            if (cur_buf.num_bits > best_buf.num_bits) {
+                best_buf = cur_buf;
+            }
+            cur_buf.clear();
+            shift_reg = 0;
+            capturing_synced = false;
             continue;
         }
 
         for (int i = 0; i < count; i++) {
-            out.push_bit(bit_val);
+            if (sync_len > 0) {
+                shift_reg = (shift_reg << 1) | bit_val;
+                if (!capturing_synced) {
+                    if ((shift_reg & sync_mask) == (sync_word & sync_mask)) {
+                        capturing_synced = true;
+                        cur_buf.clear();
+                        for (int s = (int)sync_len - 1; s >= 0; s--) {
+                            cur_buf.push_bit((sync_word >> s) & 1);
+                        }
+                    }
+                } else {
+                    cur_buf.push_bit(bit_val);
+                    if (cur_buf.num_bits >= BitBuffer::MAX_BYTES * 8) {
+                        break;
+                    }
+                }
+            } else {
+                cur_buf.push_bit(bit_val);
+            }
         }
     }
+    if (cur_buf.num_bits > best_buf.num_bits) {
+        best_buf = cur_buf;
+    }
+    out = best_buf;
     return out.num_bits >= 16;
 }
 
@@ -334,17 +492,13 @@ bool Rtl433Engine::initRadio(float freq, int preset) {
 
     const Rtl433PresetDef *pdef = rtl433_get_preset_def(currentPreset);
 
-    if (!initRfModule("rx", currentFrequency)) return false;
+    // initRfModule() now applies the correct modulation-specific register/AGC preset (OOK vs
+    // FSK-family) directly, so no post-hoc patching of modulation/deviation/bandwidth/data-rate
+    // is needed here anymore.
+    if (!initRfModule("rx", currentFrequency, pdef->modulation, pdef->deviation, pdef->rx_bw, pdef->data_rate))
+        return false;
 
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
-        ELECHOUSE_cc1101.setSidle();
-        ELECHOUSE_cc1101.setModulation(pdef->modulation);
-        if (pdef->deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(pdef->deviation);
-        if (pdef->rx_bw > 0.0f) ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
-        if (pdef->data_rate > 0.0f) ELECHOUSE_cc1101.setDRate(pdef->data_rate);
-        ELECHOUSE_cc1101.setPktFormat(3); // Asynchronous serial mode
-        pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
-        ELECHOUSE_cc1101.SetRx();
         tft.drawPixel(0, 0, 0); // Keep shared SPI bus clean for display
     }
     return true;
@@ -360,12 +514,26 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
         ELECHOUSE_cc1101.setSidle();
         setMHZ(currentFrequency);
         ELECHOUSE_cc1101.setModulation(pdef->modulation);
-        if (pdef->deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(pdef->deviation);
-        if (pdef->rx_bw > 0.0f) ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
-        if (pdef->data_rate > 0.0f) ELECHOUSE_cc1101.setDRate(pdef->data_rate);
+        // Re-apply the correct fixed-frequency register/AGC preset for the new modulation
+        // (radio is already running, so we can't go through a full initRfModule() re-init here).
+        if (pdef->modulation == 2) {
+            cc1101ApplyFixedFreqOokPreset(false);
+        } else {
+            cc1101ApplyFixedFreqFskPreset(false);
+        }
+        if (pdef->modulation != 2) {
+            if (pdef->deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(pdef->deviation);
+            if (pdef->rx_bw > 0.0f) ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
+            if (pdef->data_rate > 0.0f) ELECHOUSE_cc1101.setDRate(pdef->data_rate);
+            ELECHOUSE_cc1101.setSyncMode(0); // Unfiltered continuous async slicer stream
+            ELECHOUSE_cc1101.setDcFilterOff(true);
+        } else if (pdef->rx_bw > 0.0f) {
+            ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
+        }
         ELECHOUSE_cc1101.setPktFormat(3); // Asynchronous serial mode
         pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
         ELECHOUSE_cc1101.SetRx();
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, (pdef->modulation == 2) ? 0x0D : 0x0E);
         tft.drawPixel(0, 0, 0); // Keep shared SPI bus clean for display
     } else {
         bruceConfigPins.setRfFreq(currentFrequency, 1);
@@ -471,11 +639,22 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
     float freqMhz = reading.frequency;
     if (freqMhz < 280.0f || freqMhz > 928.0f) freqMhz = bruceConfigPins.rfFreq;
 
-    int presetIdx = (reading.preset_idx >= 0 && reading.preset_idx < RTL433_PRESET_COUNT)
-                        ? reading.preset_idx
-                        : ((reading.modulation == "MSK") ? RTL433_PRESET_MSK_868_T :
-                           (reading.modulation == "GFSK") ? RTL433_PRESET_GFSK_433_17K :
-                           (reading.modulation == "2-FSK") ? RTL433_PRESET_FSK_433_17K : RTL433_PRESET_OOK_433);
+    int presetIdx = reading.preset_idx;
+    if (presetIdx < 0 || presetIdx >= RTL433_PRESET_COUNT || (reading.modulation != "" && reading.modulation != "OOK" && presetIdx == RTL433_PRESET_OOK_433)) {
+        if (reading.modulation == "MSK") {
+            presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_MSK_868_T : RTL433_PRESET_MSK_433_100K;
+        } else if (reading.modulation == "GFSK") {
+            presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_GFSK_868_17K :
+                        (freqMhz < 330.0f) ? RTL433_PRESET_GFSK_315_19K : RTL433_PRESET_GFSK_433_17K;
+        } else if (reading.modulation == "2-FSK" || reading.modulation == "FSK") {
+            presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_FSK_868_17K :
+                        (freqMhz < 330.0f) ? RTL433_PRESET_FSK_315_19K : RTL433_PRESET_FSK_433_17K;
+        } else {
+            presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_OOK_868 :
+                        (freqMhz < 330.0f) ? RTL433_PRESET_OOK_315 :
+                        (freqMhz > 330.0f && freqMhz < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+        }
+    }
     const Rtl433PresetDef *pdef = rtl433_get_preset_def(presetIdx);
 
     int repeats = (repeatCount < 1) ? replayRepeats : repeatCount;
@@ -483,14 +662,18 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
 
     int gap_us = (replayGapMs > 0) ? -(replayGapMs * 1000) : -20000;
 
-    // Synthesize preamble if enabled (lead-in training sequence for receiver bit-sync & AGC)
+    // Synthesize preamble (lead-in training sequence for receiver bit-sync & AGC / discriminator lock)
     std::vector<int> preambleDurs;
-    if (replayPreamble) {
+    if (replayPreamble || pdef->modulation != 2 || reading.modulation == "2-FSK" || reading.modulation == "GFSK" || reading.modulation == "MSK") {
         int bit_us = 58;
         if (reading.decoder_id == 13) {
             bit_us = 122; // Bresser 5-in-1 standard ~8.21 kbps
         } else if (reading.decoder_id == 14) {
             bit_us = 125; // Bresser 6-in-1 standard ~8.0 kbps
+        } else if (reading.decoder_id == 5) {
+            bit_us = 58;  // FineOffset standard ~17.24 kbps
+        } else if (reading.decoder_id == 15 || reading.decoder_id == 17) {
+            bit_us = 10;  // wM-Bus Mode T 100 kbps
         } else if (pdef->data_rate > 0.0f) {
             bit_us = (int)(1000.0f / pdef->data_rate + 0.5f);
         } else if (pdef->modulation == 2) { // OOK
@@ -499,8 +682,8 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
         if (bit_us < 8) bit_us = 8;
         if (bit_us > 2000) bit_us = 2000;
 
-        // Generate 48 alternating bits (24 high/low cycles: 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA)
-        for (int p = 0; p < 24; p++) {
+        // Generate 32 alternating bits (16 mark/space cycles: 0xAA 0xAA 0xAA 0xAA)
+        for (int p = 0; p < 16; p++) {
             preambleDurs.push_back(bit_us);
             preambleDurs.push_back(-bit_us);
         }
@@ -537,20 +720,18 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
 
     for (size_t f_idx = 0; f_idx < targetFreqs.size(); f_idx++) {
         float curFreq = targetFreqs[f_idx];
-        if (!initRfModule("tx", curFreq)) continue;
+        // initRfModule() now applies the correct modulation-specific register/AGC preset (OOK vs
+        // FSK-family) directly, so no post-hoc patching of modulation/deviation/data-rate is
+        // needed here anymore.
+        if (!initRfModule("tx", curFreq, pdef->modulation, pdef->deviation, 0.0f, pdef->data_rate)) continue;
 
         if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
-            ELECHOUSE_cc1101.setSidle();
-            ELECHOUSE_cc1101.setModulation(pdef->modulation);
-            if (pdef->modulation != 2) { // Non-OOK (2-FSK, GFSK, MSK)
-                if (pdef->deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(pdef->deviation);
-                if (pdef->data_rate > 0.0f) ELECHOUSE_cc1101.setDRate(pdef->data_rate);
-            }
             pinMode(bruceConfigPins.CC1101_bus.io0, OUTPUT);
-            ELECHOUSE_cc1101.setPA(12);
+            ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
             ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
             ioExpander.turnPinOnOff(IO_EXP_CC_TX, HIGH);
             ELECHOUSE_cc1101.SetTx();
+            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x2E);
             delayMicroseconds(500); // Allow PLL lock and PA ramp-up to settle
         }
 
@@ -637,6 +818,7 @@ static std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count,
         durs.push_back(mark_us);
         durs.push_back(bit ? -one_gap_us : -zero_gap_us);
     }
+    durs.push_back(mark_us); // Stop mark to delimit final bit gap
     return durs;
 }
 
@@ -846,4 +1028,115 @@ bool rtl433_selftest(String &report) {
 
     report += "Result: " + String(passed) + "/" + String(total) + " tests passed.\n";
     return passed == total;
+}
+
+bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repeats) {
+    String st = sampleType;
+    st.toLowerCase();
+    st.trim();
+
+    Rtl433Reading r;
+    r.device_id = 0x1234;
+    int presetIdx = RTL433_PRESET_OOK_433;
+
+    if (st == "nexus" || st == "ook" || st == "ppm" || st == "rubicson") {
+        uint8_t nexus_data[] = {0x8E, 0x00, 0xFE, 0xF3, 0x70};
+        r.raw_durations = build_ppm_pulses(nexus_data, 36, 500, 1000, 2000);
+        r.protocol = "Nexus-TH";
+        r.model = "Nexus / Rubicson";
+        r.decoder_name = "Nexus";
+        r.modulation = "OOK";
+        r.decoder_id = 1;
+        float defFreq = (freq > 0.0f) ? freq : 433.92f;
+        r.frequency = defFreq;
+        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_OOK_868 :
+                    (defFreq < 330.0f) ? RTL433_PRESET_OOK_315 :
+                    (defFreq > 330.0f && defFreq < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+    } else if (st == "acurite" || st == "pwm" || st == "606tx") {
+        uint8_t acurite_data[] = {0x55, 0x04, 0xB0, 0x09};
+        r.raw_durations = build_pwm_pulses(acurite_data, 32, 200, 600, 400);
+        r.protocol = "Acurite-606TX";
+        r.model = "606TX";
+        r.decoder_name = "Acurite";
+        r.modulation = "OOK";
+        r.decoder_id = 2;
+        float defFreq = (freq > 0.0f) ? freq : 433.92f;
+        r.frequency = defFreq;
+        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_OOK_868 :
+                    (defFreq < 330.0f) ? RTL433_PRESET_OOK_315 : RTL433_PRESET_OOK_433;
+    } else if (st == "honeywell" || st == "5800" || st == "manchester" || st == "345") {
+        uint8_t hw_data[] = {0xFF, 0x1A, 0x2B, 0x3C, 0x90, 0x00, 0x12, 0x34};
+        r.raw_durations = build_manchester_pulses(hw_data, 64, 380);
+        r.protocol = "Honeywell-5800";
+        r.model = "5800 Door/Window";
+        r.decoder_name = "Honeywell";
+        r.modulation = "OOK";
+        r.decoder_id = 7;
+        float defFreq = (freq > 0.0f) ? freq : 433.92f;
+        r.frequency = defFreq;
+        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_OOK_868 :
+                    (defFreq < 330.0f) ? RTL433_PRESET_OOK_315 :
+                    (defFreq > 330.0f && defFreq < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+    } else if (st == "wh65" || st == "fsk" || st == "2fsk" || st == "fineoffset") {
+        BitBuffer b;
+        for (int i = 15; i >= 0; i--) b.push_bit((0x2DD4 >> i) & 1);
+        uint8_t payload[14] = {0x48, 0x12, 0x34, 0x02, 0x67, 50, 90, 15, 25, 0, 50, 3, 100, 0};
+        for (int i = 0; i < 13; i++) {
+            for (int bit = 7; bit >= 0; bit--) b.push_bit((payload[i] >> bit) & 1);
+        }
+        uint8_t crc = b.crc8(0x31, 0x00, 16, 13 * 8);
+        for (int bit = 7; bit >= 0; bit--) b.push_bit((crc >> bit) & 1);
+
+        r.raw_durations = build_pcm_pulses(b.data, b.num_bits, 58);
+        r.protocol = "FineOffset-WH65";
+        r.model = "WH65B Station";
+        r.decoder_name = "FineOffset";
+        r.modulation = "2-FSK";
+        r.decoder_id = 5;
+        float defFreq = (freq > 0.0f) ? freq : 433.92f;
+        r.frequency = defFreq;
+        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_FSK_868_17K :
+                    (defFreq < 330.0f) ? RTL433_PRESET_FSK_315_19K : RTL433_PRESET_FSK_433_17K;
+    } else if (st == "bresser" || st == "gfsk" || st == "5in1") {
+        BitBuffer b;
+        for (int i = 15; i >= 0; i--) b.push_bit((0x2DD4 >> i) & 1);
+        uint8_t payload[10] = {0x51, 0x82, 0x00, 0xDE, 55, 0x04, 25, 0x00, 0x14, 0x00};
+        uint8_t sum = 0;
+        for (int i = 0; i < 9; i++) sum += payload[i];
+        payload[9] = sum;
+        for (int i = 0; i < 10; i++) {
+            for (int bit = 7; bit >= 0; bit--) b.push_bit((payload[i] >> bit) & 1);
+        }
+        r.raw_durations = build_pcm_pulses(b.data, b.num_bits, 122);
+        r.protocol = "Bresser-5in1";
+        r.model = "5-in-1 Weather";
+        r.decoder_name = "Bresser";
+        r.modulation = "GFSK";
+        r.decoder_id = 13;
+        float defFreq = (freq > 0.0f) ? freq : 433.92f;
+        r.frequency = defFreq;
+        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_GFSK_868_17K :
+                    (defFreq < 330.0f) ? RTL433_PRESET_GFSK_315_19K : RTL433_PRESET_GFSK_433_17K;
+    } else if (st == "wmbus" || st == "msk" || st == "mskt" || st == "wmbust") {
+        BitBuffer b;
+        for (int i = 15; i >= 0; i--) b.push_bit((0x543D >> i) & 1);
+        uint8_t wmbus_hdr[] = {0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07};
+        for (size_t i = 0; i < sizeof(wmbus_hdr); i++) {
+            for (int bit = 7; bit >= 0; bit--) b.push_bit((wmbus_hdr[i] >> bit) & 1);
+        }
+        r.raw_durations = build_pcm_pulses(b.data, b.num_bits, 10);
+        r.protocol = "Wireless-MBus";
+        r.model = "wM-Bus Mode T (Water)";
+        r.decoder_name = "wM-Bus";
+        r.modulation = "MSK";
+        r.decoder_id = 15;
+        float defFreq = (freq > 0.0f) ? freq : 433.92f;
+        r.frequency = defFreq;
+        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_MSK_868_T : RTL433_PRESET_MSK_433_100K;
+    } else {
+        return false;
+    }
+
+    r.preset_idx = presetIdx;
+    return replayReading(r, repeats);
 }

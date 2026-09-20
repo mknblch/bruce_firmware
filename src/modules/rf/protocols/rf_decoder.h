@@ -57,13 +57,7 @@ public:
         _idleTimeoutNs = timeoutNs;
     }
 
-    void flush() {
-        if (_queue != nullptr) {
-            rmt_rx_done_event_data_t rx_ev;
-            while (xQueueReceive(_queue, &rx_ev, 0) == pdPASS) {}
-        }
-        arm();
-    }
+    void flush();
 
 private:
     rmt_channel_handle_t _ch = nullptr;

@@ -231,6 +231,7 @@ public:
     float rfFreq = 433.92;
     int rfFxdFreq = 1;
     int rfScanRange = 3;
+    int rfTxPower = 12;
 
     // iButton Pin
     int iButton = 0;
@@ -294,6 +295,7 @@ public:
     void setRfFxdFreq(float value);
     void setRfScanRange(int value, int fxdFreq = 0);
     void validateRfScanRangeValue();
+    void setRfTxPower(int value);
 
     // iButton
     void setiButtonPin(int value);

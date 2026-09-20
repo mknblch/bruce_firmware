@@ -436,7 +436,7 @@ void sendRfCommand(struct RfCodes rfcode, bool hideDefaultUI) {
         if (rxBW != 270.83f && rxBW > 0) ELECHOUSE_cc1101.setRxBW(rxBW);
         if (dataRate != 10.0f && dataRate > 0) ELECHOUSE_cc1101.setDRate(dataRate);
         pinMode(bruceConfigPins.CC1101_bus.io0, OUTPUT);
-        ELECHOUSE_cc1101.setPA(12);
+        ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
         ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
         ioExpander.turnPinOnOff(IO_EXP_CC_TX, HIGH);
         ELECHOUSE_cc1101.SetTx();

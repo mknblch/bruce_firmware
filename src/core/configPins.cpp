@@ -101,6 +101,9 @@ void BruceConfigPins::fromJson(JsonObject obj) {
         count++;
         log_e("Fail");
     }
+    if (!root["rfTxPower"].isNull()) {
+        rfTxPower = root["rfTxPower"].as<int>();
+    }
 
     if (!root["rfidModule"].isNull()) {
         rfidModule = root["rfidModule"].as<int>();
@@ -252,6 +255,7 @@ void BruceConfigPins::toJson(JsonObject obj) const {
     root["rfFreq"] = rfFreq;
     root["rfFxdFreq"] = rfFxdFreq;
     root["rfScanRange"] = rfScanRange;
+    root["rfTxPower"] = rfTxPower;
     root["bleName"] = bleName;
     root["rfidModule"] = rfidModule;
     root["gpsBaudrate"] = gpsBaudrate;
@@ -547,6 +551,13 @@ void BruceConfigPins::setRfScanRange(int value, int fxdFreq) {
 
 void BruceConfigPins::validateRfScanRangeValue() {
     if (rfScanRange < 0 || rfScanRange > 3) rfScanRange = 3;
+}
+
+void BruceConfigPins::setRfTxPower(int value) {
+    if (value < -30) value = -30;
+    if (value > 12) value = 12;
+    rfTxPower = value;
+    saveFile();
 }
 
 void BruceConfigPins::setRfidModule(RFIDModules value) {

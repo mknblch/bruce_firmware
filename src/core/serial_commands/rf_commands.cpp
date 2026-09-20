@@ -503,6 +503,7 @@ uint32_t rtl433SniffCallback(cmd *c) {
         serialDevice->println("{\"error\":\"rx session begin failed\"}");
         return false;
     }
+    rx.flush();
 
     serialDevice->println(String("{\"status\":\"sniffing\",\"frequency\":") + String(freq, 4) +
                           ",\"preset\":\"" + String(rtl433_get_preset_name(preset)) + "\"}");
@@ -519,10 +520,12 @@ uint32_t rtl433SniffCallback(cmd *c) {
             Rtl433Reading r;
             int rssi = -70;
             if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) rssi = ELECHOUSE_cc1101.getRssi();
-            if (engine.decode(durations, freq, preset, rssi, r)) {
+            bool decOk = engine.decode(durations, freq, preset, rssi, r);
+            if (decOk) {
                 engine.addRecent(r);
                 engine.logJson(r, engine.sdLoggingEnabled);
                 captured++;
+                serialDevice->println(r.toJson());
             }
         }
         vTaskDelay(5 / portTICK_PERIOD_MS);
@@ -578,6 +581,7 @@ uint32_t rtl433HopCallback(cmd *c) {
         serialDevice->println("{\"error\":\"rx session begin failed\"}");
         return false;
     }
+    rx.flush();
 
     serialDevice->println(String("{\"status\":\"hopping\",\"group\":\"") + String(rtl433_get_hop_group_name(group)) +
                           "\",\"hop_timeout_s\":" + String(hopTimeoutSec) + "}");
@@ -600,6 +604,7 @@ uint32_t rtl433HopCallback(cmd *c) {
             currentPreset = hopList[currentHopIdx];
             currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
             engine.switchPreset(currentFreq, currentPreset);
+            rx.flush();
             hopStartMs = millis();
             serialDevice->println(String("{\"hop_switch\":\"") + String(rtl433_get_preset_name(currentPreset)) +
                                   "\",\"freq\":" + String(currentFreq, 2) + "}");
@@ -682,21 +687,76 @@ uint32_t rtl433ClearCallback(cmd *c) {
 
 uint32_t rtl433ReplayCallback(cmd *c) {
     Command cmd(c);
-    Argument idxArg = cmd.getArgument("index");
-    int index = idxArg.isSet() ? idxArg.getValue().toInt() : 0;
+    Argument targetArg = cmd.getArgument("target");
+    Argument freqArg = cmd.getArgument("frequency");
+    Argument repArg = cmd.getArgument("repeats");
+
+    String target = targetArg.isSet() ? targetArg.getValue() : "0";
+    float freq = 0.0f;
+    if (freqArg.isSet() && freqArg.getValue().length() > 0) {
+        freq = freqArg.getValue().toFloat();
+        if (freq > 10000.0f) freq /= 1000000.0f;
+    }
+    int repeats = repArg.isSet() ? repArg.getValue().toInt() : 5;
 
     Rtl433Engine &engine = Rtl433Engine::instance();
+
+    // Check if target is a sample keyword (nexus, acurite, honeywell, wh65, bresser, wmbus, ook, fsk, gfsk, msk, etc.)
+    if (engine.transmitSample(target, freq, repeats)) {
+        serialDevice->println("{\"status\":\"transmitted\",\"sample\":\"" + target + "\",\"frequency\":" + String(freq > 0.0f ? freq : 433.92f, 2) + ",\"repeats\":" + String(repeats) + "}");
+        return true;
+    }
+
+    int index = target.toInt();
     const Rtl433Reading *r = engine.getRecentAt(index);
     if (!r) {
-        serialDevice->println("{\"error\":\"invalid index\"}");
+        serialDevice->println("{\"error\":\"invalid sample or index: " + target + "\"}");
         return false;
     }
-    if (engine.replayReading(*r)) {
+    if (engine.replayReading(*r, repeats)) {
         serialDevice->println("{\"status\":\"replayed\",\"protocol\":\"" + r->protocol + "\"}");
         return true;
     }
     serialDevice->println("{\"error\":\"replay failed\"}");
     return false;
+}
+
+uint32_t rfTxPowerCallback(cmd *c) {
+    Command cmd(c);
+    Argument powerArg = cmd.getArgument("power");
+    int p = 12;
+    bool set = false;
+    if (powerArg.isSet() && powerArg.getValue().length() > 0) {
+        p = powerArg.getValue().toInt();
+        set = true;
+    } else if (c) {
+        String raw = cmd.toString();
+        int idx = raw.indexOf("txpower");
+        if (idx == -1) idx = raw.indexOf("power");
+        if (idx != -1) {
+            String sub = raw.substring(idx);
+            int minusIdx = sub.indexOf('-');
+            if (minusIdx != -1) {
+                int val = sub.substring(minusIdx).toInt();
+                if (val <= 12 && val >= -30) {
+                    p = val;
+                    set = true;
+                }
+            }
+        }
+    }
+    if (set) {
+        bruceConfigPins.setRfTxPower(p);
+        serialDevice->println("{\"status\":\"ok\",\"rf_tx_power\":" + String(bruceConfigPins.rfTxPower) + "}");
+        return true;
+    }
+    serialDevice->println("{\"rf_tx_power\":" + String(bruceConfigPins.rfTxPower) + "}");
+    return true;
+}
+
+void createRfTxPowerCommand(Command *rfCmd) {
+    Command cmd = rfCmd->addCommand("txpower,power", rfTxPowerCallback);
+    cmd.addPosArg("power", "");
 }
 
 uint32_t rtl433TestCallback(cmd *c) {
@@ -772,8 +832,10 @@ void createRtl433Command(Command *rfCmd) {
     cmd.addCommand("clear", rtl433ClearCallback);
     cmd.addCommand("test,selftest", rtl433TestCallback);
 
-    Command replayCmd = cmd.addCommand("replay,tx", rtl433ReplayCallback);
-    replayCmd.addPosArg("index", "0");
+    Command replayCmd = cmd.addCommand("replay,tx,emit", rtl433ReplayCallback);
+    replayCmd.addPosArg("target", "0");
+    replayCmd.addPosArg("frequency", "0");
+    replayCmd.addPosArg("repeats", "5");
 }
 
 void createRfCommands(SimpleCLI *cli) {
@@ -788,6 +850,7 @@ void createRfCommands(SimpleCLI *cli) {
     createRfTxBufferCommand(&cmd);
     createRfMfcodesCommand(&cmd);
     createRfKeeloqTxCommand(&cmd);
+    createRfTxPowerCommand(&cmd);
     createRtl433Command(&cmd);
 #if RF_DEBUG
     createRfSelftestCommand(&cmd);
@@ -799,6 +862,9 @@ void createRfCommands(SimpleCLI *cli) {
 
     Command topPreset = cli->addCommand("rf_preset,subghz_preset", rfPresetCallback);
     topPreset.addPosArg("preset", "");
+
+    Command topPower = cli->addCommand("txpower,subghz_txpower,rf_txpower", rfTxPowerCallback);
+    topPower.addPosArg("power", "");
 
     // Also register top-level rtl433 command
     Command topRtl = cli->addCompositeCmd("rtl433");
@@ -815,6 +881,8 @@ void createRfCommands(SimpleCLI *cli) {
     topRtl.addCommand("dump", rtl433DumpCallback);
     topRtl.addCommand("clear", rtl433ClearCallback);
     topRtl.addCommand("test,selftest", rtl433TestCallback);
-    Command topReplay = topRtl.addCommand("replay,tx", rtl433ReplayCallback);
-    topReplay.addPosArg("index", "0");
+    Command topReplay = topRtl.addCommand("replay,tx,emit", rtl433ReplayCallback);
+    topReplay.addPosArg("target", "0");
+    topReplay.addPosArg("frequency", "0");
+    topReplay.addPosArg("repeats", "5");
 }

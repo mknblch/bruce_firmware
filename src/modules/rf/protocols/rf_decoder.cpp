@@ -294,6 +294,29 @@ void RfRxSession::end() {
     }
 }
 
+void RfRxSession::flush() {
+    if (_m5Isr) {
+        portENTER_CRITICAL(&rf_m5_mux);
+        rf_m5_count = 0;
+        rf_m5_ready_count = 0;
+        rf_m5_last_edge_us = micros();
+        rf_m5_last_level = digitalRead(rf_m5_pin);
+        portEXIT_CRITICAL(&rf_m5_mux);
+        return;
+    }
+
+    if (_ch != nullptr) {
+        rmt_disable(_ch);
+        if (_queue != nullptr) {
+            rmt_rx_done_event_data_t rx_ev;
+            while (xQueueReceive(_queue, &rx_ev, 0) == pdPASS) {}
+        }
+        rmt_enable(_ch);
+        _armed = false;
+        arm();
+    }
+}
+
 void rf_symbols_to_durations(const rmt_symbol_word_t *symbols, size_t count, std::vector<int> &out) {
     out.clear();
     // RMT RX is configured at 1 MHz (1 tick = 1 µs), so durations are already µs.

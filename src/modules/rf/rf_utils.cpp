@@ -161,13 +161,16 @@ void cc1101ApplyPreciseCalibration(float frequency, bool isTx) {
 
     test0 = highVco ? 0x09 : 0x0B;
 
+    uint8_t mdmcfg2 = ELECHOUSE_cc1101.SpiReadReg(CC1101_MDMCFG2);
+    bool isOok = ((mdmcfg2 & 0x70) == 0x30);
+
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_FSCTRL0, fsctrl0);
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_TEST0, test0);
     if (isTx) {
-        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND0, 0x11);
-        ELECHOUSE_cc1101.setPA(12);
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND0, isOok ? 0x11 : 0x10);
+        ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
     } else {
-        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND1, 0xB6);
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND1, isOok ? 0xB6 : 0x56);
     }
     ELECHOUSE_cc1101.SpiStrobe(CC1101_SCAL);
     cc1101WaitForIdle();
@@ -193,14 +196,44 @@ void cc1101ApplyFixedFreqOokPreset(bool isTx) {
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_FOCCFG, 0x18);
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND0, 0x11);
     if (isTx) {
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x2E);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FIFOTHR, 0x47);
-        ELECHOUSE_cc1101.setPA(12);
+        ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
     } else {
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0D);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FIFOTHR, 0x07);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL0, 0x91); // DC filter OFF, proper averaging
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL1, 0x00);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL2, 0xC7);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND1, 0xB6);
+    }
+}
+
+// FSK-family (2-FSK/GFSK/MSK) counterpart to cc1101ApplyFixedFreqOokPreset(). The OOK preset
+// above hardcodes MDMCFG2/3/4 and AGC registers tuned for OOK envelope detection; applying it
+// unconditionally to 2-FSK/GFSK/MSK sessions leaves the demodulator running with the wrong AGC
+// settling behavior, which was the root cause of the FSK-family RX/TX failures. This preset
+// mirrors the CC1101 driver's own general-purpose FSK/GFSK defaults (RegConfigSettings()),
+// which are appropriate for the async-serial demod path used here, and leaves the actual
+// deviation/bandwidth/data-rate registers to the caller (via ELECHOUSE_cc1101.setDeviation()/
+// setRxBW()/setDRate()) since those vary per preset (17.24 kbps vs 100 kbps MSK, etc).
+void cc1101ApplyFixedFreqFskPreset(bool isTx) {
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_FSCTRL1, 0x06);
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_MCSM0, 0x18);
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_FOCCFG, 0x1D);
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_BSCFG, 0x1C);
+    if (isTx) {
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x2E);
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND0, 0x10); // FSK-family PA ramp curve (no OOK ASK shaping)
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FIFOTHR, 0x47);
+        ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
+    } else {
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0E); // GDO0 Serial Asynchronous Data Output gated by Carrier Sense
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FIFOTHR, 0x07);
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL2, 0xC7);
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL1, 0x10); // Relative carrier sense 6dB above noise floor
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL0, 0xB2);
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND1, 0x56);
     }
 }
 
@@ -271,9 +304,12 @@ void RfCodes::keeloq_step(uint16_t step) {
 
 // split_string + KeeloqKeystore moved to protocols/rf_keeloq.cpp.
 
-bool initRfModule(String mode, float frequency) {
+bool initRfModule(String mode, float frequency, int modulation, float deviation, float rxBw, float dataRate) {
     // use default frequency if no one is passed
     if (!frequency) frequency = bruceConfigPins.rfFreq;
+    // modulation < 0 means "unspecified" -> keep the historical OOK/ASK default so every
+    // pre-existing caller (rf tx/rx, .sub replay, scanner, etc.) is unaffected.
+    const int effectiveModulation = (modulation < 0) ? 2 : modulation;
 
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) { // CC1101 in use
         SPIClass *ccSpi = acquireSPIBus(
@@ -322,7 +358,7 @@ bool initRfModule(String mode, float frequency) {
         ELECHOUSE_cc1101.setClb(3, 65, 76); // Keep upstream 868 MHz FSCTRL0 range
         ELECHOUSE_cc1101.setClb(4, 77, 79); // Keep upstream 915 MHz FSCTRL0 range
         // set modulation mode. 0 = 2-FSK, 1 = GFSK, 2 = ASK/OOK, 3 = 4-FSK, 4 = MSK.
-        ELECHOUSE_cc1101.setModulation(2);
+        ELECHOUSE_cc1101.setModulation(effectiveModulation);
         // Format of RX and TX data.
         //   0 = Normal mode, use FIFOs for RX and TX.
         //   1 = Synchronous serial mode, Data in on GDO0 and data out on either of the GDOx pins.
@@ -335,23 +371,39 @@ bool initRfModule(String mode, float frequency) {
         Serial.println("cc1101 setMHZ(frequency);");
         if (fixedFreq) {
             cc1101_mode_hint = (mode == "tx") ? 1 : ((mode == "rx") ? 2 : 0);
-            cc1101ApplyFixedFreqOokPreset(cc1101_mode_hint == 1);
+            if (effectiveModulation == 2) {
+                cc1101ApplyFixedFreqOokPreset(cc1101_mode_hint == 1);
+            } else {
+                cc1101ApplyFixedFreqFskPreset(cc1101_mode_hint == 1);
+            }
         }
+        // Apply the caller's modulation-specific deviation/data-rate/bandwidth on top of the
+        // preset above. rxBw applies to both OOK and FSK-family (matches previous OOK-only
+        // behavior); deviation/data-rate/sync-mode/DC-filter only make sense for FSK-family.
+        if (effectiveModulation != 2) {
+            if (deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(deviation);
+            if (dataRate > 0.0f) ELECHOUSE_cc1101.setDRate(dataRate);
+            ELECHOUSE_cc1101.setSyncMode(0); // Unfiltered continuous async slicer stream
+            ELECHOUSE_cc1101.setDcFilterOff(true);
+        }
+        if (rxBw > 0.0f) ELECHOUSE_cc1101.setRxBW(rxBw);
 
         /* MEMO: cannot change other params after this is executed */
         if (mode == "tx") {
             ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
             ioExpander.turnPinOnOff(IO_EXP_CC_TX, HIGH);
             pinMode(bruceConfigPins.CC1101_bus.io0, OUTPUT);
-            ELECHOUSE_cc1101.setPA(12); // set TxPower. The following settings are possible depending
+            ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower); // set TxPower. The following settings are possible depending
             Serial.println("cc1101 setPA();");
             ELECHOUSE_cc1101.SetTx();
+            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x2E);
             Serial.println("cc1101 SetTx();");
         } else if (mode == "rx") {
             ioExpander.turnPinOnOff(IO_EXP_CC_RX, HIGH);
             ioExpander.turnPinOnOff(IO_EXP_CC_TX, LOW);
             pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
             ELECHOUSE_cc1101.SetRx();
+            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, (effectiveModulation == 2) ? 0x0D : 0x0E);
             Serial.println("cc1101 SetRx();");
         }
         // else if mode is unspecified wont start TX/RX mode here -> done by the caller
@@ -559,8 +611,14 @@ struct RfCodes selectRecentRfMenu() {
     return selected_code;
 }
 rmt_channel_handle_t setup_rf_rx() {
-    if (!initRfModule("rx", bruceConfigPins.rfFreq)) return NULL;
-    setMHZ(bruceConfigPins.rfFreq);
+    if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+        if (!cc1101_spi_ready) {
+            if (!initRfModule("rx", bruceConfigPins.rfFreq)) return NULL;
+            setMHZ(bruceConfigPins.rfFreq);
+        }
+    } else {
+        if (!initRfModule("rx", bruceConfigPins.rfFreq)) return NULL;
+    }
     rmt_rx_channel_config_t rx_channel_cfg = {};
     rx_channel_cfg.gpio_num = bruceConfigPins.rfModule == CC1101_SPI_MODULE
                                   ? gpio_num_t(bruceConfigPins.CC1101_bus.io0)

@@ -421,15 +421,15 @@ void rtl433_sniff_screen(bool hopping) {
         currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
     }
 
-    if (!engine.initRadio(currentFreq, currentPreset)) {
-        displayError("Radio Init Failed", true);
+    RfRxSession rx;
+    if (!rx.begin()) {
+        displayError("RX Session Failed", true);
         return;
     }
 
-    RfRxSession rx;
-    if (!rx.begin()) {
-        engine.deinitRadio();
-        displayError("RX Session Failed", true);
+    if (!engine.initRadio(currentFreq, currentPreset)) {
+        rx.end();
+        displayError("Radio Init Failed", true);
         return;
     }
 
@@ -531,8 +531,8 @@ void rtl433_sniff_screen(bool hopping) {
                 show_reading_details(targetIdx);
 
                 // Restart reception
-                engine.initRadio(currentFreq, currentPreset);
                 rx.begin();
+                engine.initRadio(currentFreq, currentPreset);
                 if (isHopping) hopStart = millis();
                 rf_clear_nav_state();
                 dirty = true;

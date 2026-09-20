@@ -85,13 +85,19 @@ void rf_apply_preset(const RfPreset *preset, float freq) {
         ELECHOUSE_cc1101.setSidle();
         ELECHOUSE_cc1101.setModulation(preset->modulation);
         if (preset->modulation != 2) {
+            cc1101ApplyFixedFreqFskPreset(false);
             if (preset->deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(preset->deviation);
             if (preset->rxBW > 0.0f) ELECHOUSE_cc1101.setRxBW(preset->rxBW);
             if (preset->dataRate > 0.0f) ELECHOUSE_cc1101.setDRate(preset->dataRate);
+            ELECHOUSE_cc1101.setSyncMode(0);
+            ELECHOUSE_cc1101.setDcFilterOff(true);
         } else {
+            cc1101ApplyFixedFreqOokPreset(false);
             if (preset->rxBW > 0.0f) ELECHOUSE_cc1101.setRxBW(preset->rxBW);
         }
         setMHZ(targetFreq);
+        pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
         ELECHOUSE_cc1101.SetRx();
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, (preset->modulation == 2) ? 0x0D : 0x0E);
     }
 }

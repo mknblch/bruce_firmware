@@ -276,7 +276,7 @@ bool demod_ppm(const std::vector<int> &durations, int mark_us, int zero_gap_us, 
 bool demod_pwm(const std::vector<int> &durations, int zero_mark_us, int one_mark_us, int space_us, int tol_pct, BitBuffer &out);
 bool demod_pwm_space(const std::vector<int> &durations, int mark_us, int zero_space_us, int one_space_us, int tol_pct, BitBuffer &out);
 bool demod_manchester(const std::vector<int> &durations, int half_clock_us, int tol_pct, BitBuffer &out, bool invert = false);
-bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out);
+bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out, uint32_t sync_word = 0, uint8_t sync_len = 0);
 
 // ---------------------------------------------------------------------------
 // Protocol Decoder Declarations
@@ -327,6 +327,7 @@ public:
 
     // Signal Replay & .sub Export
     bool replayReading(const Rtl433Reading &reading, int repeatCount = 0);
+    bool transmitSample(const String &sampleType, float freq = 0.0f, int repeats = 5);
     bool saveSubFile(const Rtl433Reading &reading, String *outFilename = nullptr);
     size_t saveAllSubFiles(int *savedCount = nullptr);
 
@@ -347,7 +348,7 @@ public:
     String getActivePresetName() const;
 
     // Replay settings
-    bool replayPreamble = true;      // Synthesize clean lead-in preamble before payload
+    bool replayPreamble = false;     // Preamble enabled only when explicitly requested
     int replayFreqSpread = 0;        // 0 = Off (single freq), 1 = +/-15 kHz (3x), 2 = +/-30 kHz (5x), 3 = +/-50 kHz (3x)
     int replayRepeats = 3;           // Number of frame repetitions
     int replayGapMs = 20;            // Gap between frames in ms
