@@ -638,4 +638,6 @@ void rtl433_menu() {
             break;
         }
     }
+
+    engine.clearRecent();
 }

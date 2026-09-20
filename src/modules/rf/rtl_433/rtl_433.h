@@ -318,7 +318,10 @@ public:
     bool logJson(const Rtl433Reading &reading, bool sd_enabled = true);
     void addRecent(const Rtl433Reading &reading);
     const std::vector<Rtl433Reading> &getRecent() const { return _recentReadings; }
-    void clearRecent() { _recentReadings.clear(); }
+    void clearRecent() {
+        _recentReadings.clear();
+        _recentReadings.shrink_to_fit();
+    }
     size_t getRecentCount() const { return _recentReadings.size(); }
     const Rtl433Reading *getRecentAt(size_t index) const;
 
