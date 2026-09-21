@@ -297,8 +297,23 @@ bool decode_bresser_5in1(const std::vector<int> &durations, Rtl433Reading &out);
 bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out);
 bool decode_wmbus(const std::vector<int> &durations, Rtl433Reading &out);
 
+// Pulse Generator Helpers
+std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int mark_us, int zero_gap_us, int one_gap_us);
+std::vector<int> build_pwm_pulses(const uint8_t *bytes, size_t bit_count, int zero_mark_us, int one_mark_us, int space_us);
+std::vector<int> build_manchester_pulses(const uint8_t *bytes, size_t bit_count, int half_us);
+std::vector<int> build_pcm_pulses(const uint8_t *bytes, size_t bit_count, int bit_us);
+
 // Unit test / selftest against synthetic pulse test vectors
 bool rtl433_selftest(String &report);
+
+// Direct payload decoders (for CC1101 Hardware FIFO Packet Mode)
+bool decode_fineoffset_fsk_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
+bool decode_bresser_5in1_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
+bool decode_bresser_6in1_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
+bool decode_wmbus_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
+bool decode_toyota_tpms_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
+bool decode_lacrosse_tx_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
+bool rtl433_transmit_fsk_packet(float freq, int preset, const uint8_t *payload, size_t len, uint16_t sync_word, int repeats);
 
 // ---------------------------------------------------------------------------
 // Subsystem Engine & Storage API
@@ -313,6 +328,10 @@ public:
 
     // Try all registered decoders for the given modulation & duration pulse train
     bool decode(const std::vector<int> &durations, float freq, int preset, int rssi, Rtl433Reading &reading);
+
+    // Hardware FIFO packet polling and payload decoding
+    bool pollFifo(float freq, int preset, int rssi, Rtl433Reading &reading);
+    bool decodePayload(const uint8_t *payload, size_t len, float freq, int preset, int rssi, Rtl433Reading &reading);
 
     // Logging & Storage
     bool logJson(const Rtl433Reading &reading, bool sd_enabled = true);

@@ -229,44 +229,33 @@ bool decode_oregon_scientific(const std::vector<int> &durations, Rtl433Reading &
 // ===========================================================================
 // Decoder 5: Ambient Weather / Fine Offset WH65B / WH24 / WS-1000 (2-FSK PCM)
 // ===========================================================================
-bool decode_fineoffset_fsk(const std::vector<int> &durations, Rtl433Reading &out) {
-    BitBuffer buf;
-    // 17.24 kbps -> 58µs bit period
-    if (!demod_pcm_fsk(durations, 58, 45, buf, 0x2DD4, 16)) {
-        if (!demod_pcm_fsk(durations, 58, 45, buf, 0xD42D, 16)) {
-            if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+bool decode_fineoffset_fsk_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
+    if (!bytes || len < 14) return false;
+    uint8_t b0 = bytes[0];
+    uint8_t b1 = bytes[1];
+    uint8_t b2 = bytes[2];
+    uint8_t b3 = bytes[3];
+    uint8_t b4 = bytes[4];
+    uint8_t b5 = bytes[5];
+    uint8_t b6 = bytes[6];
+    uint8_t b7 = bytes[7];
+    uint8_t b8 = bytes[8];
+    uint8_t b9 = bytes[9];
+    uint8_t b10 = bytes[10];
+    uint8_t b11 = bytes[11];
+    uint8_t b12 = bytes[12];
+    uint8_t crc_rx = bytes[13];
+
+    // Calculate CRC-8 poly 0x31 init 0x00 over first 13 bytes
+    uint8_t crc = 0x00;
+    for (int i = 0; i < 13; i++) {
+        crc ^= bytes[i];
+        for (int b = 0; b < 8; b++) {
+            if (crc & 0x80) crc = (crc << 1) ^ 0x31;
+            else crc <<= 1;
         }
     }
-    if (buf.num_bits < 120) return false;
-
-    // Search for sync word 0x2DD4 (16 bits)
-    int sync_idx = buf.search_sync(0x2DD4, 16);
-    if (sync_idx < 0) {
-        sync_idx = buf.search_sync(0xD42D, 16);
-        if (sync_idx < 0) return false;
-    }
-
-    uint16_t start = sync_idx + 16;
-    if (start + 112 > buf.num_bits) return false;
-
-    uint8_t b0 = (uint8_t)buf.extract_bits(start, 8);
-    uint8_t b1 = (uint8_t)buf.extract_bits(start + 8, 8);
-    uint8_t b2 = (uint8_t)buf.extract_bits(start + 16, 8);
-    uint8_t b3 = (uint8_t)buf.extract_bits(start + 24, 8);
-    uint8_t b4 = (uint8_t)buf.extract_bits(start + 32, 8);
-    uint8_t b5 = (uint8_t)buf.extract_bits(start + 40, 8);
-    uint8_t b6 = (uint8_t)buf.extract_bits(start + 48, 8);
-    uint8_t b7 = (uint8_t)buf.extract_bits(start + 56, 8);
-    uint8_t b8 = (uint8_t)buf.extract_bits(start + 64, 8);
-    uint8_t b9 = (uint8_t)buf.extract_bits(start + 72, 8);
-    uint8_t b10 = (uint8_t)buf.extract_bits(start + 80, 8);
-    uint8_t b11 = (uint8_t)buf.extract_bits(start + 88, 8);
-    uint8_t b12 = (uint8_t)buf.extract_bits(start + 96, 8);
-    uint8_t crc_rx = (uint8_t)buf.extract_bits(start + 104, 8);
-
-    uint8_t crc_calc = buf.crc8(0x31, 0x00, start, 104);
-    if (crc_calc != crc_rx) {
-        // Try relaxed check if packet matches known family
+    if (crc != crc_rx) {
         if (b0 != 0x24 && b0 != 0x48 && b0 != 0x2B && b0 != 0x5B && b0 != 0x1B) {
             return false;
         }
@@ -309,14 +298,88 @@ bool decode_fineoffset_fsk(const std::vector<int> &durations, Rtl433Reading &out
     out.solar_radiation = solar;
     out.has_battery = true;
     out.battery_ok = (b3 & 0x08) == 0;
-    out.bit_len = buf.num_bits;
-    out.payload_hex = buf.to_hex();
+    out.bit_len = len * 8;
+    out.payload_hex = "";
+    for (size_t i = 0; i < len; i++) {
+        char h[3];
+        snprintf(h, sizeof(h), "%02X", bytes[i]);
+        out.payload_hex += h;
+    }
+    uint8_t full_pkt[len + 2];
+    full_pkt[0] = 0x2D;
+    full_pkt[1] = 0xD4;
+    memcpy(&full_pkt[2], bytes, len);
+    out.raw_durations = build_pcm_pulses(full_pkt, (len + 2) * 8, 58);
     return true;
+}
+
+bool decode_fineoffset_fsk(const std::vector<int> &durations, Rtl433Reading &out) {
+    BitBuffer buf;
+    // 17.24 kbps -> 58µs bit period
+    if (!demod_pcm_fsk(durations, 58, 45, buf, 0x2DD4, 16)) {
+        if (!demod_pcm_fsk(durations, 58, 45, buf, 0xD42D, 16)) {
+            if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+        }
+    }
+    if (buf.num_bits < 120) return false;
+
+    // Search for sync word 0x2DD4 (16 bits)
+    int sync_idx = buf.search_sync(0x2DD4, 16);
+    if (sync_idx < 0) {
+        sync_idx = buf.search_sync(0xD42D, 16);
+        if (sync_idx < 0) return false;
+    }
+
+    uint16_t start = sync_idx + 16;
+    if (start + 112 > buf.num_bits) return false;
+
+    uint8_t bytes[14];
+    for (int i = 0; i < 14; i++) {
+        bytes[i] = (uint8_t)buf.extract_bits(start + i * 8, 8);
+    }
+    bool ok = decode_fineoffset_fsk_payload(bytes, 14, out);
+    if (ok) {
+        out.raw_durations = durations;
+        out.bit_len = buf.num_bits;
+        out.payload_hex = buf.to_hex();
+    }
+    return ok;
 }
 
 // ===========================================================================
 // Decoder 6: LaCrosse TX29 / TX35 (2-FSK / OOK)
 // ===========================================================================
+bool decode_lacrosse_tx_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
+    if (!bytes || len < 4) return false;
+    uint8_t id = bytes[0] >> 1;
+    if (id == 0 || id == 0x7F) return false;
+
+    uint8_t type = (bytes[0] & 0x01) << 4 | (bytes[1] >> 4);
+    uint16_t temp_raw = ((bytes[1] & 0x0F) << 8) | bytes[2];
+    float temp_c = (temp_raw - 500) / 10.0f;
+    if (temp_c < -40.0f || temp_c > 70.0f) return false;
+
+    out.protocol = "LaCrosse-TX";
+    out.model = "LaCrosse TX29/TX35";
+    out.decoder_name = "LaCrosse";
+    out.decoder_id = 6;
+    out.device_id = id;
+    out.channel = 1;
+    out.has_temp = true;
+    out.temp_c = temp_c;
+    out.temp_f = temp_c * 1.8f + 32.0f;
+    out.has_battery = true;
+    out.battery_ok = (type != 0);
+    out.bit_len = len * 8;
+    out.payload_hex = "";
+    for (size_t i = 0; i < len; i++) {
+        char h[3];
+        snprintf(h, sizeof(h), "%02X", bytes[i]);
+        out.payload_hex += h;
+    }
+    return true;
+}
+
 bool decode_lacrosse_tx(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     if (!demod_pcm_fsk(durations, 104, 45, buf, 0x0A, 4)) {
@@ -449,6 +512,47 @@ bool decode_schrader_tpms(const std::vector<int> &durations, Rtl433Reading &out)
 // ===========================================================================
 // Decoder 9: Toyota TPMS (2-FSK Manchester)
 // ===========================================================================
+bool decode_toyota_tpms_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
+    if (!bytes || len < 7) return false;
+    uint32_t id = ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | bytes[3];
+    if (id == 0 || id == 0xFFFFFFFF) return false;
+
+    uint8_t pressure_raw = bytes[4];
+    uint8_t temp_raw = bytes[5];
+    uint8_t status = bytes[6];
+
+    float psi = (pressure_raw * 0.25f);
+    float kpa = psi * 6.89476f;
+    float temp_c = (float)temp_raw - 40.0f;
+
+    if (psi > 100.0f || temp_c < -40.0f || temp_c > 125.0f) return false;
+
+    out.protocol = "Toyota-TPMS";
+    out.model = "Toyota / Lexus TPMS";
+    out.decoder_name = "Toyota-TPMS";
+    out.decoder_id = 9;
+    out.device_id = id;
+    out.has_pressure = true;
+    out.pressure_kpa = kpa;
+    out.pressure_psi = psi;
+    out.has_temp = true;
+    out.temp_c = temp_c;
+    out.temp_f = temp_c * 1.8f + 32.0f;
+    out.has_status = true;
+    out.status_flags = status;
+    out.status_str = "TIRE OK";
+    out.has_battery = true;
+    out.battery_ok = true;
+    out.bit_len = len * 8;
+    out.payload_hex = "";
+    for (size_t i = 0; i < len; i++) {
+        char h[3];
+        snprintf(h, sizeof(h), "%02X", bytes[i]);
+        out.payload_hex += h;
+    }
+    return true;
+}
+
 bool decode_toyota_tpms(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     if (!demod_manchester(durations, 104, 45, buf, false)) {
@@ -608,39 +712,8 @@ bool decode_proove_nexa(const std::vector<int> &durations, Rtl433Reading &out) {
 // ===========================================================================
 // Bresser 5-in-1 outdoor sensor (temperature, humidity, wind speed, wind dir, rain, battery)
 // Typically transmitted over 868.35 MHz / 433.92 MHz GFSK/FSK at ~8.21 kbps (122µs) or 17.24 kbps (58µs)
-bool decode_bresser_5in1(const std::vector<int> &durations, Rtl433Reading &out) {
-    BitBuffer buf;
-    // Try 8.21 kbps (~122µs bit period) first, then 17.24 kbps (~58µs)
-    if (!demod_pcm_fsk(durations, 122, 45, buf, 0x2DD4, 16)) {
-        if (!demod_pcm_fsk(durations, 122, 45, buf, 0xD42D, 16)) {
-            if (!demod_pcm_fsk(durations, 122, 45, buf)) {
-                if (!demod_pcm_fsk(durations, 58, 45, buf, 0x2DD4, 16)) {
-                    if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
-                }
-            }
-        }
-    }
-    if (buf.num_bits < 80) return false;
-
-    // Search for sync word: 0x2DD4 (16-bit) or 0xD4 (8-bit)
-    int sync_idx = -1;
-    for (int i = 0; i <= (int)buf.num_bits - 80; i++) {
-        if (buf.extract_bits(i, 16) == 0x2DD4) {
-            sync_idx = i + 16;
-            break;
-        } else if (buf.extract_bits(i, 8) == 0xD4) {
-            sync_idx = i + 8;
-            break;
-        }
-    }
-    if (sync_idx < 0 || sync_idx + 80 > (int)buf.num_bits) return false;
-
-    // Extract message bytes
-    uint8_t bytes[12];
-    for (int i = 0; i < 10; i++) {
-        bytes[i] = (uint8_t)buf.extract_bits(sync_idx + i * 8, 8);
-    }
-
+bool decode_bresser_5in1_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
+    if (!bytes || len < 10) return false;
     uint8_t sensor_id = bytes[0];
     if (sensor_id == 0x00 || sensor_id == 0xFF) return false;
 
@@ -675,9 +748,18 @@ bool decode_bresser_5in1(const std::vector<int> &durations, Rtl433Reading &out) 
     uint8_t check = bytes[9];
     uint8_t sum = 0;
     for (int i = 0; i < 9; i++) sum += bytes[i];
-    if (sum != check && (sum & 0xFF) != check && (buf.crc8(0x31, 0x00, sync_idx, 9 * 8) != check)) {
-        // Tolerant if sensor_id and valid temp/hum ranges match
-        if (humidity == 0 || temp_c < -30.0f || temp_c > 65.0f) return false;
+    if (sum != check && (sum & 0xFF) != check) {
+        uint8_t crc = 0x00;
+        for (int i = 0; i < 9; i++) {
+            crc ^= bytes[i];
+            for (int b = 0; b < 8; b++) {
+                if (crc & 0x80) crc = (crc << 1) ^ 0x31;
+                else crc <<= 1;
+            }
+        }
+        if (crc != check) {
+            if (humidity == 0 || temp_c < -30.0f || temp_c > 65.0f) return false;
+        }
     }
 
     out.protocol = "Bresser-5in1";
@@ -698,53 +780,91 @@ bool decode_bresser_5in1(const std::vector<int> &durations, Rtl433Reading &out) 
     out.rain_mm = rain_mm;
     out.has_battery = true;
     out.battery_ok = battery_ok;
-    out.bit_len = buf.num_bits;
-    out.payload_hex = buf.to_hex();
+    out.bit_len = len * 8;
+    out.payload_hex = "";
+    for (size_t i = 0; i < len; i++) {
+        char h[3];
+        snprintf(h, sizeof(h), "%02X", bytes[i]);
+        out.payload_hex += h;
+    }
+    uint8_t full_pkt[len + 2];
+    full_pkt[0] = 0x2D;
+    full_pkt[1] = 0xD4;
+    memcpy(&full_pkt[2], bytes, len);
+    out.raw_durations = build_pcm_pulses(full_pkt, (len + 2) * 8, 122);
     return true;
+}
+
+bool decode_bresser_5in1(const std::vector<int> &durations, Rtl433Reading &out) {
+    BitBuffer buf;
+    // Try 8.21 kbps (~122µs bit period) first, then 17.24 kbps (~58µs)
+    if (!demod_pcm_fsk(durations, 122, 45, buf, 0x2DD4, 16)) {
+        if (!demod_pcm_fsk(durations, 122, 45, buf, 0xD42D, 16)) {
+            if (!demod_pcm_fsk(durations, 122, 45, buf)) {
+                if (!demod_pcm_fsk(durations, 58, 45, buf, 0x2DD4, 16)) {
+                    if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+                }
+            }
+        }
+    }
+    if (buf.num_bits < 80) return false;
+
+    // Search for sync word: 0x2DD4 (16-bit) or 0xD4 (8-bit)
+    int sync_idx = -1;
+    for (int i = 0; i <= (int)buf.num_bits - 80; i++) {
+        if (buf.extract_bits(i, 16) == 0x2DD4) {
+            sync_idx = i + 16;
+            break;
+        } else if (buf.extract_bits(i, 8) == 0xD4) {
+            sync_idx = i + 8;
+            break;
+        }
+    }
+    if (sync_idx < 0 || sync_idx + 80 > (int)buf.num_bits) return false;
+
+    // Extract message bytes
+    uint8_t bytes[10];
+    for (int i = 0; i < 10; i++) {
+        bytes[i] = (uint8_t)buf.extract_bits(sync_idx + i * 8, 8);
+    }
+
+    bool ok = decode_bresser_5in1_payload(bytes, 10, out);
+    if (ok) {
+        out.raw_durations = durations;
+        out.bit_len = buf.num_bits;
+        out.payload_hex = buf.to_hex();
+    }
+    return ok;
 }
 
 // ===========================================================================
 // Decoder 14: Bresser 6-in-1 / 7-in-1 Weather Station (GFSK PCM)
 // ===========================================================================
 // Bresser 6-in-1 / 7-in-1 outdoor weather sensor (Temp, Hum, Wind, Gust, Rain, UV, Solar)
-bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out) {
-    BitBuffer buf;
-    if (!demod_pcm_fsk(durations, 125, 45, buf)) { // 8.0 kbps
-        if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
-    }
-    if (buf.num_bits < 144) return false;
-
-    int sync_idx = -1;
-    for (int i = 0; i <= (int)buf.num_bits - 144; i++) {
-        if (buf.extract_bits(i, 16) == 0x2DD4 || buf.extract_bits(i, 16) == 0xAA2D) {
-            sync_idx = i + 16;
-            break;
-        }
-    }
-    if (sync_idx < 0 || sync_idx + 128 > (int)buf.num_bits) return false;
-
-    uint32_t station_id = (uint32_t)buf.extract_bits(sync_idx, 32);
+bool decode_bresser_6in1_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
+    if (!bytes || len < 16) return false;
+    uint32_t station_id = ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | bytes[3];
     if (station_id == 0 || station_id == 0xFFFFFFFF) return false;
 
-    uint8_t flags = (uint8_t)buf.extract_bits(sync_idx + 32, 8);
+    uint8_t flags = bytes[4];
     bool battery_ok = (flags & 0x80) != 0;
 
-    int16_t temp_raw = (int16_t)buf.extract_bits(sync_idx + 40, 16);
+    int16_t temp_raw = (int16_t)(((uint16_t)bytes[5] << 8) | bytes[6]);
     float temp_c = (temp_raw - 400) / 10.0f;
     if (temp_c < -40.0f || temp_c > 75.0f) {
         temp_c = temp_raw / 10.0f;
     }
     if (temp_c < -40.0f || temp_c > 75.0f) return false;
 
-    uint8_t humidity = (uint8_t)buf.extract_bits(sync_idx + 56, 8);
+    uint8_t humidity = bytes[7];
     if (humidity > 100) return false;
 
-    float wind_speed = (float)buf.extract_bits(sync_idx + 64, 8) * 0.2f;
-    float wind_gust = (float)buf.extract_bits(sync_idx + 72, 8) * 0.2f;
-    int16_t wind_dir = (int16_t)(buf.extract_bits(sync_idx + 80, 8) * 1.40625f);
-    float rain_mm = (float)buf.extract_bits(sync_idx + 88, 16) * 0.4f;
-    float uv_idx = (float)buf.extract_bits(sync_idx + 104, 8) / 10.0f;
-    float solar = (float)buf.extract_bits(sync_idx + 112, 16) * 0.1f;
+    float wind_speed = (float)bytes[8] * 0.2f;
+    float wind_gust = (float)bytes[9] * 0.2f;
+    int16_t wind_dir = (int16_t)(bytes[10] * 1.40625f);
+    float rain_mm = (float)(((uint16_t)bytes[11] << 8) | bytes[12]) * 0.4f;
+    float uv_idx = (float)bytes[13] / 10.0f;
+    float solar = (float)(((uint16_t)bytes[14] << 8) | bytes[15]) * 0.1f;
 
     out.protocol = "Bresser-6in1";
     out.model = "Bresser 6-in-1 / 7-in-1";
@@ -767,9 +887,48 @@ bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out) 
     out.solar_radiation = solar;
     out.has_battery = true;
     out.battery_ok = battery_ok;
-    out.bit_len = buf.num_bits;
-    out.payload_hex = buf.to_hex();
+    out.bit_len = len * 8;
+    out.payload_hex = "";
+    for (size_t i = 0; i < len; i++) {
+        char h[3];
+        snprintf(h, sizeof(h), "%02X", bytes[i]);
+        out.payload_hex += h;
+    }
+    uint8_t full_pkt[len + 2];
+    full_pkt[0] = 0x2D;
+    full_pkt[1] = 0xD4;
+    memcpy(&full_pkt[2], bytes, len);
+    out.raw_durations = build_pcm_pulses(full_pkt, (len + 2) * 8, 125);
     return true;
+}
+
+bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out) {
+    BitBuffer buf;
+    if (!demod_pcm_fsk(durations, 125, 45, buf)) { // 8.0 kbps
+        if (!demod_pcm_fsk(durations, 58, 45, buf)) return false;
+    }
+    if (buf.num_bits < 144) return false;
+
+    int sync_idx = -1;
+    for (int i = 0; i <= (int)buf.num_bits - 144; i++) {
+        if (buf.extract_bits(i, 16) == 0x2DD4 || buf.extract_bits(i, 16) == 0xAA2D) {
+            sync_idx = i + 16;
+            break;
+        }
+    }
+    if (sync_idx < 0 || sync_idx + 128 > (int)buf.num_bits) return false;
+
+    uint8_t bytes[16];
+    for (int i = 0; i < 16; i++) {
+        bytes[i] = (uint8_t)buf.extract_bits(sync_idx + i * 8, 8);
+    }
+    bool ok = decode_bresser_6in1_payload(bytes, 16, out);
+    if (ok) {
+        out.raw_durations = durations;
+        out.bit_len = buf.num_bits;
+        out.payload_hex = buf.to_hex();
+    }
+    return ok;
 }
 
 // ===========================================================================
@@ -778,6 +937,83 @@ bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out) 
 // Decodes smart utility meter telegrams (Water, Gas, Heat, Electricity meters)
 // Mode T: 868.95 MHz MSK 100 kbps (10µs bit period)
 // Mode S: 868.30 MHz MSK 32.768 kbps (30.5µs bit period Manchester)
+bool decode_wmbus_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
+    if (!bytes || len < 10) return false;
+    uint8_t length = bytes[0];
+    uint8_t c_field = bytes[1];
+    uint16_t manuf = ((uint16_t)bytes[2] << 8) | bytes[3];
+    // Swap endianness for manufacturer code
+    manuf = ((manuf & 0xFF) << 8) | (manuf >> 8);
+
+    char c1 = ((manuf >> 10) & 0x1F) + '@';
+    char c2 = ((manuf >> 5) & 0x1F) + '@';
+    char c3 = (manuf & 0x1F) + '@';
+    String manuf_str = "";
+    if (c1 >= 'A' && c1 <= 'Z') manuf_str += c1;
+    if (c2 >= 'A' && c2 <= 'Z') manuf_str += c2;
+    if (c3 >= 'A' && c3 <= 'Z') manuf_str += c3;
+    if (manuf_str.length() < 2) manuf_str = "UNK";
+
+    // 4-byte BCD Meter Serial Number (stored LSB first in standard wM-Bus)
+    uint32_t raw_id = ((uint32_t)bytes[7] << 24) | ((uint32_t)bytes[6] << 16) | ((uint32_t)bytes[5] << 8) | bytes[4];
+    uint32_t bcd_id = ((raw_id & 0x000000FF) << 24) |
+                      ((raw_id & 0x0000FF00) << 8)  |
+                      ((raw_id & 0x00FF0000) >> 8)  |
+                      ((raw_id & 0xFF000000) >> 24);
+
+    uint8_t version = bytes[8];
+    uint8_t dev_type = bytes[9];
+
+    String type_str = "Meter";
+    switch (dev_type) {
+        case 0x01: type_str = "Oil Meter"; break;
+        case 0x02: type_str = "Electricity Meter"; break;
+        case 0x03: type_str = "Gas Meter"; break;
+        case 0x04: type_str = "Heat Meter"; break;
+        case 0x05: type_str = "Steam Meter"; break;
+        case 0x06: type_str = "Warm Water Meter"; break;
+        case 0x07: type_str = "Water Meter"; break;
+        case 0x08: type_str = "Heat Cost Allocator"; break;
+        case 0x09: type_str = "Compressed Air"; break;
+        case 0x0E: type_str = "Cooling Meter"; break;
+        case 0x15: type_str = "Smoke / Alarm"; break;
+        case 0x16: type_str = "Room Sensor"; break;
+        default:   type_str = "wM-Bus Meter"; break;
+    }
+
+    String c_name = "SND_NR";
+    if (c_field == 0x44) c_name = "SND_NR";
+    else if (c_field == 0x46) c_name = "SND_IR";
+    else if (c_field == 0x47) c_name = "ACC_NR";
+    else if (c_field == 0x7A) c_name = "REQ_UD2";
+    else c_name = "0x" + String(c_field, HEX);
+
+    out.protocol = "Wireless-MBus";
+    out.model = "wM-Bus " + type_str;
+    out.decoder_name = "wM-Bus";
+    out.decoder_id = 15;
+    out.device_id = bcd_id ? bcd_id : (uint32_t)raw_id;
+    out.channel = dev_type;
+    out.has_status = true;
+    out.status_flags = (c_field << 8) | dev_type;
+    out.status_str = "M:" + manuf_str + " [" + c_name + "] Ver:" + String(version);
+    out.has_battery = true;
+    out.battery_ok = true;
+    out.bit_len = len * 8;
+    out.payload_hex = "";
+    for (size_t i = 0; i < len; i++) {
+        char h[3];
+        snprintf(h, sizeof(h), "%02X", bytes[i]);
+        out.payload_hex += h;
+    }
+    uint8_t full_pkt[len + 2];
+    full_pkt[0] = 0x54;
+    full_pkt[1] = 0x3D;
+    memcpy(&full_pkt[2], bytes, len);
+    out.raw_durations = build_pcm_pulses(full_pkt, (len + 2) * 8, 10);
+    return true;
+}
+
 bool decode_wmbus(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     // Try Mode T (100 kbps -> 10µs bit period) first
@@ -818,70 +1054,15 @@ bool decode_wmbus(const std::vector<int> &durations, Rtl433Reading &out) {
     }
     if (sync_idx + 80 > (int)buf.num_bits) return false;
 
-    uint8_t length = (uint8_t)buf.extract_bits(sync_idx, 8);
-    if (length < 9 || length > 128) return false;
-
-    uint8_t c_field = (uint8_t)buf.extract_bits(sync_idx + 8, 8);
-    uint16_t manuf = (uint16_t)buf.extract_bits(sync_idx + 16, 16);
-    // Swap endianness for manufacturer code
-    manuf = ((manuf & 0xFF) << 8) | (manuf >> 8);
-
-    char c1 = ((manuf >> 10) & 0x1F) + '@';
-    char c2 = ((manuf >> 5) & 0x1F) + '@';
-    char c3 = (manuf & 0x1F) + '@';
-    String manuf_str = "";
-    if (c1 >= 'A' && c1 <= 'Z') manuf_str += c1;
-    if (c2 >= 'A' && c2 <= 'Z') manuf_str += c2;
-    if (c3 >= 'A' && c3 <= 'Z') manuf_str += c3;
-    if (manuf_str.length() < 2) manuf_str = "UNK";
-
-    // 4-byte BCD Meter Serial Number (stored LSB first in standard wM-Bus)
-    uint32_t raw_id = (uint32_t)buf.extract_bits(sync_idx + 32, 32);
-    // Swap 32-bit endianness
-    uint32_t bcd_id = ((raw_id & 0x000000FF) << 24) |
-                      ((raw_id & 0x0000FF00) << 8)  |
-                      ((raw_id & 0x00FF0000) >> 8)  |
-                      ((raw_id & 0xFF000000) >> 24);
-
-    uint8_t version = (uint8_t)buf.extract_bits(sync_idx + 64, 8);
-    uint8_t dev_type = (uint8_t)buf.extract_bits(sync_idx + 72, 8);
-
-    String type_str = "Meter";
-    switch (dev_type) {
-        case 0x01: type_str = "Oil Meter"; break;
-        case 0x02: type_str = "Electricity Meter"; break;
-        case 0x03: type_str = "Gas Meter"; break;
-        case 0x04: type_str = "Heat Meter"; break;
-        case 0x05: type_str = "Steam Meter"; break;
-        case 0x06: type_str = "Warm Water Meter"; break;
-        case 0x07: type_str = "Water Meter"; break;
-        case 0x08: type_str = "Heat Cost Allocator"; break;
-        case 0x09: type_str = "Compressed Air"; break;
-        case 0x0E: type_str = "Cooling Meter"; break;
-        case 0x15: type_str = "Smoke / Alarm"; break;
-        case 0x16: type_str = "Room Sensor"; break;
-        default:   type_str = "wM-Bus Meter"; break;
+    uint8_t bytes[10];
+    for (int i = 0; i < 10; i++) {
+        bytes[i] = (uint8_t)buf.extract_bits(sync_idx + i * 8, 8);
     }
-
-    String c_name = "SND_NR";
-    if (c_field == 0x44) c_name = "SND_NR";
-    else if (c_field == 0x46) c_name = "SND_IR";
-    else if (c_field == 0x47) c_name = "ACC_NR";
-    else if (c_field == 0x7A) c_name = "REQ_UD2";
-    else c_name = "0x" + String(c_field, HEX);
-
-    out.protocol = "Wireless-MBus";
-    out.model = "wM-Bus " + type_str;
-    out.decoder_name = "wM-Bus";
-    out.decoder_id = 15;
-    out.device_id = bcd_id ? bcd_id : (uint32_t)raw_id;
-    out.channel = dev_type;
-    out.has_status = true;
-    out.status_flags = (c_field << 8) | dev_type;
-    out.status_str = "M:" + manuf_str + " [" + c_name + "] Ver:" + String(version);
-    out.has_battery = true;
-    out.battery_ok = true;
-    out.bit_len = buf.num_bits;
-    out.payload_hex = buf.to_hex();
-    return true;
+    bool ok = decode_wmbus_payload(bytes, 10, out);
+    if (ok) {
+        out.raw_durations = durations;
+        out.bit_len = buf.num_bits;
+        out.payload_hex = buf.to_hex();
+    }
+    return ok;
 }

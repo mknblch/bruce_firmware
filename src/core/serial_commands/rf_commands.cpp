@@ -515,11 +515,21 @@ uint32_t rtl433SniffCallback(cmd *c) {
             if (ch == 3 || ch == 27 || ch == 'q' || ch == 'Q') break; // Ctrl+C, ESC, q
         }
 
+        int rssi = -70;
+        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) rssi = ELECHOUSE_cc1101.getRssi();
+
+        // 1. Hardware FIFO packet check (CC1101 FSK / GFSK / MSK)
+        Rtl433Reading r;
+        if (engine.pollFifo(freq, preset, rssi, r)) {
+            engine.addRecent(r);
+            engine.logJson(r, engine.sdLoggingEnabled);
+            captured++;
+            serialDevice->println(r.toJson());
+        }
+
+        // 2. Software pulse demodulation (OOK and fallback)
         std::vector<int> durations;
         if (rx.poll(durations)) {
-            Rtl433Reading r;
-            int rssi = -70;
-            if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) rssi = ELECHOUSE_cc1101.getRssi();
             bool decOk = engine.decode(durations, freq, preset, rssi, r);
             if (decOk) {
                 engine.addRecent(r);
@@ -610,15 +620,27 @@ uint32_t rtl433HopCallback(cmd *c) {
                                   "\",\"freq\":" + String(currentFreq, 2) + "}");
         }
 
+        int rssi = -70;
+        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) rssi = ELECHOUSE_cc1101.getRssi();
+
+        // 1. Hardware FIFO packet check (CC1101 FSK / GFSK / MSK)
+        Rtl433Reading r;
+        if (engine.pollFifo(currentFreq, currentPreset, rssi, r)) {
+            engine.addRecent(r);
+            engine.logJson(r, engine.sdLoggingEnabled);
+            captured++;
+            hopStartMs = millis();
+            serialDevice->println(r.toJson());
+        }
+
+        // 2. Software pulse demodulation (OOK and fallback)
         std::vector<int> durations;
         if (rx.poll(durations)) {
-            Rtl433Reading r;
-            int rssi = -70;
-            if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) rssi = ELECHOUSE_cc1101.getRssi();
             if (engine.decode(durations, currentFreq, currentPreset, rssi, r)) {
                 engine.addRecent(r);
-                engine.logJson(r, engine.sdLoggingEnabled);
+                hopStartMs = millis();
                 captured++;
+                engine.logJson(r, engine.sdLoggingEnabled);
                 serialDevice->println(r.toJson());
             }
         }

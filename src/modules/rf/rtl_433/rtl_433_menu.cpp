@@ -563,6 +563,19 @@ void rtl433_sniff_screen(bool hopping) {
             }
         }
 
+        // 1. Hardware FIFO packet check (CC1101 FSK / GFSK / MSK)
+        Rtl433Reading fifoReading;
+        if (engine.pollFifo(currentFreq, currentPreset, currentRssi, fifoReading)) {
+            blinkLed();
+            engine.addRecent(fifoReading);
+            engine.logJson(fifoReading, engine.sdLoggingEnabled);
+            if (isHopping && engine.hopStayOnSignal) {
+                hopStart = millis();
+            }
+            dirty = true;
+        }
+
+        // 2. Software pulse demodulation (OOK and fallback)
         std::vector<int> durations;
         if (rx.poll(durations)) {
             Rtl433Reading reading;

@@ -516,31 +516,33 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
         ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
         setMHZ(currentFrequency);
         ELECHOUSE_cc1101.setModulation(pdef->modulation);
-        // Re-apply the correct fixed-frequency register/AGC preset for the new modulation
-        // (radio is already running, so we can't go through a full initRfModule() re-init here).
         if (pdef->modulation == 2) {
             cc1101ApplyFixedFreqOokPreset(false);
+            if (pdef->rx_bw > 0.0f) ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
+            ELECHOUSE_cc1101.setPktFormat(3); // Asynchronous serial mode
+            pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
+            ELECHOUSE_cc1101.SetRx();
+            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0D);
         } else {
             cc1101ApplyFixedFreqFskPreset(false);
-        }
-        if (pdef->modulation != 2) {
             float dev = pdef->deviation;
             if (dev > 0.0f && dev < 1.587f) dev = 1.587f;
             if (dev > 0.0f) ELECHOUSE_cc1101.setDeviation(dev);
             if (pdef->rx_bw > 0.0f) ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
             if (pdef->data_rate > 0.0f) ELECHOUSE_cc1101.setDRate(pdef->data_rate);
-            ELECHOUSE_cc1101.setSyncMode(0); // Unfiltered continuous async slicer stream
-            ELECHOUSE_cc1101.setDcFilterOff(true);
-        } else if (pdef->rx_bw > 0.0f) {
-            ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
+            uint16_t sync_word = (pdef->modulation == 4) ? 0x543D : 0x2DD4;
+            ELECHOUSE_cc1101.setSyncWord((sync_word >> 8) & 0xFF, sync_word & 0xFF);
+            ELECHOUSE_cc1101.setSyncMode(2); // 16/16 sync word qualifier
+            ELECHOUSE_cc1101.setPktFormat(0); // Hardware FIFO packet mode
+            ELECHOUSE_cc1101.setCrc(false);
+            ELECHOUSE_cc1101.setWhiteData(false);
+            ELECHOUSE_cc1101.setLengthConfig(0); // Fixed packet length mode
+            ELECHOUSE_cc1101.setPacketLength(32);
+            ELECHOUSE_cc1101.setDcFilterOff(false);
+            pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
+            ELECHOUSE_cc1101.SetRx();
+            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x06); // Asserts on sync received, de-asserts at end of packet
         }
-        ELECHOUSE_cc1101.setPktFormat(3); // Asynchronous serial mode
-        pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
-        ELECHOUSE_cc1101.SetRx();
-        // GDO0 = 0x0D (Serial Data Output, async) for all modulations. 0x0E is "Carrier
-        // sense" per the CC1101 datasheet, not a data-output mode - it carries no demodulated
-        // bit data at all, which is why FSK/GFSK/MSK presets never produced usable captures.
-        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0D);
         tft.drawPixel(0, 0, 0); // Keep shared SPI bus clean for display
     } else {
         bruceConfigPins.setRfFreq(currentFrequency, 1);
@@ -550,6 +552,64 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
 
 void Rtl433Engine::deinitRadio() {
     deinitRfModule();
+}
+
+bool Rtl433Engine::decodePayload(const uint8_t *payload, size_t len, float freq, int preset, int rssi, Rtl433Reading &reading) {
+    if (!payload || len == 0) return false;
+    _packetsReceived++;
+
+    const Rtl433PresetDef *pdef = rtl433_get_preset_def(preset);
+    int mod = pdef->modulation;
+
+    bool ok = false;
+    String modStr = "2-FSK";
+
+    if (mod == 4) {
+        modStr = "MSK";
+        ok = decode_wmbus_payload(payload, len, reading);
+    } else if (mod == 1) {
+        modStr = "GFSK";
+        ok = decode_bresser_5in1_payload(payload, len, reading) ||
+             decode_bresser_6in1_payload(payload, len, reading) ||
+             decode_fineoffset_fsk_payload(payload, len, reading) ||
+             decode_wmbus_payload(payload, len, reading);
+    } else {
+        modStr = "2-FSK";
+        ok = decode_fineoffset_fsk_payload(payload, len, reading) ||
+             decode_bresser_5in1_payload(payload, len, reading) ||
+             decode_bresser_6in1_payload(payload, len, reading) ||
+             decode_toyota_tpms_payload(payload, len, reading) ||
+             decode_lacrosse_tx_payload(payload, len, reading) ||
+             decode_wmbus_payload(payload, len, reading);
+    }
+
+    if (ok) {
+        _packetsDecoded++;
+        reading.frequency = freq;
+        reading.modulation = modStr;
+        reading.preset_idx = preset;
+        reading.rssi = rssi;
+        reading.timestamp_ms = millis();
+        return true;
+    }
+    return false;
+}
+
+bool Rtl433Engine::pollFifo(float freq, int preset, int rssi, Rtl433Reading &reading) {
+    if (bruceConfigPins.rfModule != CC1101_SPI_MODULE) return false;
+    const Rtl433PresetDef *pdef = rtl433_get_preset_def(preset);
+    if (pdef->modulation == 2) return false; // OOK uses RMT pulse slicer
+
+    byte rxBytes = ELECHOUSE_cc1101.SpiReadStatus(CC1101_RXBYTES) & 0x7F;
+    if (rxBytes < 10) return false;
+
+    uint8_t rxBuf[64];
+    if (rxBytes > 64) rxBytes = 64;
+    ELECHOUSE_cc1101.SpiReadBurstReg(CC1101_RXFIFO, rxBuf, rxBytes);
+    ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
+    ELECHOUSE_cc1101.SpiStrobe(CC1101_SRX);
+
+    return decodePayload(rxBuf, rxBytes, freq, preset, rssi, reading);
 }
 
 bool Rtl433Engine::decode(const std::vector<int> &durations, float freq, int preset, int rssi, Rtl433Reading &reading) {
@@ -640,8 +700,56 @@ bool Rtl433Engine::logJson(const Rtl433Reading &reading, bool sd_enabled) {
     return true;
 }
 
+bool rtl433_transmit_fsk_packet(float freq, int preset, const uint8_t *payload, size_t len, uint16_t sync_word, int repeats) {
+    if (!payload || len == 0 || len > 64) return false;
+    const Rtl433PresetDef *pdef = rtl433_get_preset_def(preset);
+
+    if (bruceConfigPins.rfModule != CC1101_SPI_MODULE) {
+        return false;
+    }
+
+    if (!initRfModule("tx", freq, pdef->modulation, pdef->deviation, 0.0f, pdef->data_rate)) return false;
+
+    ELECHOUSE_cc1101.setPktFormat(0);      // Normal FIFO mode
+    ELECHOUSE_cc1101.setCrc(false);
+    ELECHOUSE_cc1101.setWhiteData(false);
+    ELECHOUSE_cc1101.setLengthConfig(0);   // Fixed length mode
+    ELECHOUSE_cc1101.setPacketLength(len);
+    ELECHOUSE_cc1101.setSyncWord((sync_word >> 8) & 0xFF, sync_word & 0xFF);
+    ELECHOUSE_cc1101.setSyncMode(2);       // 16/16 sync word
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x06); // Asserts on sync sent, de-asserts when packet finished
+    ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
+
+    ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
+    ioExpander.turnPinOnOff(IO_EXP_CC_TX, HIGH);
+
+    if (repeats < 1) repeats = 1;
+    for (int rep = 0; rep < repeats; rep++) {
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SIDLE);
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
+        ELECHOUSE_cc1101.SpiWriteBurstReg(CC1101_TXFIFO, (byte*)payload, len);
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_STX);
+
+        uint32_t start = millis();
+        // Wait for sync to start transmitting (GDO0 HIGH)
+        while (!digitalRead(bruceConfigPins.CC1101_bus.io0) && (millis() - start < 50)) {
+            delayMicroseconds(50);
+        }
+        // Wait for packet to finish (GDO0 LOW)
+        while (digitalRead(bruceConfigPins.CC1101_bus.io0) && (millis() - start < 100)) {
+            delayMicroseconds(50);
+        }
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SIDLE);
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
+        if (rep < repeats - 1) delay(20);
+    }
+
+    deinitRfModule();
+    return true;
+}
+
 bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) {
-    if (reading.raw_durations.empty()) return false;
+    if (reading.raw_durations.empty() && reading.payload_hex.length() == 0) return false;
 
     float freqMhz = reading.frequency;
     if (freqMhz < 280.0f || freqMhz > 928.0f) freqMhz = bruceConfigPins.rfFreq;
@@ -666,6 +774,38 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
 
     int repeats = (repeatCount < 1) ? replayRepeats : repeatCount;
     if (repeats < 1) repeats = 3;
+
+    // Direct CC1101 Hardware FIFO Packet Transmission for FSK / GFSK / MSK
+    if (bruceConfigPins.rfModule == CC1101_SPI_MODULE &&
+        (reading.modulation == "2-FSK" || reading.modulation == "FSK" || reading.modulation == "GFSK" || reading.modulation == "MSK") &&
+        reading.payload_hex.length() >= 4) {
+        size_t hexLen = reading.payload_hex.length();
+        size_t byteCount = hexLen / 2;
+        if (byteCount > 0 && byteCount <= 64) {
+            uint8_t payloadBytes[64];
+            for (size_t i = 0; i < byteCount; i++) {
+                char hexByte[3] = {reading.payload_hex[i * 2], reading.payload_hex[i * 2 + 1], '\0'};
+                payloadBytes[i] = (uint8_t)strtoul(hexByte, nullptr, 16);
+            }
+            uint16_t syncWord = (reading.modulation == "MSK") ? 0x543D : 0x2DD4;
+            const uint8_t *pData = payloadBytes;
+            size_t pLen = byteCount;
+            if (byteCount >= 3 && payloadBytes[0] == 0x2D && payloadBytes[1] == 0xD4) {
+                pData = &payloadBytes[2];
+                pLen = byteCount - 2;
+                syncWord = 0x2DD4;
+            } else if (byteCount >= 3 && payloadBytes[0] == 0x54 && payloadBytes[1] == 0x3D) {
+                pData = &payloadBytes[2];
+                pLen = byteCount - 2;
+                syncWord = 0x543D;
+            }
+            if (rtl433_transmit_fsk_packet(freqMhz, presetIdx, pData, pLen, syncWord, repeats)) {
+                return true;
+            }
+        }
+    }
+
+    if (reading.raw_durations.empty()) return false;
 
     int gap_us = (replayGapMs > 0) ? -(replayGapMs * 1000) : -20000;
 
@@ -806,9 +946,9 @@ size_t Rtl433Engine::saveAllSubFiles(int *savedCount) {
 }
 
 // ---------------------------------------------------------------------------
-// Unit Self-Test Implementation
+// Pulse Generators for Self-Test and Replay
 // ---------------------------------------------------------------------------
-static std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int mark_us, int zero_gap_us, int one_gap_us) {
+std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int mark_us, int zero_gap_us, int one_gap_us) {
     std::vector<int> durs;
     durs.push_back(mark_us);
     durs.push_back(-4000); // sync gap
@@ -822,7 +962,7 @@ static std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count,
     return durs;
 }
 
-static std::vector<int> build_pwm_pulses(const uint8_t *bytes, size_t bit_count, int zero_mark_us, int one_mark_us, int space_us) {
+std::vector<int> build_pwm_pulses(const uint8_t *bytes, size_t bit_count, int zero_mark_us, int one_mark_us, int space_us) {
     std::vector<int> durs;
     for (size_t i = 0; i < bit_count; i++) {
         uint8_t byte_val = bytes[i / 8];
@@ -833,7 +973,7 @@ static std::vector<int> build_pwm_pulses(const uint8_t *bytes, size_t bit_count,
     return durs;
 }
 
-static std::vector<int> build_manchester_pulses(const uint8_t *bytes, size_t bit_count, int half_us) {
+std::vector<int> build_manchester_pulses(const uint8_t *bytes, size_t bit_count, int half_us) {
     std::vector<int> durs;
     int current_level = 1;
     int current_len = 0;
@@ -866,7 +1006,7 @@ static std::vector<int> build_manchester_pulses(const uint8_t *bytes, size_t bit
     return durs;
 }
 
-static std::vector<int> build_pcm_pulses(const uint8_t *bytes, size_t bit_count, int bit_us) {
+std::vector<int> build_pcm_pulses(const uint8_t *bytes, size_t bit_count, int bit_us) {
     std::vector<int> durs;
     int current_level = (bytes[0] >> 7) & 1;
     int current_len = 0;
@@ -1078,13 +1218,14 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
                     (defFreq < 330.0f) ? RTL433_PRESET_OOK_315 :
                     (defFreq > 330.0f && defFreq < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
     } else if (st == "wh65" || st == "fsk" || st == "2fsk" || st == "fineoffset") {
+        uint8_t payload[14] = {0x48, 0x12, 0x34, 0x02, 0x67, 50, 90, 15, 25, 0, 50, 3, 100, 0};
         BitBuffer b;
         for (int i = 15; i >= 0; i--) b.push_bit((0x2DD4 >> i) & 1);
-        uint8_t payload[14] = {0x48, 0x12, 0x34, 0x02, 0x67, 50, 90, 15, 25, 0, 50, 3, 100, 0};
         for (int i = 0; i < 13; i++) {
             for (int bit = 7; bit >= 0; bit--) b.push_bit((payload[i] >> bit) & 1);
         }
         uint8_t crc = b.crc8(0x31, 0x00, 16, 13 * 8);
+        payload[13] = crc;
         for (int bit = 7; bit >= 0; bit--) b.push_bit((crc >> bit) & 1);
 
         r.raw_durations = build_pcm_pulses(b.data, b.num_bits, 58);
@@ -1093,17 +1234,26 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.decoder_name = "FineOffset";
         r.modulation = "2-FSK";
         r.decoder_id = 5;
+        r.device_id = 0x1234;
+        r.payload_hex = b.to_hex();
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
         presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_FSK_868_17K :
                     (defFreq < 330.0f) ? RTL433_PRESET_FSK_315_19K : RTL433_PRESET_FSK_433_17K;
+        r.preset_idx = presetIdx;
+
+        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+            return rtl433_transmit_fsk_packet(defFreq, presetIdx, payload, 14, 0x2DD4, repeats);
+        }
+        return replayReading(r, repeats);
     } else if (st == "bresser" || st == "gfsk" || st == "5in1") {
-        BitBuffer b;
-        for (int i = 15; i >= 0; i--) b.push_bit((0x2DD4 >> i) & 1);
         uint8_t payload[10] = {0x51, 0x82, 0x00, 0xDE, 55, 0x04, 25, 0x00, 0x14, 0x00};
         uint8_t sum = 0;
         for (int i = 0; i < 9; i++) sum += payload[i];
         payload[9] = sum;
+
+        BitBuffer b;
+        for (int i = 15; i >= 0; i--) b.push_bit((0x2DD4 >> i) & 1);
         for (int i = 0; i < 10; i++) {
             for (int bit = 7; bit >= 0; bit--) b.push_bit((payload[i] >> bit) & 1);
         }
@@ -1113,14 +1263,22 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.decoder_name = "Bresser";
         r.modulation = "GFSK";
         r.decoder_id = 13;
+        r.device_id = 0x5182;
+        r.payload_hex = b.to_hex();
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
         presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_GFSK_868_17K :
                     (defFreq < 330.0f) ? RTL433_PRESET_GFSK_315_19K : RTL433_PRESET_GFSK_433_17K;
+        r.preset_idx = presetIdx;
+
+        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+            return rtl433_transmit_fsk_packet(defFreq, presetIdx, payload, 10, 0x2DD4, repeats);
+        }
+        return replayReading(r, repeats);
     } else if (st == "wmbus" || st == "msk" || st == "mskt" || st == "wmbust") {
+        uint8_t wmbus_hdr[] = {0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07};
         BitBuffer b;
         for (int i = 15; i >= 0; i--) b.push_bit((0x543D >> i) & 1);
-        uint8_t wmbus_hdr[] = {0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07};
         for (size_t i = 0; i < sizeof(wmbus_hdr); i++) {
             for (int bit = 7; bit >= 0; bit--) b.push_bit((wmbus_hdr[i] >> bit) & 1);
         }
@@ -1130,9 +1288,17 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.decoder_name = "wM-Bus";
         r.modulation = "MSK";
         r.decoder_id = 15;
+        r.device_id = 0x12345678;
+        r.payload_hex = b.to_hex();
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
         presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_MSK_868_T : RTL433_PRESET_MSK_433_100K;
+        r.preset_idx = presetIdx;
+
+        if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
+            return rtl433_transmit_fsk_packet(defFreq, presetIdx, wmbus_hdr, sizeof(wmbus_hdr), 0x543D, repeats);
+        }
+        return replayReading(r, repeats);
     } else {
         return false;
     }
