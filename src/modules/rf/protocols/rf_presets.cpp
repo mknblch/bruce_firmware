@@ -83,10 +83,14 @@ void rf_apply_preset(const RfPreset *preset, float freq) {
     bruceConfigPins.setRfFreq(targetFreq, 1);
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
         ELECHOUSE_cc1101.setSidle();
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
         ELECHOUSE_cc1101.setModulation(preset->modulation);
         if (preset->modulation != 2) {
             cc1101ApplyFixedFreqFskPreset(false);
-            if (preset->deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(preset->deviation);
+            float dev = preset->deviation;
+            if (dev > 0.0f && dev < 1.587f) dev = 1.587f;
+            if (dev > 0.0f) ELECHOUSE_cc1101.setDeviation(dev);
             if (preset->rxBW > 0.0f) ELECHOUSE_cc1101.setRxBW(preset->rxBW);
             if (preset->dataRate > 0.0f) ELECHOUSE_cc1101.setDRate(preset->dataRate);
             ELECHOUSE_cc1101.setSyncMode(0);

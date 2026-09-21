@@ -334,8 +334,9 @@ bool initRfModule(String mode, float frequency, int modulation, float deviation,
         // "If any frequency programming register is altered when the frequency synthesizer is running, the
         // synthesizer may give an undesired response. Hence, the frequency programming should only be updated
         // when the radio is in the IDLE state." https://github.com/LSatan/SmartRC-CC1101-Driver-Lib/issues/65
-        // ELECHOUSE_cc1101.setSidle();
-        // Serial.println("cc1101 setSidle();");
+        ELECHOUSE_cc1101.setSidle();
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
 
         if (!((frequency >= 280 && frequency <= 350) || (frequency >= 387 && frequency <= 468) ||
               (frequency >= 779 && frequency <= 928))) {
@@ -378,7 +379,9 @@ bool initRfModule(String mode, float frequency, int modulation, float deviation,
         // preset above. rxBw applies to both OOK and FSK-family (matches previous OOK-only
         // behavior); deviation/data-rate/sync-mode/DC-filter only make sense for FSK-family.
         if (effectiveModulation != 2) {
-            if (deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(deviation);
+            float dev = deviation;
+            if (dev > 0.0f && dev < 1.587f) dev = 1.587f; // CC1101 minimum deviation quantization floor
+            if (dev > 0.0f) ELECHOUSE_cc1101.setDeviation(dev);
             if (dataRate > 0.0f) ELECHOUSE_cc1101.setDRate(dataRate);
             ELECHOUSE_cc1101.setSyncMode(0); // Unfiltered continuous async slicer stream
             ELECHOUSE_cc1101.setDcFilterOff(true);
@@ -436,7 +439,9 @@ bool initRfModule(String mode, float frequency, int modulation, float deviation,
 void deinitRfModule() {
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
         if (cc1101_spi_ready) {
-            ELECHOUSE_cc1101.setSidle();
+            ELECHOUSE_cc1101.SpiStrobe(CC1101_SIDLE);
+            ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
+            ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
             cc1101_spi_ready = false;
         }
         digitalWrite(bruceConfigPins.CC1101_bus.io0, LOW);

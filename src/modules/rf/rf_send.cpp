@@ -429,18 +429,8 @@ void sendRfCommand(struct RfCodes rfcode, bool hideDefaultUI) {
     }
 
     // init transmitter
-    if (!initRfModule("tx", freqMhz)) return;
-    if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) { // CC1101 in use
-        if (modulation != 2) ELECHOUSE_cc1101.setModulation(modulation);
-        if (deviation != 1.58f && deviation > 0) ELECHOUSE_cc1101.setDeviation(deviation);
-        if (rxBW != 270.83f && rxBW > 0) ELECHOUSE_cc1101.setRxBW(rxBW);
-        if (dataRate != 10.0f && dataRate > 0) ELECHOUSE_cc1101.setDRate(dataRate);
-        pinMode(bruceConfigPins.CC1101_bus.io0, OUTPUT);
-        ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
-        ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
-        ioExpander.turnPinOnOff(IO_EXP_CC_TX, HIGH);
-        ELECHOUSE_cc1101.SetTx();
-    } else {
+    if (!initRfModule("tx", freqMhz, modulation, deviation, rxBW, dataRate)) return;
+    if (bruceConfigPins.rfModule != CC1101_SPI_MODULE) {
         // other single-pinned modules in use
         if (modulation != 2) {
             Serial.print("unsupported modulation: ");

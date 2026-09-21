@@ -512,6 +512,8 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
 
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
         ELECHOUSE_cc1101.setSidle();
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
         setMHZ(currentFrequency);
         ELECHOUSE_cc1101.setModulation(pdef->modulation);
         // Re-apply the correct fixed-frequency register/AGC preset for the new modulation
@@ -522,7 +524,9 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
             cc1101ApplyFixedFreqFskPreset(false);
         }
         if (pdef->modulation != 2) {
-            if (pdef->deviation > 0.0f) ELECHOUSE_cc1101.setDeviation(pdef->deviation);
+            float dev = pdef->deviation;
+            if (dev > 0.0f && dev < 1.587f) dev = 1.587f;
+            if (dev > 0.0f) ELECHOUSE_cc1101.setDeviation(dev);
             if (pdef->rx_bw > 0.0f) ELECHOUSE_cc1101.setRxBW(pdef->rx_bw);
             if (pdef->data_rate > 0.0f) ELECHOUSE_cc1101.setDRate(pdef->data_rate);
             ELECHOUSE_cc1101.setSyncMode(0); // Unfiltered continuous async slicer stream
@@ -723,18 +727,11 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
 
     for (size_t f_idx = 0; f_idx < targetFreqs.size(); f_idx++) {
         float curFreq = targetFreqs[f_idx];
-        // initRfModule() now applies the correct modulation-specific register/AGC preset (OOK vs
-        // FSK-family) directly, so no post-hoc patching of modulation/deviation/data-rate is
-        // needed here anymore.
+        // initRfModule() applies the correct modulation-specific register/AGC preset (OOK vs
+        // FSK-family), deviation, data-rate and TX output pin configuration directly.
         if (!initRfModule("tx", curFreq, pdef->modulation, pdef->deviation, 0.0f, pdef->data_rate)) continue;
 
         if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
-            pinMode(bruceConfigPins.CC1101_bus.io0, OUTPUT);
-            ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
-            ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
-            ioExpander.turnPinOnOff(IO_EXP_CC_TX, HIGH);
-            ELECHOUSE_cc1101.SetTx();
-            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x2E);
             delayMicroseconds(500); // Allow PLL lock and PA ramp-up to settle
         }
 
