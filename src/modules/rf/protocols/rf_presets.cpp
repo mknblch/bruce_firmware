@@ -98,6 +98,9 @@ void rf_apply_preset(const RfPreset *preset, float freq) {
         setMHZ(targetFreq);
         pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
         ELECHOUSE_cc1101.SetRx();
-        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, (preset->modulation == 2) ? 0x0D : 0x0E);
+        // GDO0 = 0x0D (Serial Data Output, async) for all modulations. 0x0E is "Carrier
+        // sense" per the CC1101 datasheet, not a data-output mode - it carries no demodulated
+        // bit data at all, which is why FSK/GFSK/MSK presets never produced usable captures.
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0D);
     }
 }

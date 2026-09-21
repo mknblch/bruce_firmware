@@ -14,3 +14,7 @@ void rtl433_presets_menu();
 
 // Replay settings and configuration menu
 void rtl433_replay_menu();
+
+// Test transmit menu: pick a modulation/decoder sample and frequency, then
+// send a synthetic test packet another device in RTL433 sniff mode can decode
+void rtl433_test_tx_menu();

@@ -121,15 +121,6 @@ const float subghz_frequency_list[] = {
     928.000f
 };
 
-uint8_t
-cc1101InterpolateFsctrl0(float frequency, float minFreq, float maxFreq, uint8_t minValue, uint8_t maxValue) {
-    if (frequency <= minFreq) return minValue;
-    if (frequency >= maxFreq) return maxValue;
-
-    const float ratio = (frequency - minFreq) / (maxFreq - minFreq);
-    return uint8_t(minValue + (ratio * float(maxValue - minValue)) + 0.5f);
-}
-
 void cc1101WaitForIdle() {
     const uint32_t start = millis();
     while ((ELECHOUSE_cc1101.SpiReadStatus(CC1101_MARCSTATE) & 0x1F) != 0x01) {
@@ -139,21 +130,23 @@ void cc1101WaitForIdle() {
 }
 
 void cc1101ApplyPreciseCalibration(float frequency, bool isTx) {
-    uint8_t fsctrl0 = 0x00;
     uint8_t test0 = 0x09;
     bool highVco = true;
 
+    // NOTE: FSCTRL0 ("frequency offset added to base frequency", 2's-complement, ~1.59 kHz/LSB
+    // per the CC1101 datasheet) must stay at its default 0x00 here. It used to be written with a
+    // value interpolated across each band (e.g. 31-38 in the 387-464 MHz band), which permanently
+    // shifted every TX/RX carrier upward by tens of kHz depending on where in the band the target
+    // frequency fell (e.g. transmitting on 433.92 MHz would actually radiate visibly above it).
+    // TI's official per-band workaround for VCO selection only concerns TEST0/FSCAL2 below - it
+    // never touches FSCTRL0 - so the old interpolation had no basis in the datasheet/errata.
     if (frequency >= 280.0f && frequency <= 348.0f) {
-        fsctrl0 = cc1101InterpolateFsctrl0(frequency, 280.0f, 348.0f, 24, 28);
         highVco = frequency >= 322.88f;
     } else if (frequency >= 387.0f && frequency <= 464.0f) {
-        fsctrl0 = cc1101InterpolateFsctrl0(frequency, 387.0f, 464.0f, 31, 38);
         highVco = frequency >= 430.50f;
     } else if (frequency >= 779.0f && frequency <= 899.99f) {
-        fsctrl0 = cc1101InterpolateFsctrl0(frequency, 779.0f, 899.99f, 65, 76);
         highVco = frequency >= 861.0f;
     } else if (frequency >= 900.0f && frequency <= 928.0f) {
-        fsctrl0 = cc1101InterpolateFsctrl0(frequency, 900.0f, 928.0f, 77, 79);
         highVco = true;
     } else {
         return;
@@ -164,7 +157,7 @@ void cc1101ApplyPreciseCalibration(float frequency, bool isTx) {
     uint8_t mdmcfg2 = ELECHOUSE_cc1101.SpiReadReg(CC1101_MDMCFG2);
     bool isOok = ((mdmcfg2 & 0x70) == 0x30);
 
-    ELECHOUSE_cc1101.SpiWriteReg(CC1101_FSCTRL0, fsctrl0);
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_FSCTRL0, 0x00);
     ELECHOUSE_cc1101.SpiWriteReg(CC1101_TEST0, test0);
     if (isTx) {
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FREND0, isOok ? 0x11 : 0x10);
@@ -228,7 +221,11 @@ void cc1101ApplyFixedFreqFskPreset(bool isTx) {
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FIFOTHR, 0x47);
         ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
     } else {
-        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0E); // GDO0 Serial Asynchronous Data Output gated by Carrier Sense
+        // GDO0 = 0x0D: Serial Data Output (async serial mode). NOTE: 0x0E is *not* an async
+        // data variant - per the CC1101 datasheet it's "Carrier sense. High if RSSI level is
+        // above threshold", which carries no demodulated bit data at all. Using 0x0E here left
+        // FSK/GFSK/MSK captures with only RSSI-derived on/off levels instead of real data.
+        ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0D);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_FIFOTHR, 0x07);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL2, 0xC7);
         ELECHOUSE_cc1101.SpiWriteReg(CC1101_AGCCTRL1, 0x10); // Relative carrier sense 6dB above noise floor
@@ -403,7 +400,9 @@ bool initRfModule(String mode, float frequency, int modulation, float deviation,
             ioExpander.turnPinOnOff(IO_EXP_CC_TX, LOW);
             pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
             ELECHOUSE_cc1101.SetRx();
-            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, (effectiveModulation == 2) ? 0x0D : 0x0E);
+            // GDO0 = 0x0D (Serial Data Output, async) for all modulations. 0x0E is "Carrier
+            // sense" per the datasheet, not a data-output mode, so it must not be used here.
+            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x0D);
             Serial.println("cc1101 SetRx();");
         }
         // else if mode is unspecified wont start TX/RX mode here -> done by the caller

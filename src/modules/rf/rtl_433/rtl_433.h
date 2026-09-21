@@ -353,6 +353,10 @@ public:
     int replayRepeats = 3;           // Number of frame repetitions
     int replayGapMs = 20;            // Gap between frames in ms
 
+    // Test transmit settings (Test TX menu)
+    int testTxSampleIdx = 0;         // Index into rtl433_test_tx_samples[]
+    float testTxFrequency = 433.92f; // Frequency (MHz) used for the test transmission
+
 private:
     Rtl433Engine() = default;
     std::vector<Rtl433Reading> _recentReadings;

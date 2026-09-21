@@ -405,6 +405,93 @@ void rtl433_replay_menu() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test Transmit menu
+// ---------------------------------------------------------------------------
+struct Rtl433TestTxSample {
+    const char *key;        // sampleType string accepted by Rtl433Engine::transmitSample()
+    const char *label;      // Short display name
+    const char *modulation; // Modulation family (for display only)
+};
+
+// One representative synthetic test packet per modulation family that already has a
+// working decoder in this codebase (see Rtl433Engine::transmitSample() / decode()).
+static const Rtl433TestTxSample rtl433_test_tx_samples[] = {
+    {"nexus",     "Nexus/Rubicson TH", "OOK"  },
+    {"acurite",   "Acurite 606TX",     "OOK"  },
+    {"honeywell", "Honeywell 5800",    "OOK"  },
+    {"wh65",      "FineOffset WH65",   "2-FSK"},
+    {"bresser",   "Bresser 5-in-1",    "GFSK" },
+    {"wmbus",     "Wireless M-Bus T",  "MSK"  },
+};
+static const int RTL433_TEST_TX_SAMPLE_COUNT = sizeof(rtl433_test_tx_samples) / sizeof(rtl433_test_tx_samples[0]);
+
+static void select_test_tx_sample_menu() {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    std::vector<Option> opts;
+
+    for (int i = 0; i < RTL433_TEST_TX_SAMPLE_COUNT; i++) {
+        const Rtl433TestTxSample &s = rtl433_test_tx_samples[i];
+        String label = String(s.label) + " (" + s.modulation + ")";
+        opts.push_back({label, [i, &engine]() {
+            engine.testTxSampleIdx = i;
+        }});
+    }
+    opts.push_back({"Go Back", []() {}});
+    loopOptions(opts, MENU_TYPE_SUBMENU, "Select Sample");
+}
+
+static void select_test_tx_frequency_menu() {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    std::vector<Option> opts = {
+        {"433.92 MHz", [&]() { engine.testTxFrequency = 433.92f; }},
+        {"868.35 MHz", [&]() { engine.testTxFrequency = 868.35f; }},
+        {"868.95 MHz (wM-Bus T)", [&]() { engine.testTxFrequency = 868.95f; }},
+        {"868.30 MHz (wM-Bus S)", [&]() { engine.testTxFrequency = 868.30f; }},
+        {"915.00 MHz", [&]() { engine.testTxFrequency = 915.00f; }},
+        {"345.00 MHz (Honeywell)", [&]() { engine.testTxFrequency = 345.00f; }},
+        {"315.00 MHz (TPMS)", [&]() { engine.testTxFrequency = 315.00f; }},
+        {"434.42 MHz", [&]() { engine.testTxFrequency = 434.42f; }},
+    };
+    opts.push_back({"Go Back", []() {}});
+    loopOptions(opts, MENU_TYPE_SUBMENU, "Select Frequency");
+}
+
+void rtl433_test_tx_menu() {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    bool exitTestTx = false;
+
+    while (!exitTestTx) {
+        if (engine.testTxSampleIdx < 0 || engine.testTxSampleIdx >= RTL433_TEST_TX_SAMPLE_COUNT) {
+            engine.testTxSampleIdx = 0;
+        }
+        const Rtl433TestTxSample &s = rtl433_test_tx_samples[engine.testTxSampleIdx];
+        String sampleLabel = String("Sample: ") + s.label + " (" + s.modulation + ")";
+        String freqLabel = "Frequency: " + String(engine.testTxFrequency, 2) + " MHz";
+
+        std::vector<Option> opts = {
+            {sampleLabel, select_test_tx_sample_menu  },
+            {freqLabel,   select_test_tx_frequency_menu},
+            {"Send Test Packet", [&]() {
+                displayTextLine("Transmitting...");
+                bool ok = engine.transmitSample(s.key, engine.testTxFrequency);
+                if (ok) {
+                    displaySuccess("Sent: " + String(s.label), true);
+                } else {
+                    displayError("Transmit failed", true);
+                }
+            }},
+            {"Go Back",   [&]() { exitTestTx = true; }},
+        };
+
+        int res = loopOptions(opts, MENU_TYPE_SUBMENU, "RTL433 Test TX");
+        if (check(EscPress) || res < 0 || returnToMenu || exitTestTx) {
+            returnToMenu = false;
+            break;
+        }
+    }
+}
+
 void rtl433_sniff_screen(bool hopping) {
     Rtl433Engine &engine = Rtl433Engine::instance();
     bool isHopping = hopping || engine.isChangingPreset;
@@ -629,6 +716,7 @@ void rtl433_menu() {
                 displaySuccess("Cleared List", true);
             }},
             {"Replay Settings",  rtl433_replay_menu                                },
+            {"Test Transmit",    rtl433_test_tx_menu                               },
             {String("SD Logging: ") + (engine.sdLoggingEnabled ? "[ON]" : "[OFF]"), [&]() {
                 engine.sdLoggingEnabled = !engine.sdLoggingEnabled;
                 displayInfo(String("SD Logging: ") + (engine.sdLoggingEnabled ? "ON" : "OFF"), true);
