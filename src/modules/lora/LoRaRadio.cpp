@@ -16,6 +16,9 @@ static SX1276 *gLora1276 = nullptr;
 static SX1262 *gLora1262 = nullptr;
 static bool gLoraInitialized = false;
 static LoRaRadioType gActiveRadioType = LoRaRadioType::SX1276;
+static float gCurFreq = 0.0f;
+static float gCurBw = 0.0f;
+static uint8_t gCurSf = 0;
 
 bool __attribute__((weak)) prepareBoardLoRaRadio() { return true; }
 
@@ -69,6 +72,9 @@ void stopLoRaRadio() {
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
     gLoraInitialized = false;
+    gCurFreq = 0.0f;
+    gCurBw = 0.0f;
+    gCurSf = 0;
 
     if (gLora1276) {
         gLora1276->standby();
@@ -170,6 +176,9 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
 
     gLoraInitialized = true;
     gLoraInterruptEnabled = true;
+    gCurFreq = cfg.freqMHz;
+    gCurSf = cfg.sf;
+    gCurBw = cfg.bwKHz;
     Serial.printf(
         "[LoRa] Radio init OK: %.3f MHz, SF%d, BW%.1fkHz, CR4/%d, Sync 0x%02X\n",
         cfg.freqMHz, cfg.sf, cfg.bwKHz, cfg.cr, cfg.syncWord
@@ -179,34 +188,40 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
 
 bool setLoRaFrequency(float freqMHz) {
     if (!gLoraInitialized) return false;
+    if (fabs(gCurFreq - freqMHz) < 0.0001f) return true;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setFrequency(freqMHz);
     } else if (gLora1262) {
         state = gLora1262->setFrequency(freqMHz);
     }
+    if (state == RADIOLIB_ERR_NONE) gCurFreq = freqMHz;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool setLoRaBandwidth(float bwKHz) {
     if (!gLoraInitialized) return false;
+    if (fabs(gCurBw - bwKHz) < 0.01f) return true;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setBandwidth(bwKHz);
     } else if (gLora1262) {
         state = gLora1262->setBandwidth(bwKHz);
     }
+    if (state == RADIOLIB_ERR_NONE) gCurBw = bwKHz;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool setLoRaSpreadingFactor(uint8_t sf) {
     if (!gLoraInitialized) return false;
+    if (gCurSf == sf) return true;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setSpreadingFactor(sf);
     } else if (gLora1262) {
         state = gLora1262->setSpreadingFactor(sf);
     }
+    if (state == RADIOLIB_ERR_NONE) gCurSf = sf;
     return (state == RADIOLIB_ERR_NONE);
 }
 

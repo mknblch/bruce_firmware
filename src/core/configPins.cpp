@@ -183,24 +183,14 @@ void BruceConfigPins::fromJson(JsonObject obj) {
     }
 
     if (!root["LoRa_Pins"].isNull()) {
-        SPIPins def = LoRa_bus;
         LoRa_bus.fromJson(root["LoRa_Pins"].as<JsonObject>());
-        if (LoRa_bus.sck == GPIO_NUM_NC && def.sck != GPIO_NUM_NC) {
-            LoRa_bus = def;
-            count++;
-        }
     } else {
         count++;
         log_e("Fail");
     }
 
     if (!root["ST25R_Pins"].isNull()) {
-        SPIPins def = ST25R_bus;
         ST25R_bus.fromJson(root["ST25R_Pins"].as<JsonObject>());
-        if (ST25R_bus.sck == GPIO_NUM_NC && def.sck != GPIO_NUM_NC) {
-            ST25R_bus = def;
-            count++;
-        }
     } else {
         count++;
         log_e("Fail");
@@ -414,7 +404,7 @@ void BruceConfigPins::setLoRaPins(SPIPins value) {
     saveFile();
 }
 void BruceConfigPins::setW5500Pins(SPIPins value) {
-    LoRa_bus = value;
+    W5500_bus = value;
     validateSpiPins(W5500_bus);
     saveFile();
 }

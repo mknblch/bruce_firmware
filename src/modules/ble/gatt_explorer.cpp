@@ -4,10 +4,12 @@
 #include "gatt_server.h"
 #include "race_client.h"
 #include "BLE_Suite.h"
+#include "ble_common.h"
 #include "ble_oui.h"
 #include "ble_tracker.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
+#include "core/radio_mem.h"
 #include "core/sd_functions.h"
 #include "core/utils.h"
 #include <LittleFS.h>
@@ -44,40 +46,64 @@ struct GattSettings {
 struct GattScannedDevice {
     NimBLEAddress address;
     uint8_t addressType = BLE_ADDR_PUBLIC;
-    String name;
-    String vendor;
-    int rssi = -100;
+    uint8_t macBytes[6] = {0};
+    char macStr[18] = {0};
+    char name[32] = {0};
+    char vendor[24] = {0};
+    char tag[8] = "GATT";
+    int8_t rssi = -100;
     bool isConnectable = true;
-    std::vector<String> serviceUuids;
-    std::vector<String> serviceNames;
     uint32_t lastSeen = 0;
-    String tag;
+    uint16_t packetCount = 0;
+    uint16_t srv16[4] = {0};
+    uint8_t srv16Count = 0;
+    bool has128b = false;
 };
 
 //=============================================================================
 // State
 //=============================================================================
 
+constexpr size_t GATT_MAX_SCAN_DEVICES = 40;
+
+struct GattScannerState {
+    GattScannedDevice devices[GATT_MAX_SCAN_DEVICES];
+    size_t count = 0;
+    uint32_t totalPackets = 0;
+    SemaphoreHandle_t mutex = nullptr;
+    volatile bool active = false;
+    GattFilterMode filterMode = FILTER_CONNECTABLE;
+
+    void reset(GattFilterMode filter) {
+        if (!mutex) mutex = xSemaphoreCreateMutex();
+        if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+            count = 0;
+            totalPackets = 0;
+            filterMode = filter;
+            active = true;
+            xSemaphoreGive(mutex);
+        }
+    }
+
+    void stop() {
+        if (!mutex) return;
+        if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+            active = false;
+            xSemaphoreGive(mutex);
+        }
+    }
+};
+
 static GattSettings g_gattSettings;
+static GattScannerState g_gattScanState;
 static std::vector<GattScannedDevice> g_discoveredDevices;
-static GattScannedDevice g_latestScannedDevice;
-static bool g_hasLatestScanned = false;
-static uint32_t g_scanPackets = 0;
 static volatile bool g_scanActive = false;
 static GattFilterMode g_currentFilter = FILTER_CONNECTABLE;
-static StaticSemaphore_t g_gattScanMutexBuf;
-static SemaphoreHandle_t g_gattScanMutex = nullptr;
 
-// When set (via gattScanAndPick()), showDiscoveredDevicesList() hands the selected device to
+// When set (via gattScanAndPick()), the live scanner hands the selected device to
 // this callback instead of entering exploreGattDevice()'s GATT connect/browse flow - lets
 // other features (e.g. the BLE Tracker) reuse this screen purely as a device picker.
 static std::function<void(const GattScannedDevice &)> g_gattPickCallback = nullptr;
-
-static void gattEnsureScanMutex() {
-    if (!g_gattScanMutex) {
-        g_gattScanMutex = xSemaphoreCreateMutexStatic(&g_gattScanMutexBuf);
-    }
-}
 
 //=============================================================================
 // UI Layout & Helper Functions (Small Font / Compact Mode)
@@ -413,11 +439,7 @@ static const char *getFilterModeName(GattFilterMode mode) {
 
 class GattScanCallbacks : public NimBLEScanCallbacks {
 public:
-    void onDiscovered(const NimBLEAdvertisedDevice *dev) override {
-        if (g_gattSettings.includeOnDiscovered) {
-            processDevice(dev);
-        }
-    }
+    void onDiscovered(const NimBLEAdvertisedDevice *dev) override {}
 
     void onResult(const NimBLEAdvertisedDevice *dev) override {
         processDevice(dev);
@@ -425,194 +447,260 @@ public:
 
 private:
     void processDevice(const NimBLEAdvertisedDevice *dev) {
-        if (!dev) return;
-        g_scanPackets++;
+        if (!dev || !g_gattScanState.active) return;
+        if (!g_gattScanState.mutex) return;
 
-        // 1. RSSI threshold check
-        int rssi = dev->getRSSI();
+        // Try-take mutex with 0 timeout so NimBLE host task is never blocked
+        if (xSemaphoreTake(g_gattScanState.mutex, 0) != pdTRUE) return;
+
+        g_gattScanState.totalPackets++;
+
+        int8_t rssi = dev->getRSSI();
         if (rssi == 0) rssi = -100;
-        if (rssi < g_gattSettings.minRssi) return;
-
-        // 2. Address type filter check
-        uint8_t addrType = dev->getAddressType();
-        if (g_gattSettings.addrTypeFilter == 1 && addrType != BLE_ADDR_PUBLIC) return;
-        if (g_gattSettings.addrTypeFilter == 2 && addrType == BLE_ADDR_PUBLIC) return;
-
-        bool isConn = dev->isConnectable();
-
-        // 3. Early mutex acquisition
-        gattEnsureScanMutex();
-        if (!g_gattScanMutex || xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        if (rssi < g_gattSettings.minRssi) {
+            xSemaphoreGive(g_gattScanState.mutex);
             return;
         }
 
-        const uint8_t *devVal = dev->getAddress().getVal();
+        uint8_t addrType = dev->getAddressType();
+        if (g_gattSettings.addrTypeFilter == 1 && addrType != BLE_ADDR_PUBLIC) {
+            xSemaphoreGive(g_gattScanState.mutex);
+            return;
+        }
+        if (g_gattSettings.addrTypeFilter == 2 && addrType == BLE_ADDR_PUBLIC) {
+            xSemaphoreGive(g_gattScanState.mutex);
+            return;
+        }
 
-        // 4. Update existing device if already seen (fast binary MAC comparison, zero heap allocation)
-        for (auto &existing : g_discoveredDevices) {
-            if (memcmp(existing.address.getVal(), devVal, 6) == 0) {
-                existing.rssi = rssi;
-                existing.lastSeen = millis();
-                if (isConn) existing.isConnectable = true;
+        bool isConn = dev->isConnectable();
 
-                if (existing.name.length() == 0) {
-                    std::string dName = dev->getName();
-                    if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
-                        existing.name = String(dName.c_str());
-                        existing.name.trim();
+        // Tag inspection
+        char tag[8] = "ADV";
+        if (isConn) strcpy(tag, "GATT");
+
+        // Parse AD structures from raw payload safely without heap allocations
+        const auto &payload = dev->getPayload();
+        if (!payload.empty()) {
+            const uint8_t *pData = payload.data();
+            size_t pLen = payload.size();
+            size_t offset = 0;
+            while (offset + 1 < pLen) {
+                uint8_t fieldLen = pData[offset];
+                if (fieldLen == 0 || offset + 1 + fieldLen > pLen) break;
+                uint8_t adType = pData[offset + 1];
+                const uint8_t *val = &pData[offset + 2];
+                uint8_t valLen = fieldLen - 1;
+
+                if (adType == 0x02 || adType == 0x03) { // 16-bit Service UUIDs (Incomplete / Complete)
+                    for (size_t k = 0; k + 1 < valLen; k += 2) {
+                        uint16_t uuid = (uint16_t)val[k] | ((uint16_t)val[k + 1] << 8);
+                        if (uuid == 0x1812 || uuid == 0x1124) { strcpy(tag, "HID"); break; }
+                        else if (uuid == 0xFFE0 || uuid == 0xFFF0) { strcpy(tag, "UART"); break; }
+                        else if (uuid == 0x110E || uuid == 0x110F || uuid == 0x1843) { strcpy(tag, "AUD"); break; }
+                        else if (uuid == 0x180D || uuid == 0x181A || uuid == 0x1809 || uuid == 0x180F) { strcpy(tag, "SENS"); break; }
+                        else if (uuid == 0xFE2C) { strcpy(tag, "FP"); break; }
+                    }
+                } else if (adType == 0x06 || adType == 0x07) { // 128-bit Service UUIDs
+                    if (strcmp(tag, "GATT") == 0 || strcmp(tag, "ADV") == 0) {
+                        strcpy(tag, "128b");
                     }
                 }
-                if (existing.vendor.length() == 0) {
-                    String v = resolveBleVendor(dev, false);
-                    if (v.length() > 0) existing.vendor = v;
-                }
-
-                size_t sCount = dev->getServiceUUIDCount();
-                if (sCount > 0) {
-                    for (size_t si = 0; si < sCount; si++) {
-                        NimBLEUUID u = dev->getServiceUUID(si);
-                        String uStr = String(u.toString().c_str());
-                        bool foundUuid = false;
-                        for (const auto &eu : existing.serviceUuids) {
-                            if (eu.equalsIgnoreCase(uStr)) { foundUuid = true; break; }
-                        }
-                        if (!foundUuid) {
-                            existing.serviceUuids.push_back(uStr);
-                            existing.serviceNames.push_back(getGattServiceName(uStr));
-                        }
-                    }
-                }
-
-                for (const auto &u : existing.serviceUuids) {
-                    if (u.indexOf("1812") != -1 || u.indexOf("1124") != -1) { existing.tag = "HID"; break; }
-                    if (u.indexOf("6e400001") != -1 || u.indexOf("ffe0") != -1 || u.indexOf("fff0") != -1) { existing.tag = "UART"; break; }
-                    if (u.indexOf("110e") != -1 || u.indexOf("110f") != -1 || u.indexOf("1843") != -1) { existing.tag = "AUD"; break; }
-                    if (u.indexOf("180d") != -1 || u.indexOf("181a") != -1 || u.indexOf("1809") != -1 || u.indexOf("180f") != -1) { existing.tag = "SENS"; break; }
-                    if (u.indexOf("fe2c") != -1) { existing.tag = "FP"; break; }
-                }
-                if (existing.tag.isEmpty() || existing.tag == "ADV") {
-                    if (existing.isConnectable) existing.tag = "GATT";
-                    else if (existing.tag.isEmpty()) existing.tag = "ADV";
-                }
-
-                g_latestScannedDevice.address = dev->getAddress();
-                g_latestScannedDevice.addressType = addrType;
-                g_latestScannedDevice.name = (existing.name.length() > 0) ? existing.name : String(dev->getAddress().toString().c_str());
-                g_latestScannedDevice.vendor = existing.vendor;
-                g_latestScannedDevice.rssi = rssi;
-                g_latestScannedDevice.isConnectable = existing.isConnectable;
-                g_latestScannedDevice.tag = existing.tag;
-                g_hasLatestScanned = true;
-
-                xSemaphoreGive(g_gattScanMutex);
-                return;
+                offset += 1 + fieldLen;
             }
         }
 
-        // 5. Collect service UUIDs for new device
-        std::vector<String> serviceUuids;
-        std::vector<String> serviceNames;
-        size_t serviceCount = dev->getServiceUUIDCount();
-        for (size_t i = 0; i < serviceCount; i++) {
-            NimBLEUUID u = dev->getServiceUUID(i);
-            String uStr = String(u.toString().c_str());
-            serviceUuids.push_back(uStr);
-            serviceNames.push_back(getGattServiceName(uStr));
-        }
-
-        String name = String(dev->getName().c_str());
-        name.trim();
-        if (name == "(null)" || name == "null" || name == "NULL" || name == "<no name>") {
-            name = "";
-        }
-
-        String mac = String(dev->getAddress().toString().c_str());
-        mac.toUpperCase();
-
-        // Determine specialized tag
-        String tag = isConn ? "GATT" : "ADV";
-        for (const auto &u : serviceUuids) {
-            if (u.indexOf("1812") != -1 || u.indexOf("1124") != -1) { tag = "HID"; break; }
-            if (u.indexOf("6e400001") != -1 || u.indexOf("ffe0") != -1 || u.indexOf("fff0") != -1) { tag = "UART"; break; }
-            if (u.indexOf("110e") != -1 || u.indexOf("110f") != -1 || u.indexOf("1843") != -1) { tag = "AUD"; break; }
-            if (u.indexOf("180d") != -1 || u.indexOf("181a") != -1 || u.indexOf("1809") != -1 || u.indexOf("180f") != -1) { tag = "SENS"; break; }
-            if (u.indexOf("fe2c") != -1) { tag = "FP"; break; }
-        }
-
-        String vendor = resolveBleVendor(dev, false);
-
-        g_latestScannedDevice.address = dev->getAddress();
-        g_latestScannedDevice.addressType = addrType;
-        g_latestScannedDevice.name = (name.length() > 0) ? name : mac;
-        g_latestScannedDevice.vendor = vendor;
-        g_latestScannedDevice.rssi = rssi;
-        g_latestScannedDevice.isConnectable = isConn;
-        g_latestScannedDevice.tag = tag;
-        g_hasLatestScanned = true;
-
-        // 6. Filter Mode Matching for new devices
+        // Filter Mode Matching
         bool match = false;
-        switch (g_currentFilter) {
+        switch (g_gattScanState.filterMode) {
             case FILTER_CONNECTABLE:
                 match = true;
                 break;
             case FILTER_WITH_SERVICES:
-                match = (!serviceUuids.empty());
+                match = (strcmp(tag, "GATT") != 0 && strcmp(tag, "ADV") != 0);
                 break;
             case FILTER_HID:
-                match = (tag == "HID");
+                match = (strcmp(tag, "HID") == 0);
                 break;
             case FILTER_UART:
-                match = (tag == "UART");
+                match = (strcmp(tag, "UART") == 0);
                 break;
             case FILTER_AUDIO:
-                match = (tag == "AUD");
+                match = (strcmp(tag, "AUD") == 0);
                 break;
             case FILTER_SENSORS:
-                match = (tag == "SENS");
+                match = (strcmp(tag, "SENS") == 0);
                 break;
             case FILTER_CUSTOM_128:
-                for (const auto &u : serviceUuids) {
-                    if (u.length() > 8) { match = true; tag = "128b"; break; }
-                }
+                match = (strcmp(tag, "128b") == 0);
                 break;
         }
 
         if (!match) {
-            xSemaphoreGive(g_gattScanMutex);
+            xSemaphoreGive(g_gattScanState.mutex);
             return;
         }
 
-        GattScannedDevice newDev;
-        newDev.address = dev->getAddress();
-        newDev.addressType = addrType;
-        newDev.name = (name.length() > 0) ? name : mac;
-        newDev.vendor = vendor;
-        newDev.rssi = rssi;
-        newDev.isConnectable = isConn;
-        newDev.serviceUuids = serviceUuids;
-        newDev.serviceNames = serviceNames;
-        newDev.lastSeen = millis();
-        newDev.tag = tag;
+        const uint8_t *devVal = dev->getAddress().getVal();
+        uint32_t now = millis();
 
-        // Priority Queue (Max RSSI): keep devices with strongest signal
-        size_t cap = (g_gattSettings.maxDevices > 0) ? (size_t)g_gattSettings.maxDevices : 40;
-        if (g_discoveredDevices.size() >= cap) {
-            // Find device with the weakest (lowest) RSSI
-            auto minIt = std::min_element(
-                g_discoveredDevices.begin(), g_discoveredDevices.end(),
-                [](const GattScannedDevice &a, const GattScannedDevice &b) {
-                    return a.rssi < b.rssi;
+        // 1. Update existing device if already seen
+        for (size_t i = 0; i < g_gattScanState.count; i++) {
+            if (memcmp(g_gattScanState.devices[i].macBytes, devVal, 6) == 0) {
+                g_gattScanState.devices[i].rssi = rssi;
+                g_gattScanState.devices[i].lastSeen = now;
+                g_gattScanState.devices[i].packetCount++;
+                if (isConn) g_gattScanState.devices[i].isConnectable = true;
+
+                if (g_gattScanState.devices[i].name[0] == '\0' && dev->haveName()) {
+                    std::string dName = dev->getName();
+                    if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
+                        strncpy(g_gattScanState.devices[i].name, dName.c_str(), sizeof(g_gattScanState.devices[i].name) - 1);
+                        g_gattScanState.devices[i].name[sizeof(g_gattScanState.devices[i].name) - 1] = '\0';
+                    }
                 }
-            );
-            if (minIt != g_discoveredDevices.end() && newDev.rssi > minIt->rssi) {
-                *minIt = newDev; // Replace weakest device with stronger device
+
+                if (g_gattScanState.devices[i].vendor[0] == '\0') {
+                    if (dev->haveManufacturerData()) {
+                        std::string mfg = dev->getManufacturerData();
+                        if (mfg.length() >= 2) {
+                            uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
+                            const char *comp = getBleCompanyIdName(companyId);
+                            if (comp) {
+                                strncpy(g_gattScanState.devices[i].vendor, comp, sizeof(g_gattScanState.devices[i].vendor) - 1);
+                                g_gattScanState.devices[i].vendor[sizeof(g_gattScanState.devices[i].vendor) - 1] = '\0';
+                            }
+                        }
+                    }
+                    if (g_gattScanState.devices[i].vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
+                        const char *oui = getBleOuiNameFromMacBytes(devVal);
+                        if (oui) {
+                            strncpy(g_gattScanState.devices[i].vendor, oui, sizeof(g_gattScanState.devices[i].vendor) - 1);
+                            g_gattScanState.devices[i].vendor[sizeof(g_gattScanState.devices[i].vendor) - 1] = '\0';
+                        }
+                    }
+                }
+
+                if (strcmp(g_gattScanState.devices[i].tag, "GATT") == 0 || strcmp(g_gattScanState.devices[i].tag, "ADV") == 0) {
+                    if (strcmp(tag, "GATT") != 0 && strcmp(tag, "ADV") != 0) {
+                        strncpy(g_gattScanState.devices[i].tag, tag, sizeof(g_gattScanState.devices[i].tag) - 1);
+                        g_gattScanState.devices[i].tag[sizeof(g_gattScanState.devices[i].tag) - 1] = '\0';
+                    }
+                }
+
+                xSemaphoreGive(g_gattScanState.mutex);
+                return;
             }
-        } else {
-            g_discoveredDevices.push_back(newDev);
         }
 
-        xSemaphoreGive(g_gattScanMutex);
+        // 2. New device: append if space available
+        if (g_gattScanState.count < GATT_MAX_SCAN_DEVICES) {
+            auto &d = g_gattScanState.devices[g_gattScanState.count];
+            memcpy(d.macBytes, devVal, 6);
+            d.address = dev->getAddress();
+            d.addressType = addrType;
+            snprintf(d.macStr, sizeof(d.macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     devVal[5], devVal[4], devVal[3], devVal[2], devVal[1], devVal[0]);
+
+            if (dev->haveName()) {
+                std::string dName = dev->getName();
+                if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
+                    strncpy(d.name, dName.c_str(), sizeof(d.name) - 1);
+                    d.name[sizeof(d.name) - 1] = '\0';
+                } else {
+                    d.name[0] = '\0';
+                }
+            } else {
+                d.name[0] = '\0';
+            }
+
+            d.vendor[0] = '\0';
+            if (dev->haveManufacturerData()) {
+                std::string mfg = dev->getManufacturerData();
+                if (mfg.length() >= 2) {
+                    uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
+                    const char *comp = getBleCompanyIdName(companyId);
+                    if (comp) {
+                        strncpy(d.vendor, comp, sizeof(d.vendor) - 1);
+                        d.vendor[sizeof(d.vendor) - 1] = '\0';
+                    }
+                }
+            }
+            if (d.vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
+                const char *oui = getBleOuiNameFromMacBytes(devVal);
+                if (oui) {
+                    strncpy(d.vendor, oui, sizeof(d.vendor) - 1);
+                    d.vendor[sizeof(d.vendor) - 1] = '\0';
+                }
+            }
+
+            d.rssi = rssi;
+            d.isConnectable = isConn;
+            strncpy(d.tag, tag, sizeof(d.tag) - 1);
+            d.tag[sizeof(d.tag) - 1] = '\0';
+            d.lastSeen = now;
+            d.packetCount = 1;
+
+            g_gattScanState.count++;
+        } else {
+            // Buffer full: replace device with weakest RSSI if this device is stronger
+            size_t minIdx = 0;
+            int8_t minRssi = g_gattScanState.devices[0].rssi;
+            for (size_t i = 1; i < g_gattScanState.count; i++) {
+                if (g_gattScanState.devices[i].rssi < minRssi) {
+                    minRssi = g_gattScanState.devices[i].rssi;
+                    minIdx = i;
+                }
+            }
+            if (rssi > minRssi) {
+                auto &d = g_gattScanState.devices[minIdx];
+                memcpy(d.macBytes, devVal, 6);
+                d.address = dev->getAddress();
+                d.addressType = addrType;
+                snprintf(d.macStr, sizeof(d.macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                         devVal[5], devVal[4], devVal[3], devVal[2], devVal[1], devVal[0]);
+
+                if (dev->haveName()) {
+                    std::string dName = dev->getName();
+                    if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
+                        strncpy(d.name, dName.c_str(), sizeof(d.name) - 1);
+                        d.name[sizeof(d.name) - 1] = '\0';
+                    } else {
+                        d.name[0] = '\0';
+                    }
+                } else {
+                    d.name[0] = '\0';
+                }
+
+                d.vendor[0] = '\0';
+                if (dev->haveManufacturerData()) {
+                    std::string mfg = dev->getManufacturerData();
+                    if (mfg.length() >= 2) {
+                        uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
+                        const char *comp = getBleCompanyIdName(companyId);
+                        if (comp) {
+                            strncpy(d.vendor, comp, sizeof(d.vendor) - 1);
+                            d.vendor[sizeof(d.vendor) - 1] = '\0';
+                        }
+                    }
+                }
+                if (d.vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
+                    const char *oui = getBleOuiNameFromMacBytes(devVal);
+                    if (oui) {
+                        strncpy(d.vendor, oui, sizeof(d.vendor) - 1);
+                        d.vendor[sizeof(d.vendor) - 1] = '\0';
+                    }
+                }
+
+                d.rssi = rssi;
+                d.isConnectable = isConn;
+                strncpy(d.tag, tag, sizeof(d.tag) - 1);
+                d.tag[sizeof(d.tag) - 1] = '\0';
+                d.lastSeen = now;
+                d.packetCount = 1;
+            }
+        }
+
+        xSemaphoreGive(g_gattScanState.mutex);
     }
 };
 
@@ -700,7 +788,6 @@ static GattExplorerClientCallbacks g_gattClientCallbacks;
 //=============================================================================
 
 static void runContinuousScan(GattFilterMode filterMode);
-static int showDiscoveredDevicesList();
 static void exploreGattDevice(GattScannedDevice &device);
 static void browseServicesAndChars(NimBLEClient *pClient, const GattScannedDevice &device);
 static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteCharacteristic *pChar, const String &serviceName);
@@ -709,219 +796,277 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
 static void runAutoDumpAll();
 
 //=============================================================================
-// Continuous Scan Implementation
+// Continuous Scan Implementation (Live Interactive Scanner)
 //=============================================================================
 
 static void runContinuousScan(GattFilterMode filterMode) {
-    while (true) {
-        g_currentFilter = filterMode;
-        g_scanPackets = 0;
-        gattEnsureScanMutex();
-        if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            g_discoveredDevices.clear();
-            g_hasLatestScanned = false;
-            xSemaphoreGive(g_gattScanMutex);
-        }
+    // 1. Drain residual keys from menu selection
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+    _getKeyPress();
 
-        if (!BLEStateManager::initBLE("Bruce-GATT", ESP_PWR_LVL_P9)) {
-            return;
-        }
-
-        NimBLEScan *pScan = NimBLEDevice::getScan();
-        if (!pScan) {
-            displayError("Failed to get BLE scan engine");
-            return;
-        }
-
-        pScan->setScanCallbacks(&g_gattScanCallbacks, true);
-        pScan->setActiveScan(true);
-        pScan->setInterval(100);
-        pScan->setWindow(99);
-        pScan->setDuplicateFilter(false);
-        pScan->setScanResponseTimeout(g_gattSettings.scanRespTimeout);
-        pScan->setMaxResults(0);
-        pScan->clearResults();
-
-        drawMainBorderWithTitle("GATT SCAN (LIVE)");
-
-        // Start scanning indefinitely (duration = 0)
-        pScan->start(0, false);
-        g_scanActive = true;
-
-        uint32_t lastUiUpdate = 0;
-        int animFrame = 0;
-        const char *spinner = "|/-\\";
-
-        while (g_scanActive) {
-            // User abort check: ESC or SEL stops continuous scanning
-            if (check(EscPress) || check(SelPress) || check(PrevPress) || check(NextPress)) {
-                break;
-            }
-
-            uint32_t now = millis();
-            if (now - lastUiUpdate > 150) {
-                lastUiUpdate = now;
-                animFrame = (animFrame + 1) % 4;
-
-                int devCount = 0;
-                bool hasLatest = false;
-                GattScannedDevice latestCopy;
-                if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                    devCount = (int)g_discoveredDevices.size();
-                    hasLatest = g_hasLatestScanned;
-                    if (hasLatest) {
-                        latestCopy = g_latestScannedDevice;
-                    }
-                    xSemaphoreGive(g_gattScanMutex);
-                }
-
-                GattUiGeom g = gattUiGeom();
-                tft.setTextSize(FP);
-
-                // Row 1: Filter info
-                tft.fillRect(BORDER_PAD_X, g.top, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-                tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-                tft.drawString("Filter: " + String(getFilterModeName(filterMode)), BORDER_PAD_X, g.top);
-
-                // Row 2: Live status & spinner
-                tft.fillRect(BORDER_PAD_X, g.top + 13, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-                tft.setTextColor(TFT_GREEN, bruceConfig.bgColor);
-                tft.drawString(
-                    "[" + String(spinner[animFrame]) + "] Scanning... Found: " + String(devCount),
-                    BORDER_PAD_X,
-                    g.top + 13
-                );
-
-                // Row 3: Packets
-                tft.fillRect(BORDER_PAD_X, g.top + 26, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-                tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-                tft.drawString("Packets RX: " + String(g_scanPackets), BORDER_PAD_X, g.top + 26);
-
-                // Row 4-5: Latest found device
-                tft.fillRect(BORDER_PAD_X, g.top + 39, tftWidth - 2 * BORDER_PAD_X, 24 * FP, bruceConfig.bgColor);
-                if (hasLatest) {
-                    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-                    String devLine = "[" + latestCopy.tag + "] " + latestCopy.name + " (" + String(latestCopy.rssi) + "dBm)";
-                    tft.drawString(gattFitText(devLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 39);
-
-                    String addrLine = "MAC: " + String(latestCopy.address.toString().c_str()) + " " +
-                                      ((latestCopy.addressType == BLE_ADDR_PUBLIC) ? "[PUB]" : "[RND]");
-                    tft.drawString(gattFitText(addrLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 51);
-                } else {
-                    tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
-                    tft.drawString("Listening for connectable beacons...", BORDER_PAD_X, g.top + 39);
-                }
-
-                // Footer instructions
-                tft.fillRect(BORDER_PAD_X, g.footY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-                tft.setTextColor(gattDimColor(), bruceConfig.bgColor);
-                tft.drawCentreString("Press [SEL] or [ESC] to Stop", tftWidth / 2, g.footY, 1);
-            }
-
-            vTaskDelay(30 / portTICK_PERIOD_MS);
-        }
-
-        // Stop active scan cleanly and allow controller to settle
-        if (pScan) {
-            pScan->stop();
-            pScan->clearResults();
-            pScan->setScanCallbacks(nullptr);
-        }
-        g_scanActive = false;
-        vTaskDelay(150 / portTICK_PERIOD_MS);
-
-        if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            std::sort(g_discoveredDevices.begin(), g_discoveredDevices.end(), [](const GattScannedDevice &a, const GattScannedDevice &b) {
-                return a.rssi > b.rssi;
-            });
-            xSemaphoreGive(g_gattScanMutex);
-        }
-
-        if (g_discoveredDevices.empty()) {
-            displayWarning("No connectable GATT devices found", true);
-            return;
-        }
-
-        int chosen = showDiscoveredDevicesList();
-        if (chosen == -2) {
-            // Rescan selected -> loop iteratively without recursion
-            continue;
-        }
-        if (chosen >= 0 && chosen < (int)g_discoveredDevices.size()) {
-            if (g_gattPickCallback) {
-                g_gattPickCallback(g_discoveredDevices[chosen]);
-            } else {
-                exploreGattDevice(g_discoveredDevices[chosen]);
-            }
-        }
-        break;
+    // 2. Check RAM availability
+    if (!radioHasMemForBle()) {
+        displayError("Low RAM: free WiFi/SD first", true);
+        return;
     }
-}
 
-//=============================================================================
-// Discovered Devices Interactive List (Compact / FP Font)
-//=============================================================================
+    bool bleWasActiveBefore = BLEConnected || (BLEDevice::getServer() != nullptr);
+#if !defined(LITE_VERSION)
+    bleWasActiveBefore =
+        bleWasActiveBefore || BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0;
+#endif
 
-static int showDiscoveredDevicesList() {
-    int cursor = 0;
+    // 3. Setup BLE scan
+    if (!ble_scan_setup() || pBLEScan == nullptr) {
+        displayError("Failed to init BLE scan");
+        return;
+    }
+
+    g_currentFilter = filterMode;
+    g_gattScanState.reset(filterMode);
+
+    pBLEScan->setScanCallbacks(&g_gattScanCallbacks, true);
+    pBLEScan->setActiveScan(false); // passive: captures all devices safely and reliably without transmitting
+    pBLEScan->setInterval(100);
+    pBLEScan->setWindow(99);
+    pBLEScan->setDuplicateFilter(false);
+    pBLEScan->setMaxResults(0);
+    pBLEScan->clearResults();
+
+    drawMainBorder(true);
+
+    pBLEScan->start(0, false);
+    g_scanActive = true;
+
+    int selectedIdx = 0;
+    int scrollOffset = 0;
+    uint32_t lastUiUpdate = 0;
+    int animFrame = 0;
+    const char *spinner = "|/-\\";
+    bool needsRedraw = true;
+    bool scanPaused = false;
+    bool devicePicked = false;
+    GattScannedDevice pickedDevice;
+
+    // Snapshot buffer for UI rendering to minimize lock hold time (static to protect task stack)
+    static GattScannedDevice uiDevices[GATT_MAX_SCAN_DEVICES];
+    size_t uiCount = 0;
+    uint32_t uiPackets = 0;
+
+    int lineH = 8 * FP + 4;
+    int headerY = BORDER_PAD_Y;
+    int listStartY = headerY + lineH + 4;
+    int footerY = tftHeight - BORDER_PAD_Y - lineH;
+    int visibleRows = (footerY - listStartY) / lineH;
+    if (visibleRows < 1) visibleRows = 1;
 
     while (true) {
-        if (g_discoveredDevices.empty()) {
-            displayWarning("No devices in list", true);
-            return -1;
+        // Handle physical buttons & encoder
+        bool up = check(PrevPress) || check(UpPress);
+        bool down = check(NextPress) || check(DownPress);
+        bool sel = check(SelPress);
+        bool esc = check(EscPress);
+
+#if defined(HAS_ENCODER)
+        int encSteps = getEncoderSteps();
+        if (encSteps > 0) down = true;
+        else if (encSteps < 0) up = true;
+#endif
+
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            if (k.del || k.exit_key) {
+                esc = true;
+            }
+            if (k.enter) {
+                sel = true;
+            }
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == '`' || lowerKey == 'q' || lowerKey == 0x1B) {
+                    esc = true;
+                } else if (lowerKey == 's') {
+                    sel = true;
+                } else if (lowerKey == 'p' || lowerKey == ' ') {
+                    scanPaused = !scanPaused;
+                    if (scanPaused) {
+                        pBLEScan->stop();
+                    } else {
+                        pBLEScan->start(0, false);
+                    }
+                    needsRedraw = true;
+                } else if (lowerKey == 'c') {
+                    g_gattScanState.reset(filterMode);
+                    selectedIdx = 0;
+                    scrollOffset = 0;
+                    needsRedraw = true;
+                }
+            }
         }
 
-        int totalCount = (int)g_discoveredDevices.size() + 3; // devices + Rescan + Auto-Dump + Back
-        int devCount = (int)g_discoveredDevices.size();
+        if (esc) {
+            break;
+        }
 
-        auto drawer = [devCount](int idx, int x, int y, int w, bool sel) {
-            uint16_t fg = sel ? bruceConfig.bgColor : bruceConfig.priColor;
-            uint16_t bg = sel ? bruceConfig.priColor : bruceConfig.bgColor;
-            tft.setTextColor(fg, bg);
-            tft.setTextSize(FP);
-
-            if (idx < devCount) {
-                const auto &d = g_discoveredDevices[idx];
-                // Draw RSSI bars
-                gattDrawRssi(x, y, d.rssi, fg);
-                int textX = x + 16;
-                int textW = w - 16;
-
-                String typeTag = (d.addressType == BLE_ADDR_PUBLIC) ? "P" : "R";
-                String macStr = String(d.address.toString().c_str());
-                String label;
-                if (d.name.length() > 0 && !d.name.equalsIgnoreCase(macStr)) {
-                    if (d.vendor.length() > 0 && !d.name.equalsIgnoreCase(d.vendor)) {
-                        label = "[" + d.tag + ":" + typeTag + "] " + d.name + " (" + d.vendor + ") " + String(d.rssi) + "dBm";
-                    } else {
-                        label = "[" + d.tag + ":" + typeTag + "] " + d.name + " " + String(d.rssi) + "dBm";
-                    }
-                } else if (d.vendor.length() > 0) {
-                    label = "[" + d.tag + ":" + typeTag + "] " + d.vendor + " (" + macStr.substring(9) + ") " + String(d.rssi) + "dBm";
-                } else {
-                    label = "[" + d.tag + ":" + typeTag + "] " + d.name + " " + String(d.rssi) + "dBm";
-                }
-                tft.drawString(gattFitText(label, textW), textX, y, 1);
-            } else if (idx == devCount) {
-                tft.drawString("> Rescan Devices", x, y, 1);
-            } else if (idx == devCount + 1) {
-                tft.drawString("> Auto-Dump All to SD", x, y, 1);
-            } else if (idx == devCount + 2) {
-                tft.drawString("< Back to GATT Menu", x, y, 1);
+        // Copy snapshot from scanner state under lock
+        if (millis() - lastUiUpdate > 100 || needsRedraw) {
+            if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                uiCount = g_gattScanState.count;
+                uiPackets = g_gattScanState.totalPackets;
+                memcpy(uiDevices, g_gattScanState.devices, uiCount * sizeof(GattScannedDevice));
+                xSemaphoreGive(g_gattScanState.mutex);
             }
-        };
+            needsRedraw = true;
+        }
 
-        const char *hint = g_gattPickCallback ? "SEL pick  ESC back" : "SEL explore  ESC back";
-        int chosen = gattListLoop("GATT TARGETS", totalCount, hint, drawer, &cursor);
+        if (up) {
+            if (selectedIdx > 0) {
+                selectedIdx--;
+                needsRedraw = true;
+            }
+        }
+        if (down) {
+            if (selectedIdx + 1 < (int)uiCount) {
+                selectedIdx++;
+                needsRedraw = true;
+            }
+        }
 
-        if (chosen < 0 || chosen == devCount + 2) {
-            return -1;
-        } else if (chosen == devCount) {
-            return -2; // Rescan
-        } else if (chosen == devCount + 1) {
-            runAutoDumpAll();
-        } else if (chosen < devCount) {
-            return chosen; // selected device index
+        if (sel && uiCount > 0 && selectedIdx >= 0 && selectedIdx < (int)uiCount) {
+            pickedDevice = uiDevices[selectedIdx];
+            devicePicked = true;
+            break;
+        }
+
+        // Keep scroll offset aligned with selected index
+        if (selectedIdx < scrollOffset) {
+            scrollOffset = selectedIdx;
+        }
+        if (selectedIdx >= scrollOffset + visibleRows) {
+            scrollOffset = selectedIdx - visibleRows + 1;
+        }
+
+        // Render UI
+        uint32_t now = millis();
+        if (needsRedraw || (now - lastUiUpdate >= 120)) {
+            lastUiUpdate = now;
+            needsRedraw = false;
+            animFrame = (animFrame + 1) % 4;
+
+            // 1. Header (Title & Status)
+            tft.setTextSize(FP);
+            tft.fillRect(BORDER_PAD_X, headerY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+            String title = "GATT SCAN ";
+            if (filterMode != FILTER_CONNECTABLE) {
+                title = "[" + String(getFilterModeName(filterMode)) + "] ";
+            }
+            title += scanPaused ? "[PAUSED]" : ("[" + String(spinner[animFrame]) + "]");
+            tft.drawString(gattFitText(title, tftWidth / 2 + 10), BORDER_PAD_X, headerY);
+
+            String countStr = "Dev: " + String(uiCount) + " Pkt: " + String(uiPackets);
+            tft.drawRightString(countStr, tftWidth - BORDER_PAD_X, headerY, 1);
+
+            tft.drawFastHLine(BORDER_PAD_X, headerY + lineH - 1, tftWidth - 2 * BORDER_PAD_X, TFT_DARKGREY);
+
+            // 2. Device List rows
+            for (int r = 0; r < visibleRows; r++) {
+                int itemIdx = scrollOffset + r;
+                int rowY = listStartY + r * lineH;
+
+                if (itemIdx < (int)uiCount) {
+                    bool isSel = (itemIdx == selectedIdx);
+                    uint16_t bg = isSel ? bruceConfig.priColor : bruceConfig.bgColor;
+                    uint16_t fg = isSel ? bruceConfig.bgColor : bruceConfig.priColor;
+
+                    tft.fillRect(BORDER_PAD_X, rowY, tftWidth - 2 * BORDER_PAD_X, lineH, bg);
+                    tft.setTextColor(fg, bg);
+
+                    // Draw RSSI signal indicator
+                    int8_t rssi = uiDevices[itemIdx].rssi;
+                    int rssiX = BORDER_PAD_X + 2;
+                    int bars = (rssi > -60) ? 4 : ((rssi > -75) ? 3 : ((rssi > -88) ? 2 : 1));
+                    for (int b = 0; b < 4; b++) {
+                        int h = 2 + b * 2;
+                        if (b < bars) {
+                            tft.fillRect(rssiX + b * 3, rowY + lineH - 3 - h, 2, h, fg);
+                        } else {
+                            tft.drawFastHLine(rssiX + b * 3, rowY + lineH - 4, 2, fg);
+                        }
+                    }
+
+                    int textX = rssiX + 16;
+                    int maxTextW = tftWidth - textX - BORDER_PAD_X - 4;
+
+                    String devLabel = "[" + String(uiDevices[itemIdx].tag) + "] ";
+                    if (uiDevices[itemIdx].name[0] != '\0') {
+                        devLabel += String(uiDevices[itemIdx].name);
+                    } else if (uiDevices[itemIdx].vendor[0] != '\0') {
+                        devLabel += "[" + String(uiDevices[itemIdx].vendor) + "] " + String(uiDevices[itemIdx].macStr).substring(9);
+                    } else {
+                        devLabel += String(uiDevices[itemIdx].macStr);
+                    }
+
+                    devLabel += " " + String(rssi) + "d";
+                    if (uiDevices[itemIdx].addressType == BLE_ADDR_PUBLIC) {
+                        devLabel += " [P]";
+                    }
+
+                    while (devLabel.length() > 3 && tft.textWidth(devLabel.c_str()) > maxTextW) {
+                        devLabel.remove(devLabel.length() - 1);
+                    }
+                    tft.drawString(devLabel, textX, rowY + 1);
+                } else {
+                    tft.fillRect(BORDER_PAD_X, rowY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+                    if (uiCount == 0 && r == 0) {
+                        tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
+                        tft.drawString("Listening for connectable devices...", BORDER_PAD_X + 4, rowY + 1);
+                    }
+                }
+            }
+
+            // 3. Footer
+            tft.fillRect(BORDER_PAD_X, footerY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+            tft.setTextColor(getColorVariation(bruceConfig.priColor, 8, -1), bruceConfig.bgColor);
+            const char *footText = g_gattPickCallback ? "ENTER/SEL pick   ESC back" : "ENTER/SEL explore   ESC back";
+            tft.drawCentreString(footText, tftWidth / 2, footerY + 1, 1);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+
+    // Stop scanner cleanly
+    g_gattScanState.stop();
+    if (pBLEScan) {
+        pBLEScan->stop();
+        pBLEScan->clearResults();
+        pBLEScan->setScanCallbacks(nullptr);
+    }
+    g_scanActive = false;
+
+    // Synchronize g_discoveredDevices for Auto-Dump and external callers
+    g_discoveredDevices.clear();
+    for (size_t i = 0; i < g_gattScanState.count; i++) {
+        g_discoveredDevices.push_back(g_gattScanState.devices[i]);
+    }
+
+    if (!devicePicked && !bleWasActiveBefore) {
+        stopBLEStack();
+    }
+
+    // Drain keys
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+    _getKeyPress();
+
+    if (devicePicked) {
+        if (g_gattPickCallback) {
+            g_gattPickCallback(pickedDevice);
+        } else {
+            exploreGattDevice(pickedDevice);
         }
     }
 }
@@ -1231,8 +1376,12 @@ static void showBleConnectDiagnostics(const BleConnDiagInfo &diag, const GattSca
 //=============================================================================
 
 static void exploreGattDevice(GattScannedDevice &device) {
-    if (device.vendor.length() == 0 && device.addressType == BLE_ADDR_PUBLIC) {
-        device.vendor = resolveBleOui(device.address, true);
+    if (device.vendor[0] == '\0' && device.addressType == BLE_ADDR_PUBLIC) {
+        String v = resolveBleOui(device.address, true);
+        if (v.length() > 0) {
+            strncpy(device.vendor, v.c_str(), sizeof(device.vendor) - 1);
+            device.vendor[sizeof(device.vendor) - 1] = '\0';
+        }
     }
 
     drawMainBorderWithTitle("GATT CONNECT");
@@ -1242,8 +1391,8 @@ static void exploreGattDevice(GattScannedDevice &device) {
     GattUiGeom g = gattUiGeom();
     int rowY = g.top;
     const int step = 11;
-    tft.drawString("Target: " + gattFitText(device.name, tftWidth - 20), BORDER_PAD_X, rowY); rowY += step;
-    if (device.vendor.length() > 0) {
+    tft.drawString("Target: " + gattFitText(device.name[0] != '\0' ? String(device.name) : String(device.macStr), tftWidth - 20), BORDER_PAD_X, rowY); rowY += step;
+    if (device.vendor[0] != '\0') {
         tft.drawString("Vendor: " + gattFitText(device.vendor, tftWidth - 20), BORDER_PAD_X, rowY); rowY += step;
     }
     tft.drawString("MAC:    " + String(device.address.toString().c_str()), BORDER_PAD_X, rowY); rowY += step;
@@ -1298,7 +1447,7 @@ static void exploreGattDevice(GattScannedDevice &device) {
         }});
 
         devOps.push_back({"3. RACE Assessment (Airoha)", [pClient, &device]() {
-            launchRaceForDevice(pClient, device.name, device.address);
+            launchRaceForDevice(pClient, device.name[0] != '\0' ? String(device.name) : String(device.macStr), device.address);
         }});
 
         devOps.push_back({"4. Dump GATT Tree to Storage", [pClient, &device]() {
@@ -1313,15 +1462,16 @@ static void exploreGattDevice(GattScannedDevice &device) {
         // Runs the live tracker while keeping the active GATT connection open for high-rate
         // link-layer RSSI reads; returns right back to this menu on ESC.
         devOps.push_back({"5. Track this device", [pClient, &device]() {
-            String label = device.name.length() > 0 ? device.name : String(device.address.toString().c_str());
-            bleTrackerRun(String(device.address.toString().c_str()), label, pClient);
+            String label = device.name[0] != '\0' ? String(device.name) : String(device.macStr);
+            bleTrackerRun(String(device.macStr), label, pClient);
         }});
 
         devOps.push_back({"6. Disconnect & Back", [pClient]() {
             if (pClient->isConnected()) pClient->disconnect();
         }});
 
-        int sel = gattMenu(device.name.c_str(), devOps, "SEL choose  ESC back", &devCursor);
+        const char *title = device.name[0] != '\0' ? device.name : device.macStr;
+        int sel = gattMenu(title, devOps, "SEL choose  ESC back", &devCursor);
         if (sel == -1 || sel == (int)devOps.size() - 1 || !pClient->isConnected()) {
             break;
         }
@@ -1729,7 +1879,7 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
     file.println("==================================================");
     file.println("BRUCE GATT EXPLORER DUMP");
     file.println("==================================================");
-    file.println("Device Name: " + device.name);
+    file.println("Device Name: " + String(device.name));
     file.println("Address:     " + String(device.address.toString().c_str()));
     file.println("Addr Type:   " + String((device.addressType == BLE_ADDR_PUBLIC) ? "PUBLIC" : "RANDOM"));
     file.println("RSSI:        " + String(device.rssi) + " dBm");
@@ -1816,7 +1966,8 @@ static void runAutoDumpAll() {
         }
 
         const auto &dev = g_discoveredDevices[i];
-        String progress = "[" + String(i + 1) + "/" + String(total) + "] " + dev.name;
+        String devName = dev.name[0] != '\0' ? String(dev.name) : String(dev.macStr);
+        String progress = "[" + String(i + 1) + "/" + String(total) + "] " + devName;
         tft.drawString(gattFitText(progress, tftWidth - 20), BORDER_PAD_X, lineY);
         lineY += 12;
 
@@ -1940,8 +2091,8 @@ bool gattScanAndPick(String &outName, String &outMac, int &outRssi, uint8_t &out
     g_gattPickCallback = nullptr;
 
     if (hasPick) {
-        outName = (picked.name.length() > 0) ? picked.name : String(picked.address.toString().c_str());
-        outMac = String(picked.address.toString().c_str());
+        outName = (picked.name[0] != '\0') ? String(picked.name) : String(picked.macStr);
+        outMac = String(picked.macStr);
         outRssi = picked.rssi;
         outAddrType = picked.addressType;
         return true;

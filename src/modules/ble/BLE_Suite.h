@@ -29,10 +29,18 @@ bool check(int key);
 // BLE Scan Constants
 //=============================================================================
 
+#ifndef ACTIVE_SCAN_TIME
 #define ACTIVE_SCAN_TIME 10
+#endif
+#ifndef PASSIVE_SCAN_TIME
 #define PASSIVE_SCAN_TIME 8
+#endif
+#ifndef SCAN_INT
 #define SCAN_INT 97
+#endif
+#ifndef SCAN_WINDOW
 #define SCAN_WINDOW 67
+#endif
 
 //=============================================================================
 // Enums

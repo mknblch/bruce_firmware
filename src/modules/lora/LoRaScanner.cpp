@@ -86,6 +86,12 @@ void runLoRaChannelDetector() {
     int chosen = loopOptions(scanModes, MENU_TYPE_SUBMENU, "Select Scan Band");
     if (chosen < 0 || channels.empty()) return;
 
+    // Drain any leftover Enter/Esc press from menu selection
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+    _getKeyPress();
+
     // Start Radio
     LoRaConfigData scanCfg = loraConfig;
     scanCfg.freqMHz = channels[0].freqMHz;
@@ -101,29 +107,70 @@ void runLoRaChannelDetector() {
     int scrollOffset = 0;
     size_t currentChIdx = 0;
     uint32_t lastUiUpdate = 0;
-    uint32_t lastCadStep = 0;
+    uint32_t lastHopTime = millis();
     bool isPaused = false;
     bool needsRedraw = true;
+    bool statsChanged = false;
+    uint8_t rxBuffer[256];
 
     drawMainBorder(true);
 
     while (true) {
-        if (check(EscPress)) break;
+        bool up = check(PrevPress) || check(UpPress) || check(PrevPagePress);
+        bool down = check(NextPress) || check(DownPress) || check(NextPagePress);
+        bool sel = check(SelPress);
+        bool esc = check(EscPress);
 
-        if (check(PrevPress) || check(UpPress)) {
+#if defined(HAS_ENCODER)
+        int encSteps = (int)drainRotarySteps();
+        if (encSteps > 0) down = true;
+        else if (encSteps < 0) up = true;
+#endif
+
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            if (k.del || k.exit_key) {
+                break;
+            }
+            if (k.enter) {
+                sel = true;
+            }
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == '`' || lowerKey == 'q' || lowerKey == 0x1B) {
+                    goto exit_detector;
+                } else if (lowerKey == 'p') {
+                    isPaused = !isPaused;
+                    needsRedraw = true;
+                } else if (lowerKey == 'c') {
+                    for (auto &c : channels) {
+                        c.hits = 0;
+                        c.peakRssi = -140.0f;
+                        c.lastRssi = -140.0f;
+                    }
+                    needsRedraw = true;
+                } else if (lowerKey == 's') {
+                    sel = true;
+                }
+            }
+        }
+
+        if (esc) break;
+
+        if (up) {
             if (selectedIdx > 0) {
                 selectedIdx--;
                 needsRedraw = true;
             }
         }
-        if (check(NextPress) || check(DownPress)) {
+        if (down) {
             if (selectedIdx + 1 < (int)channels.size()) {
                 selectedIdx++;
                 needsRedraw = true;
             }
         }
 
-        if (check(SelPress)) {
+        if (sel) {
             // Lock onto selected channel and tune radio to it
             if (selectedIdx >= 0 && selectedIdx < (int)channels.size()) {
                 const auto selCh = channels[selectedIdx];
@@ -132,6 +179,14 @@ void runLoRaChannelDetector() {
                 loraConfig.bwKHz = selCh.bwKHz;
                 saveLoRaConfig();
                 stopLoRaRadio();
+
+                // Clear input and wait for key release before opening submenu
+                vTaskDelay(pdMS_TO_TICKS(150));
+                check(SelPress);
+                check(PrevPress);
+                check(NextPress);
+                check(EscPress);
+                _getKeyPress();
 
                 std::vector<Option> actionOpts = {
                     {"Start Sniffer on " + String(selCh.freqMHz, 3) + "MHz", runLoRaSniffer},
@@ -142,52 +197,79 @@ void runLoRaChannelDetector() {
                 int a = loopOptions(actionOpts, MENU_TYPE_SUBMENU, "Channel Selected");
                 if (a == 0 || a == 1) return;
 
-                // Resume Detector
+                // Clear input before returning to detector
+                vTaskDelay(pdMS_TO_TICKS(150));
+                check(SelPress);
+                check(PrevPress);
+                check(NextPress);
+                check(EscPress);
+                _getKeyPress();
+
+                scanCfg.freqMHz = channels[currentChIdx].freqMHz;
+                scanCfg.sf = channels[currentChIdx].sf;
+                scanCfg.bwKHz = channels[currentChIdx].bwKHz;
                 initLoRaRadio(scanCfg, true);
                 drawMainBorder(true);
                 needsRedraw = true;
             }
         }
 
-        char key = checkLetterShortcutPress();
-        if (key == 'p' || key == 'P') {
-            isPaused = !isPaused;
-            needsRedraw = true;
-        } else if (key == 'c' || key == 'C') {
-            for (auto &ch : channels) {
-                ch.hits = 0;
-                ch.peakRssi = -140.0f;
-                ch.lastRssi = -140.0f;
+        // Check for incoming packet on currently tuned channel
+        if (checkLoRaPacketAvailable()) {
+            float rssi = 0, snr = 0, freqErr = 0;
+            size_t pktLen = 0;
+            int state = readLoRaRawData(rxBuffer, sizeof(rxBuffer), rssi, snr, freqErr, pktLen);
+
+            if (state == RADIOLIB_ERR_NONE && pktLen > 0) {
+                auto &ch = channels[currentChIdx];
+                ch.hits++;
+                ch.lastSeenMs = millis();
+                ch.lastRssi = rssi;
+                if (rssi > ch.peakRssi) ch.peakRssi = rssi;
+                statsChanged = true;
+
+                // Feed packet into global sniffer/node records
+                LoRaPacket pkt;
+                pkt.timestampMs = millis();
+                pkt.freqMHz = ch.freqMHz;
+                pkt.sf = ch.sf;
+                pkt.bwKHz = ch.bwKHz;
+                pkt.cr = loraConfig.cr;
+                pkt.syncWord = loraConfig.syncWord;
+                pkt.rssi = rssi;
+                pkt.snr = snr;
+                pkt.freqErrorHz = freqErr;
+                pkt.timeOnAirMs = getLoRaTimeOnAir(pktLen);
+                pkt.crcOk = true;
+                pkt.raw.assign(rxBuffer, rxBuffer + pktLen);
+
+                parseLoRaPacket(pkt);
+                addPacketToSniffer(pkt);
             }
-            needsRedraw = true;
         }
 
-        // Cycle through channels & do CAD detection
-        if (!isPaused && !channels.empty() && (millis() - lastCadStep >= 40)) {
-            lastCadStep = millis();
+        // Periodically sample current channel RSSI for visual bar
+        float instantRssi = getLoRaInstantRSSI();
+        if (instantRssi > -135.0f && instantRssi <= 0.0f) {
+            channels[currentChIdx].lastRssi = instantRssi;
+        }
+
+        // Dwell on current channel before hopping to next
+        if (!isPaused && !channels.empty() && (millis() - lastHopTime >= 200)) {
+            lastHopTime = millis();
+            currentChIdx = (currentChIdx + 1) % channels.size();
             auto &ch = channels[currentChIdx];
             setLoRaFrequency(ch.freqMHz);
             setLoRaSpreadingFactor(ch.sf);
             setLoRaBandwidth(ch.bwKHz);
-
-            int cadResult = scanLoRaCAD();
-            float rssi = getLoRaInstantRSSI();
-            ch.lastRssi = rssi;
-
-            if (cadResult == RADIOLIB_PREAMBLE_DETECTED || rssi > -105.0f) {
-                ch.hits++;
-                ch.lastSeenMs = millis();
-                if (rssi > ch.peakRssi) ch.peakRssi = rssi;
-                needsRedraw = true;
-            }
-
-            currentChIdx = (currentChIdx + 1) % channels.size();
+            startLoRaReceive();
         }
 
         // Render UI
-        if (millis() - lastUiUpdate > 150 || needsRedraw) {
+        if (needsRedraw || ((millis() - lastUiUpdate > 250) && statsChanged)) {
             lastUiUpdate = millis();
             needsRedraw = false;
+            statsChanged = false;
 
             int lineH = FP * LH + 1;
             int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
@@ -197,8 +279,12 @@ void runLoRaChannelDetector() {
             // Status bar
             tft.setTextSize(FP);
             tft.fillRect(7, BORDER_PAD_Y, tftWidth - 14, lineH, bruceConfig.bgColor);
-            String status = "CAD Detector: " + String(channels.size()) + " Ch";
-            if (isPaused) status += " [PAUSED]";
+            String status = "Detector: " + String(channels.size()) + " Ch";
+            if (isPaused) {
+                status += " [PAUSED]";
+            } else {
+                status += " [Scan: " + String(channels[currentChIdx].freqMHz, 2) + "M]";
+            }
             tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
             tft.drawString(status, 10, BORDER_PAD_Y);
 
@@ -259,6 +345,7 @@ void runLoRaChannelDetector() {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+exit_detector:
     stopLoRaRadio();
 }
 

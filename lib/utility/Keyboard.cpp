@@ -87,35 +87,56 @@ void Keyboard_Class::updateKeyList()
 {
     _key_list_buffer.clear();
     Point2D_t coor;
-    uint8_t input_value = 0;
+    uint8_t col_inputs[8] = {0};
 
+    // Step 1: Scan all 8 column decoder states with settling delay
     for (int i = 0; i < 8; i++)
     {
         _set_output(output_list, i);
-        input_value = _get_input(input_list);
-        /* If key pressed */
+        delayMicroseconds(5);
+        col_inputs[i] = _get_input(input_list);
+    }
 
-        if (input_value)
+    // Step 2: Anti-ghosting / HAT noise filter.
+    // In a 74HC138 active-low scanned matrix, each physical key connects only to one column.
+    // Pressing up to 2 keys on the same row activates that row on at most 2 columns.
+    // An external peripheral (such as GPS TX or an active HAT line) pulling row j LOW
+    // makes row j appear active across 3 or more column scans.
+    for (int j = 0; j < 7; j++)
+    {
+        int rowActiveCount = 0;
+        for (int i = 0; i < 8; i++)
         {
-            /* Get X */
-            for (int j = 0; j < 7; j++)
+            if (col_inputs[i] & (0x01 << j))
             {
-                if (input_value & (0x01 << j))
-                {
-                    coor.x = (i > 3) ? X_map_chart[j].x_1 : X_map_chart[j].x_2;
-
-                    /* Get Y */
-                    coor.y = (i > 3) ? (i - 4) : i;
-                    // printf("%d,%d\t", coor.x, coor.y);
-
-                    /* Keep the same as picture */
-                    coor.y = -coor.y;
-                    coor.y = coor.y + 3;
-
-                    _key_list_buffer.push_back(coor);
-                }
+                rowActiveCount++;
             }
         }
+
+        // If active on 3 or more columns, reject this row (HAT/external interference)
+        if (rowActiveCount >= 3)
+        {
+            continue;
+        }
+
+        // Valid keypresses on this row
+        for (int i = 0; i < 8; i++)
+        {
+            if (col_inputs[i] & (0x01 << j))
+            {
+                coor.x = (i > 3) ? X_map_chart[j].x_1 : X_map_chart[j].x_2;
+                coor.y = (i > 3) ? (i - 4) : i;
+                coor.y = -coor.y;
+                coor.y = coor.y + 3;
+                _key_list_buffer.push_back(coor);
+            }
+        }
+    }
+
+    // Sanity check: cap maximum simultaneous keys to prevent ghosting overflow
+    if (_key_list_buffer.size() > 6)
+    {
+        _key_list_buffer.clear();
     }
 }
 

@@ -85,8 +85,8 @@ inline void mapRawKeyToPhysical(uint8_t keyvalue, uint8_t &row, uint8_t &col) {
 void _setup_gpio() {
     //    Keyboard.begin();
     pinMode(0, INPUT);
-    pinMode(5, OUTPUT);
     // Set GPIO5 HIGH for SD card compatibility (thx for the tip @bmorcelli & 7h30th3r0n3)
+    pinMode(5, OUTPUT);
     digitalWrite(5, HIGH);
 #if defined(RGB_LED) && RGB_LED >= 0
     pinMode(RGB_LED, OUTPUT);
@@ -99,14 +99,42 @@ void IRAM_ATTR gpio_isr_handler(void *arg) {
     // static long i = 0;
     // Serial.printf("interrupt %ld\n", i++);
 }
+
+static void recoverI2CPins(int sda, int scl) {
+    pinMode(scl, OUTPUT_OPEN_DRAIN);
+    pinMode(sda, OUTPUT_OPEN_DRAIN);
+    digitalWrite(scl, HIGH);
+    digitalWrite(sda, HIGH);
+    delayMicroseconds(10);
+    // Clock SCL up to 9 times to walk any slave stuck mid-byte out of its transaction
+    for (int i = 0; i < 9 && digitalRead(sda) == LOW; i++) {
+        digitalWrite(scl, LOW);
+        delayMicroseconds(10);
+        digitalWrite(scl, HIGH);
+        delayMicroseconds(10);
+    }
+    // Generate I2C STOP condition
+    digitalWrite(sda, LOW);
+    delayMicroseconds(10);
+    digitalWrite(scl, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(sda, HIGH);
+    delayMicroseconds(10);
+}
+
 void _post_setup_gpio() {
     // Initialize TCA8418 I2C keyboard controller
     Serial.println("DEBUG: Cardputer ADV - Initializing TCA8418 keyboard");
 
     // Use correct I2C pins for Cardputer ADV
     Serial.printf("DEBUG: Initializing I2C with SDA=%d, SCL=%d\n", TCA8418_SDA_PIN, TCA8418_SCL_PIN);
+
+    // Perform I2C bus recovery before starting Wire1 to unstuck any slave held mid-transaction
+    recoverI2CPins(TCA8418_SDA_PIN, TCA8418_SCL_PIN);
+
     Wire1.begin(TCA8418_SDA_PIN, TCA8418_SCL_PIN);
-    delay(100);
+    Wire1.setClock(100000);
+    delay(50);
 
     // Scan I2C bus to see what's available
     Serial.println("DEBUG: Scanning I2C bus...");
@@ -120,52 +148,74 @@ void _post_setup_gpio() {
     }
     Serial.printf("DEBUG: Found %d I2C devices\n", found_devices);
 
-    // Try to initialize TCA8418
-    Serial.printf("DEBUG: Attempting to initialize TCA8418 at address 0x%02X\n", TCA8418_I2C_ADDR);
-    UseTCA8418 = tca.begin(TCA8418_I2C_ADDR, &Wire1);
+    // Try to initialize TCA8418 with retries and recovery
+    UseTCA8418 = false;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        Serial.printf("DEBUG: Attempting to initialize TCA8418 at address 0x%02X (attempt %d)\n", TCA8418_I2C_ADDR, attempt + 1);
+        if (tca.begin(TCA8418_I2C_ADDR, &Wire1)) {
+            UseTCA8418 = true;
+            break;
+        }
+        delay(20);
+        Wire1.end();
+        recoverI2CPins(TCA8418_SDA_PIN, TCA8418_SCL_PIN);
+        Wire1.begin(TCA8418_SDA_PIN, TCA8418_SCL_PIN);
+        Wire1.setClock(100000);
+        delay(20);
+    }
 
-    if (!UseTCA8418) {
+    if (UseTCA8418) {
+        Serial.println("ADV  : TCA8418 keyboard initialized successfully");
+        bruceConfigPins.sys_i2c.sda = (gpio_num_t)8;
+        bruceConfigPins.sys_i2c.scl = (gpio_num_t)9;
+        // TCA8418 (and, on this board, the BMI270 IMU) live directly on Wire1 - a different
+        // physical I2C port than M5.In_I2C - so bus_HAL's default M5Unified-backed sys_i2c adapter
+        // must be overridden to point at Wire1 instead (see setSysI2CBus()'s doc comment).
+        setSysI2CBus(&Wire1);
+
+        bruceConfigPins.gps_bus.rx = (gpio_num_t)15;
+        bruceConfigPins.gps_bus.tx = (gpio_num_t)13;
+        bruceConfigPins.gpsBaudrate = 115200;
+
+        bruceConfigPins.CC1101_bus.sck = (gpio_num_t)40;
+        bruceConfigPins.CC1101_bus.miso = (gpio_num_t)39;
+        bruceConfigPins.CC1101_bus.mosi = (gpio_num_t)14;
+        bruceConfigPins.CC1101_bus.cs = (gpio_num_t)13;
+        bruceConfigPins.CC1101_bus.io0 = (gpio_num_t)5;
+
+        bruceConfigPins.NRF24_bus.sck = (gpio_num_t)40;
+        bruceConfigPins.NRF24_bus.miso = (gpio_num_t)39;
+        bruceConfigPins.NRF24_bus.mosi = (gpio_num_t)14;
+        bruceConfigPins.NRF24_bus.cs = (gpio_num_t)6;
+        bruceConfigPins.NRF24_bus.io0 = (gpio_num_t)4;
+
+        tca.matrix(7, 8);
+        tca.flush();
+        pinMode(11, INPUT);
+        attachInterruptArg(digitalPinToInterrupt(11), gpio_isr_handler, nullptr, FALLING);
+        tca.enableInterrupts();
+    } else {
         Serial.println("ADV  : Failed to initialize TCA8418!");
         Serial.println("Probable standard Cardputer detected, switching to Keyboard library");
         Wire1.end();
         Keyboard.begin();
-        return;
     }
-    bruceConfigPins.sys_i2c.sda = (gpio_num_t)8;
-    bruceConfigPins.sys_i2c.scl = (gpio_num_t)9;
-    // TCA8418 (and, on this board, the BMI270 IMU) live directly on Wire1 - a different
-    // physical I2C port than M5.In_I2C - so bus_HAL's default M5Unified-backed sys_i2c adapter
-    // must be overridden to point at Wire1 instead (see setSysI2CBus()'s doc comment).
-    setSysI2CBus(&Wire1);
 
-    bruceConfigPins.gps_bus.rx = (gpio_num_t)15;
-    bruceConfigPins.gps_bus.tx = (gpio_num_t)13;
-    bruceConfigPins.gpsBaudrate = 115200;
+    // Reload persisted config file if present to let user custom pin settings override defaults
+    bruceConfigPins.fromFile(sdcardMounted);
 
-    bruceConfigPins.CC1101_bus.sck = (gpio_num_t)40;
-    bruceConfigPins.CC1101_bus.miso = (gpio_num_t)39;
-    bruceConfigPins.CC1101_bus.mosi = (gpio_num_t)14;
-    bruceConfigPins.CC1101_bus.cs = (gpio_num_t)13;
-    bruceConfigPins.CC1101_bus.io0 = (gpio_num_t)5;
-
-    bruceConfigPins.NRF24_bus.sck = (gpio_num_t)40;
-    bruceConfigPins.NRF24_bus.miso = (gpio_num_t)39;
-    bruceConfigPins.NRF24_bus.mosi = (gpio_num_t)14;
-    bruceConfigPins.NRF24_bus.cs = (gpio_num_t)6;
-    bruceConfigPins.NRF24_bus.io0 = (gpio_num_t)4;
-
-    pinMode(bruceConfigPins.NRF24_bus.cs, OUTPUT);
-    pinMode(bruceConfigPins.CC1101_bus.cs, OUTPUT);
-    pinMode(bruceConfigPins.LoRa_bus.cs, OUTPUT);
-    digitalWrite(bruceConfigPins.NRF24_bus.cs, HIGH);
-    digitalWrite(bruceConfigPins.CC1101_bus.cs, HIGH);
-    digitalWrite(bruceConfigPins.LoRa_bus.cs, HIGH);
-
-    tca.matrix(7, 8);
-    tca.flush();
-    pinMode(11, INPUT);
-    attachInterruptArg(digitalPinToInterrupt(11), gpio_isr_handler, nullptr, CHANGE);
-    tca.enableInterrupts();
+    if (bruceConfigPins.NRF24_bus.cs >= 0 && bruceConfigPins.NRF24_bus.cs < GPIO_NUM_MAX) {
+        pinMode(bruceConfigPins.NRF24_bus.cs, OUTPUT);
+        digitalWrite(bruceConfigPins.NRF24_bus.cs, HIGH);
+    }
+    if (bruceConfigPins.CC1101_bus.cs >= 0 && bruceConfigPins.CC1101_bus.cs < GPIO_NUM_MAX) {
+        pinMode(bruceConfigPins.CC1101_bus.cs, OUTPUT);
+        digitalWrite(bruceConfigPins.CC1101_bus.cs, HIGH);
+    }
+    if (bruceConfigPins.LoRa_bus.cs >= 0 && bruceConfigPins.LoRa_bus.cs < GPIO_NUM_MAX) {
+        pinMode(bruceConfigPins.LoRa_bus.cs, OUTPUT);
+        digitalWrite(bruceConfigPins.LoRa_bus.cs, HIGH);
+    }
 }
 
 /*********************************************************************

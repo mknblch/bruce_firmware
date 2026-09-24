@@ -490,13 +490,36 @@ static String lookupOuiOnStorage(uint32_t targetOui) {
 // Public API Functions
 //=============================================================================
 
-String resolveBleCompanyId(uint16_t companyId) {
+const char *getBleCompanyIdName(uint16_t companyId) {
     for (size_t i = 0; i < BLE_SIG_COMPANIES_COUNT; i++) {
         if (BLE_SIG_COMPANIES[i].id == companyId) {
-            return String(BLE_SIG_COMPANIES[i].name);
+            return BLE_SIG_COMPANIES[i].name;
         }
     }
-    return "";
+    return nullptr;
+}
+
+const char *getBleOuiName(uint32_t oui24) {
+    if (oui24 == 0) return nullptr;
+    for (size_t i = 0; i < COMMON_BLE_OUIS_COUNT; i++) {
+        if (COMMON_BLE_OUIS[i].oui == oui24) {
+            return COMMON_BLE_OUIS[i].name;
+        }
+    }
+    return nullptr;
+}
+
+const char *getBleOuiNameFromMacBytes(const uint8_t *macBytes) {
+    if (!macBytes) return nullptr;
+    // macBytes from NimBLEAddress.getVal() is stored in reverse byte order:
+    // macBytes[5] = MSB (first byte of MAC), macBytes[4] = 2nd byte, macBytes[3] = 3rd byte
+    uint32_t oui = ((uint32_t)macBytes[5] << 16) | ((uint32_t)macBytes[4] << 8) | macBytes[3];
+    return getBleOuiName(oui);
+}
+
+String resolveBleCompanyId(uint16_t companyId) {
+    const char *name = getBleCompanyIdName(companyId);
+    return name ? String(name) : "";
 }
 
 String resolveBleOui(uint32_t oui24, bool allowSdLookup) {
@@ -509,12 +532,11 @@ String resolveBleOui(uint32_t oui24, bool allowSdLookup) {
     }
 
     // 2. Check Flash Table
-    for (size_t i = 0; i < COMMON_BLE_OUIS_COUNT; i++) {
-        if (COMMON_BLE_OUIS[i].oui == oui24) {
-            String name = String(COMMON_BLE_OUIS[i].name);
-            addToOuiCache(oui24, name);
-            return name;
-        }
+    const char *flashName = getBleOuiName(oui24);
+    if (flashName) {
+        String name = String(flashName);
+        addToOuiCache(oui24, name);
+        return name;
     }
 
     // 3. Fallback to SD Storage
@@ -531,18 +553,9 @@ String resolveBleOui(uint32_t oui24, bool allowSdLookup) {
 
 String resolveBleOui(const NimBLEAddress &address, bool allowSdLookup) {
     if (address.getType() != BLE_ADDR_PUBLIC) return "";
-    String mac = String(address.toString().c_str());
-    if (mac.length() < 8) return "";
-    uint32_t oui = 0;
-    for (int i = 0; i < 8; i++) {
-        char c = mac.charAt(i);
-        if (c == ':') continue;
-        uint32_t nibble = 0;
-        if (c >= '0' && c <= '9') nibble = c - '0';
-        else if (c >= 'A' && c <= 'F') nibble = c - 'A' + 10;
-        else if (c >= 'a' && c <= 'f') nibble = c - 'a' + 10;
-        oui = (oui << 4) | nibble;
-    }
+    const uint8_t *val = address.getVal();
+    if (!val) return "";
+    uint32_t oui = ((uint32_t)val[5] << 16) | ((uint32_t)val[4] << 8) | val[3];
     return resolveBleOui(oui, allowSdLookup);
 }
 

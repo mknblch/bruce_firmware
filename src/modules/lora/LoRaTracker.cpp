@@ -249,15 +249,30 @@ void trackLoRaTarget(const String &targetMacOrId, const String &label) {
     uint8_t rxBuffer[256];
     uint32_t lastUiDraw = 0;
 
+    // Drain any leftover Enter/Esc press from previous menu
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+
     while (true) {
         if (check(EscPress)) break;
 
-        char key = checkLetterShortcutPress();
-        if (key == 'c' || key == 'C') {
-            packetCount = 0;
-            emaInitialized = false;
-            peakFraction = 0.0f;
-            if (hasImu) bestHeading.reset();
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            if (k.del || k.exit_key) {
+                break;
+            }
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == '`') {
+                    goto exit_tracker;
+                } else if (lowerKey == 'c') {
+                    packetCount = 0;
+                    emaInitialized = false;
+                    peakFraction = 0.0f;
+                    if (hasImu) bestHeading.reset();
+                }
+            }
         }
 
         if (hasImu) {
@@ -415,6 +430,7 @@ void trackLoRaTarget(const String &targetMacOrId, const String &label) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+exit_tracker:
     stopLoRaRadio();
 }
 

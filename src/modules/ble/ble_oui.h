@@ -15,6 +15,14 @@
 //=============================================================================
 
 /**
+ * High-speed, zero-allocation vendor name lookup from PROGMEM Flash table.
+ * Thread-safe for use inside NimBLE scan callbacks.
+ */
+const char *getBleCompanyIdName(uint16_t companyId);
+const char *getBleOuiName(uint32_t oui24);
+const char *getBleOuiNameFromMacBytes(const uint8_t *macBytes);
+
+/**
  * Resolve vendor name from advertised device packet (SIG Company ID in Mfg Data)
  * or Public MAC address (OUI).
  * 

@@ -589,6 +589,16 @@ void setup() {
         bruceConfig.setStartupApp("");
     }
 
+    // Drain any residual keypresses accumulated during boot
+    NextPress = false;
+    PrevPress = false;
+    UpPress = false;
+    DownPress = false;
+    SelPress = false;
+    EscPress = false;
+    AnyKeyPress = false;
+    KeyStroke.Clear();
+
     RAM_LOG("setup-end");
 }
 

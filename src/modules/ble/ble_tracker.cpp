@@ -7,85 +7,435 @@
 #include "core/utils.h"
 #include "modules/ble/ble_common.h"
 #include <NimBLEClient.h>
+#include "core/radio_mem.h"
 #if !defined(LITE_VERSION)
 #include "BLE_Suite.h"
+#include "modules/ble/ble_oui.h"
 #include "modules/ble/gatt_explorer.h"
 #endif
 #include <math.h>
 
 namespace {
 
-#if !defined(LITE_VERSION)
-// Reuses the GATT Explorer's live scan + picker screen (device count, RSSI bars, minRSSI /
-// connectable / public-random settings, cancelable with ESC/SEL) instead of a bespoke
-// passive-only scanner - picking a device locks onto its MAC instead of entering GATT
-// service exploration.
-void bleTrackerPickFromScan() {
-    String pickedName, pickedMac;
-    int pickedRssi = 0;
-    uint8_t pickedAddrType = 0;
-    if (gattScanAndPick(pickedName, pickedMac, pickedRssi, pickedAddrType)) {
-        bleTrackerLockTarget(pickedName, pickedMac);
-    }
-}
-#else
-// LITE_VERSION has no GATT Explorer to reuse, so fall back to a plain passive
-// (setActiveScan(false)) one-shot scan rendered as a pick-list, mirroring ble_scan()'s
-// options/loopOptions() flow in ble_common.cpp - no scan requests are ever sent, and picking
-// an entry locks onto its MAC instead of opening the read-only "info" screen.
-void bleTrackerPickFromScan() {
-    displayTextLine("Scanning (passive)..");
+struct BleTrackerDiscoveredDevice {
+    uint8_t macBytes[6];
+    char macStr[18];
+    char name[32];
+    char vendor[24];
+    int8_t rssi;
+    uint8_t addrType; // 0 = Public, 1 = Random
+    uint32_t lastSeenMs;
+    uint16_t packetCount;
+};
 
-    std::vector<Option> scanOptions;
-    scanOptions.reserve(MAX_DISPLAY_DEVICES);
+constexpr size_t BLE_TRACKER_MAX_SCAN_DEVICES = 40;
+
+struct BleTrackerScannerState {
+    BleTrackerDiscoveredDevice devices[BLE_TRACKER_MAX_SCAN_DEVICES];
+    size_t count = 0;
+    uint32_t totalPackets = 0;
+    SemaphoreHandle_t mutex = nullptr;
+    volatile bool active = false;
+
+    void reset() {
+        if (!mutex) mutex = xSemaphoreCreateMutex();
+        if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+            count = 0;
+            totalPackets = 0;
+            active = true;
+            xSemaphoreGive(mutex);
+        }
+    }
+
+    void stop() {
+        if (!mutex) return;
+        if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+            active = false;
+            xSemaphoreGive(mutex);
+        }
+    }
+};
+
+static BleTrackerScannerState g_trackerScanState;
+
+class BleTrackerLiveScanCallbacks : public NimBLEScanCallbacks {
+public:
+    void onDiscovered(const NimBLEAdvertisedDevice *dev) override {}
+
+    void onResult(const NimBLEAdvertisedDevice *dev) override {
+        if (!dev || !g_trackerScanState.active) return;
+        if (!g_trackerScanState.mutex) return;
+
+        // Try-take mutex with 0 timeout so NimBLE host task is never delayed
+        if (xSemaphoreTake(g_trackerScanState.mutex, 0) != pdTRUE) return;
+
+        g_trackerScanState.totalPackets++;
+
+        const uint8_t *devVal = dev->getAddress().getVal();
+        int8_t rssi = dev->getRSSI();
+        uint32_t now = millis();
+
+        // Check if device already exists in list (fast 6-byte binary comparison)
+        for (size_t i = 0; i < g_trackerScanState.count; i++) {
+            if (memcmp(g_trackerScanState.devices[i].macBytes, devVal, 6) == 0) {
+                g_trackerScanState.devices[i].rssi = rssi;
+                g_trackerScanState.devices[i].lastSeenMs = now;
+                g_trackerScanState.devices[i].packetCount++;
+
+                if (g_trackerScanState.devices[i].name[0] == '\0' && dev->haveName()) {
+                    std::string n = dev->getName();
+                    if (!n.empty() && n.length() < sizeof(g_trackerScanState.devices[i].name)) {
+                        strncpy(g_trackerScanState.devices[i].name, n.c_str(), sizeof(g_trackerScanState.devices[i].name) - 1);
+                        g_trackerScanState.devices[i].name[sizeof(g_trackerScanState.devices[i].name) - 1] = '\0';
+                    }
+                }
+                if (g_trackerScanState.devices[i].vendor[0] == '\0') {
+#if !defined(LITE_VERSION)
+                    if (dev->haveManufacturerData()) {
+                        std::string mfg = dev->getManufacturerData();
+                        if (mfg.length() >= 2) {
+                            uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
+                            const char *comp = getBleCompanyIdName(companyId);
+                            if (comp) {
+                                strncpy(g_trackerScanState.devices[i].vendor, comp, sizeof(g_trackerScanState.devices[i].vendor) - 1);
+                                g_trackerScanState.devices[i].vendor[sizeof(g_trackerScanState.devices[i].vendor) - 1] = '\0';
+                            }
+                        }
+                    }
+                    if (g_trackerScanState.devices[i].vendor[0] == '\0' && dev->getAddressType() == BLE_ADDR_PUBLIC) {
+                        const char *oui = getBleOuiNameFromMacBytes(devVal);
+                        if (oui) {
+                            strncpy(g_trackerScanState.devices[i].vendor, oui, sizeof(g_trackerScanState.devices[i].vendor) - 1);
+                            g_trackerScanState.devices[i].vendor[sizeof(g_trackerScanState.devices[i].vendor) - 1] = '\0';
+                        }
+                    }
+#endif
+                }
+                xSemaphoreGive(g_trackerScanState.mutex);
+                return;
+            }
+        }
+
+        // New device: append if space available
+        if (g_trackerScanState.count < BLE_TRACKER_MAX_SCAN_DEVICES) {
+            auto &d = g_trackerScanState.devices[g_trackerScanState.count];
+            memcpy(d.macBytes, devVal, 6);
+            snprintf(d.macStr, sizeof(d.macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     devVal[5], devVal[4], devVal[3], devVal[2], devVal[1], devVal[0]);
+
+            if (dev->haveName()) {
+                std::string n = dev->getName();
+                if (!n.empty()) {
+                    strncpy(d.name, n.c_str(), sizeof(d.name) - 1);
+                    d.name[sizeof(d.name) - 1] = '\0';
+                } else {
+                    d.name[0] = '\0';
+                }
+            } else {
+                d.name[0] = '\0';
+            }
+
+            d.vendor[0] = '\0';
+#if !defined(LITE_VERSION)
+            if (dev->haveManufacturerData()) {
+                std::string mfg = dev->getManufacturerData();
+                if (mfg.length() >= 2) {
+                    uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
+                    const char *comp = getBleCompanyIdName(companyId);
+                    if (comp) {
+                        strncpy(d.vendor, comp, sizeof(d.vendor) - 1);
+                        d.vendor[sizeof(d.vendor) - 1] = '\0';
+                    }
+                }
+            }
+            if (d.vendor[0] == '\0' && dev->getAddressType() == BLE_ADDR_PUBLIC) {
+                const char *oui = getBleOuiNameFromMacBytes(devVal);
+                if (oui) {
+                    strncpy(d.vendor, oui, sizeof(d.vendor) - 1);
+                    d.vendor[sizeof(d.vendor) - 1] = '\0';
+                }
+            }
+#endif
+
+            d.rssi = rssi;
+            d.addrType = dev->getAddressType();
+            d.lastSeenMs = now;
+            d.packetCount = 1;
+            g_trackerScanState.count++;
+        }
+
+        xSemaphoreGive(g_trackerScanState.mutex);
+    }
+};
+
+static BleTrackerLiveScanCallbacks g_trackerLiveScanCallbacks;
+
+// Dedicated, thread-safe Live Scanner for BLE Tracker.
+// Uses passive continuous scanning with zero heap allocations on the NimBLE host task,
+// capturing all nearby trackers, beacons (AirTags, Tile, SmartTags), and standard BLE devices.
+void bleTrackerPickFromScan() {
+    // 1. Drain residual keys from menu selection
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+    _getKeyPress();
+
+    // 2. Check RAM availability
+    if (!radioHasMemForBle()) {
+        displayError("Low RAM: free WiFi/SD first", true);
+        return;
+    }
 
     bool bleWasActiveBefore = BLEConnected || (BLEDevice::getServer() != nullptr);
+#if !defined(LITE_VERSION)
+    bleWasActiveBefore =
+        bleWasActiveBefore || BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0;
+#endif
 
+    // 3. Setup BLE scan
     if (!ble_scan_setup() || pBLEScan == nullptr) {
         displayError("Failed to init BLE scan");
         return;
     }
 
-    pBLEScan->setActiveScan(false); // passive: never send scan requests
+    g_trackerScanState.reset();
+
+    pBLEScan->setScanCallbacks(&g_trackerLiveScanCallbacks, true);
+    pBLEScan->setActiveScan(false); // passive: captures all trackers/beacons without transmitting
+    pBLEScan->setInterval(100);
+    pBLEScan->setWindow(99);
+    pBLEScan->setDuplicateFilter(false);
+    pBLEScan->setMaxResults(0);
     pBLEScan->clearResults();
 
-    try {
-        BLEScanResults foundDevices = pBLEScan->getResults(scanTime * 1000, false);
-        int deviceCount = foundDevices.getCount();
-        int maxToProcess = min(deviceCount, MAX_DISPLAY_DEVICES);
+    drawMainBorder(true);
 
-        for (int i = 0; i < maxToProcess; i++) {
-            const NimBLEAdvertisedDevice *advertisedDevice = foundDevices.getDevice(i);
-            if (!advertisedDevice) continue;
+    pBLEScan->start(0, false);
 
-            String name = advertisedDevice->getName().c_str();
-            String mac = advertisedDevice->getAddress().toString().c_str();
-            String rssi = String(advertisedDevice->getRSSI());
-            String title = (name.isEmpty() ? mac : name) + " (" + rssi + "dBm)";
+    int selectedIdx = 0;
+    int scrollOffset = 0;
+    uint32_t lastUiUpdate = 0;
+    int animFrame = 0;
+    const char *spinner = "|/-\\";
+    bool needsRedraw = true;
+    bool scanPaused = false;
+    String pickedName = "";
+    String pickedMac = "";
+    bool devicePicked = false;
 
-            scanOptions.emplace_back(title, [=]() { bleTrackerLockTarget(name.isEmpty() ? mac : name, mac); });
+    // Snapshot buffer for UI rendering to minimize lock hold time (static to protect task stack)
+    static BleTrackerDiscoveredDevice uiDevices[BLE_TRACKER_MAX_SCAN_DEVICES];
+    size_t uiCount = 0;
+    uint32_t uiPackets = 0;
+
+    int lineH = 8 * FP + 4;
+    int headerY = BORDER_PAD_Y;
+    int listStartY = headerY + lineH + 4;
+    int footerY = tftHeight - BORDER_PAD_Y - lineH;
+    int visibleRows = (footerY - listStartY) / lineH;
+    if (visibleRows < 1) visibleRows = 1;
+
+    while (true) {
+        // Handle physical buttons & encoder
+        bool up = check(PrevPress) || check(UpPress);
+        bool down = check(NextPress) || check(DownPress);
+        bool sel = check(SelPress);
+        bool esc = check(EscPress);
+
+#if defined(HAS_ENCODER)
+        int encSteps = getEncoderSteps();
+        if (encSteps > 0) down = true;
+        else if (encSteps < 0) up = true;
+#endif
+
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            if (k.del || k.exit_key) {
+                esc = true;
+            }
+            if (k.enter) {
+                sel = true;
+            }
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == '`' || lowerKey == 'q' || lowerKey == 0x1B) {
+                    esc = true;
+                } else if (lowerKey == 's') {
+                    sel = true;
+                } else if (lowerKey == 'p' || lowerKey == ' ') {
+                    scanPaused = !scanPaused;
+                    if (scanPaused) {
+                        pBLEScan->stop();
+                    } else {
+                        pBLEScan->start(0, false);
+                    }
+                    needsRedraw = true;
+                } else if (lowerKey == 'c') {
+                    g_trackerScanState.reset();
+                    selectedIdx = 0;
+                    scrollOffset = 0;
+                    needsRedraw = true;
+                }
+            }
         }
 
-        if (scanOptions.size() >= MAX_DISPLAY_DEVICES) { scanOptions.emplace_back("... and more devices", []() {}); }
-    } catch (...) {
-        displayError("BLE scan error");
-        if (pBLEScan) pBLEScan->clearResults();
-        return;
+        if (esc) {
+            break;
+        }
+
+        // Copy snapshot from scanner state under lock
+        if (millis() - lastUiUpdate > 100 || needsRedraw) {
+            if (g_trackerScanState.mutex && xSemaphoreTake(g_trackerScanState.mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                uiCount = g_trackerScanState.count;
+                uiPackets = g_trackerScanState.totalPackets;
+                memcpy(uiDevices, g_trackerScanState.devices, uiCount * sizeof(BleTrackerDiscoveredDevice));
+                xSemaphoreGive(g_trackerScanState.mutex);
+            }
+            needsRedraw = true;
+        }
+
+        if (up) {
+            if (selectedIdx > 0) {
+                selectedIdx--;
+                needsRedraw = true;
+            }
+        }
+        if (down) {
+            if (selectedIdx + 1 < (int)uiCount) {
+                selectedIdx++;
+                needsRedraw = true;
+            }
+        }
+
+        if (sel && uiCount > 0 && selectedIdx >= 0 && selectedIdx < (int)uiCount) {
+            pickedMac = String(uiDevices[selectedIdx].macStr);
+            if (uiDevices[selectedIdx].name[0] != '\0') {
+                pickedName = String(uiDevices[selectedIdx].name);
+            } else if (uiDevices[selectedIdx].vendor[0] != '\0') {
+                pickedName = String(uiDevices[selectedIdx].vendor) + " (" + pickedMac.substring(9) + ")";
+            } else {
+                pickedName = pickedMac;
+            }
+            devicePicked = true;
+            break;
+        }
+
+        // Keep scroll offset aligned with selected index
+        if (selectedIdx < scrollOffset) {
+            scrollOffset = selectedIdx;
+        }
+        if (selectedIdx >= scrollOffset + visibleRows) {
+            scrollOffset = selectedIdx - visibleRows + 1;
+        }
+
+        // Render UI
+        uint32_t now = millis();
+        if (needsRedraw || (now - lastUiUpdate >= 120)) {
+            lastUiUpdate = now;
+            needsRedraw = false;
+            animFrame = (animFrame + 1) % 4;
+
+            // 1. Header (Title & Status)
+            tft.setTextSize(FP);
+            tft.fillRect(BORDER_PAD_X, headerY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+            String title = "BLE LIVE SCAN ";
+            title += scanPaused ? "[PAUSED]" : ("[" + String(spinner[animFrame]) + "]");
+            tft.drawString(title, BORDER_PAD_X, headerY);
+
+            String countStr = "Dev: " + String(uiCount) + " Pkt: " + String(uiPackets);
+            tft.drawRightString(countStr, tftWidth - BORDER_PAD_X, headerY, 1);
+
+            tft.drawFastHLine(BORDER_PAD_X, headerY + lineH - 1, tftWidth - 2 * BORDER_PAD_X, TFT_DARKGREY);
+
+            // 2. Device List rows
+            for (int r = 0; r < visibleRows; r++) {
+                int itemIdx = scrollOffset + r;
+                int rowY = listStartY + r * lineH;
+
+                if (itemIdx < (int)uiCount) {
+                    bool isSel = (itemIdx == selectedIdx);
+                    uint16_t bg = isSel ? bruceConfig.priColor : bruceConfig.bgColor;
+                    uint16_t fg = isSel ? bruceConfig.bgColor : bruceConfig.priColor;
+
+                    tft.fillRect(BORDER_PAD_X, rowY, tftWidth - 2 * BORDER_PAD_X, lineH, bg);
+                    tft.setTextColor(fg, bg);
+
+                    // Draw RSSI signal indicator
+                    int8_t rssi = uiDevices[itemIdx].rssi;
+                    int rssiX = BORDER_PAD_X + 2;
+                    int bars = (rssi > -60) ? 4 : ((rssi > -75) ? 3 : ((rssi > -88) ? 2 : 1));
+                    for (int b = 0; b < 4; b++) {
+                        int h = 2 + b * 2;
+                        if (b < bars) {
+                            tft.fillRect(rssiX + b * 3, rowY + lineH - 3 - h, 2, h, fg);
+                        } else {
+                            tft.drawFastHLine(rssiX + b * 3, rowY + lineH - 4, 2, fg);
+                        }
+                    }
+
+                    int textX = rssiX + 16;
+                    int maxTextW = tftWidth - textX - BORDER_PAD_X - 4;
+
+                    String devLabel = "";
+                    if (uiDevices[itemIdx].name[0] != '\0') {
+                        devLabel = String(uiDevices[itemIdx].name);
+                    } else if (uiDevices[itemIdx].vendor[0] != '\0') {
+                        devLabel = "[" + String(uiDevices[itemIdx].vendor) + "] " + String(uiDevices[itemIdx].macStr);
+                    } else {
+                        devLabel = String(uiDevices[itemIdx].macStr);
+                    }
+
+                    devLabel += " " + String(rssi) + "d";
+                    if (uiDevices[itemIdx].addrType == BLE_ADDR_PUBLIC) {
+                        devLabel += " [P]";
+                    }
+
+                    // Truncate to fit screen width
+                    while (devLabel.length() > 3 && tft.textWidth(devLabel.c_str()) > maxTextW) {
+                        devLabel.remove(devLabel.length() - 1);
+                    }
+                    tft.drawString(devLabel, textX, rowY + 1);
+                } else {
+                    tft.fillRect(BORDER_PAD_X, rowY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+                    if (uiCount == 0 && r == 0) {
+                        tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
+                        tft.drawString("Listening for BLE beacons...", BORDER_PAD_X + 4, rowY + 1);
+                    }
+                }
+            }
+
+            // 3. Footer
+            tft.fillRect(BORDER_PAD_X, footerY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+            tft.setTextColor(getColorVariation(bruceConfig.priColor, 8, -1), bruceConfig.bgColor);
+            tft.drawCentreString("ENTER/SEL lock   ESC back", tftWidth / 2, footerY + 1, 1);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(25));
     }
 
-    if (pBLEScan) pBLEScan->stop();
-
-    if (!bleWasActiveBefore) { stopBLEStack(); }
-
-    if (scanOptions.empty()) {
-        displayError("No devices found");
-        delay(1000);
-        return;
+    // Stop scanner cleanly
+    g_trackerScanState.stop();
+    if (pBLEScan) {
+        pBLEScan->stop();
+        pBLEScan->clearResults();
+        pBLEScan->setScanCallbacks(nullptr);
     }
 
-    loopOptions(scanOptions, MENU_TYPE_SUBMENU, "Select Target");
+    if (!bleWasActiveBefore) {
+        stopBLEStack();
+    }
+
+    // Drain keys
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+    _getKeyPress();
+
+    if (devicePicked && !pickedMac.isEmpty()) {
+        bleTrackerLockTarget(pickedName, pickedMac);
+    }
 }
-#endif
 
 // Free-form label prompt reused by both the "save as favorite" flow below and (in a later
 // revision) the favorites list itself.

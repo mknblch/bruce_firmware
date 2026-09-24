@@ -129,6 +129,11 @@ void showLoRaPacketInspector(const LoRaPacket &pkt) {
     bool loop = true;
     bool needsRedraw = true;
 
+    // Drain any leftover Enter/Esc press from previous menu
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+
     while (loop) {
         if (needsRedraw) {
             tft.fillScreen(bruceConfig.bgColor);
@@ -154,38 +159,68 @@ void showLoRaPacketInspector(const LoRaPacket &pkt) {
                 }
             }
 
-            printCenterFootnote("[UP/DN]Scroll [T]Track [ESC]Back");
-            needsRedraw = false;
-        }
+        printCenterFootnote("[UP/DN]Scroll [T]Track [ESC]Back");
+        needsRedraw = false;
+    }
 
-        if (check(NextPress) || check(DownPress)) {
-            int lineH = FP * LH + 1;
-            int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
-            if (scroll + maxLines < (int)lines.size()) {
-                scroll++;
-                needsRedraw = true;
-            }
+#if defined(HAS_ENCODER)
+    int encSteps = (int)drainRotarySteps();
+    if (encSteps > 0) {
+        int lineH = FP * LH + 1;
+        int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
+        if (scroll + maxLines < (int)lines.size()) {
+            scroll = min((int)lines.size() - maxLines, scroll + encSteps);
+            if (scroll < 0) scroll = 0;
+            needsRedraw = true;
         }
-        if (check(PrevPress) || check(UpPress)) {
-            if (scroll > 0) {
-                scroll--;
-                needsRedraw = true;
-            }
+    } else if (encSteps < 0) {
+        if (scroll > 0) {
+            scroll = max(0, scroll + encSteps);
+            needsRedraw = true;
         }
-        if (check(EscPress)) {
+    }
+#endif
+
+    if (check(NextPress) || check(DownPress) || check(NextPagePress)) {
+        int lineH = FP * LH + 1;
+        int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
+        if (scroll + maxLines < (int)lines.size()) {
+            scroll++;
+            needsRedraw = true;
+        }
+    }
+    if (check(PrevPress) || check(UpPress) || check(PrevPagePress)) {
+        if (scroll > 0) {
+            scroll--;
+            needsRedraw = true;
+        }
+    }
+    if (check(EscPress) || check(SelPress)) {
+        loop = false;
+        break;
+    }
+    keyStroke k = _getKeyPress();
+    if (k.pressed || !k.word.empty()) {
+        if (k.del || k.exit_key) {
             loop = false;
             break;
         }
-        char key = checkLetterShortcutPress();
-        if (key == 't' || key == 'T') {
-            if (pkt.sender.length() > 0) {
-                trackLoRaTarget(pkt.sender, pkt.sender);
+        for (auto ch : k.word) {
+            char lowerKey = tolower(ch);
+            if (lowerKey == '`') {
                 loop = false;
                 break;
+            } else if (lowerKey == 't') {
+                if (pkt.sender.length() > 0) {
+                    trackLoRaTarget(pkt.sender, pkt.sender);
+                    loop = false;
+                    break;
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(15));
     }
+    vTaskDelay(pdMS_TO_TICKS(10));
+}
 }
 
 void showLoRaNodeInspector(LoRaNodeRecord &node) {
@@ -194,45 +229,73 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
     bool loop = true;
     bool needsRedraw = true;
 
+    // Drain any leftover Enter/Esc press from previous menu
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+
     drawMainBorder(true);
 
     while (loop) {
-        if (check(EscPress)) {
+        bool up = check(PrevPress) || check(UpPress) || check(PrevPagePress);
+        bool down = check(NextPress) || check(DownPress) || check(NextPagePress);
+        bool sel = check(SelPress);
+        bool esc = check(EscPress);
+
+#if defined(HAS_ENCODER)
+        int encSteps = (int)drainRotarySteps();
+        if (encSteps > 0) down = true;
+        else if (encSteps < 0) up = true;
+#endif
+
+        if (esc) {
             break;
         }
 
-        if (check(PrevPress) || check(UpPress)) {
+        if (up) {
             if (selectedPktIdx > 0) {
                 selectedPktIdx--;
                 needsRedraw = true;
             }
         }
-        if (check(NextPress) || check(DownPress)) {
+        if (down) {
             if (selectedPktIdx + 1 < (int)node.packets.size()) {
                 selectedPktIdx++;
                 needsRedraw = true;
             }
         }
 
-        if (check(SelPress)) {
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            if (k.del || k.exit_key) {
+                break;
+            }
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == '`') {
+                    loop = false;
+                    break;
+                } else if (lowerKey == 't') {
+                    trackLoRaTarget(node.address, node.displayName);
+                    drawMainBorder(true);
+                    needsRedraw = true;
+                } else if (lowerKey == 'e') {
+                    String path = "";
+                    if (exportLoRaPacketsToPcap(node.packets, path)) {
+                        displaySuccess("PCAP: " + path);
+                        drawMainBorder(true);
+                        needsRedraw = true;
+                    }
+                }
+            }
+        }
+        if (!loop) break;
+
+        if (sel) {
             if (!node.packets.empty() && selectedPktIdx >= 0 && selectedPktIdx < (int)node.packets.size()) {
                 // Show newest first in index mapping
                 size_t actualIdx = node.packets.size() - 1 - selectedPktIdx;
                 showLoRaPacketInspector(node.packets[actualIdx]);
-                drawMainBorder(true);
-                needsRedraw = true;
-            }
-        }
-
-        char key = checkLetterShortcutPress();
-        if (key == 't' || key == 'T') {
-            trackLoRaTarget(node.address, node.displayName);
-            drawMainBorder(true);
-            needsRedraw = true;
-        } else if (key == 'e' || key == 'E') {
-            String path = "";
-            if (exportLoRaPacketsToPcap(node.packets, path)) {
-                displaySuccess("PCAP: " + path);
                 drawMainBorder(true);
                 needsRedraw = true;
             }
@@ -363,29 +426,83 @@ void runLoRaSniffer() {
     uint32_t totalPackets = gLoRaCapturedPackets.size();
     uint32_t lastUiUpdate = 0;
     bool needsRedraw = true;
+    bool statsChanged = false;
 
     drawMainBorder(true);
     uint8_t rxBuffer[256];
 
+    // Drain any leftover Enter/Esc press from previous menu
+    vTaskDelay(pdMS_TO_TICKS(150));
+    check(SelPress);
+    check(EscPress);
+
     while (true) {
-        if (check(EscPress)) {
+        bool up = check(PrevPress) || check(UpPress) || check(PrevPagePress);
+        bool down = check(NextPress) || check(DownPress) || check(NextPagePress);
+        bool sel = check(SelPress);
+        bool esc = check(EscPress);
+
+#if defined(HAS_ENCODER)
+        int encSteps = (int)drainRotarySteps();
+        if (encSteps > 0) down = true;
+        else if (encSteps < 0) up = true;
+#endif
+
+        if (esc) {
             break;
         }
 
-        if (check(PrevPress) || check(UpPress)) {
+        if (up) {
             if (selectedIdx > 0) {
                 selectedIdx--;
                 needsRedraw = true;
             }
         }
-        if (check(NextPress) || check(DownPress)) {
+        if (down) {
             if (selectedIdx + 1 < (int)gLoRaNodes.size()) {
                 selectedIdx++;
                 needsRedraw = true;
             }
         }
 
-        if (check(SelPress)) {
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            if (k.del || k.exit_key) {
+                break;
+            }
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == '`') {
+                    goto exit_sniffer;
+                } else if (lowerKey == 'p') {
+                    isPaused = !isPaused;
+                    needsRedraw = true;
+                } else if (lowerKey == 'c') {
+                    gLoRaCapturedPackets.clear();
+                    gLoRaNodes.clear();
+                    selectedIdx = 0;
+                    scrollOffset = 0;
+                    totalPackets = 0;
+                    needsRedraw = true;
+                } else if (lowerKey == 'e') {
+                    String path = "";
+                    if (exportLoRaPacketsToPcap(gLoRaCapturedPackets, path)) {
+                        displaySuccess("PCAP: " + path);
+                        drawMainBorder(true);
+                        needsRedraw = true;
+                    }
+                } else if (lowerKey == 't' && !gLoRaNodes.empty()) {
+                    if (selectedIdx >= 0 && selectedIdx < (int)gLoRaNodes.size()) {
+                        pcap.end();
+                        stopLoRaRadio();
+                        trackLoRaTarget(gLoRaNodes[selectedIdx].address, gLoRaNodes[selectedIdx].displayName);
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (sel) {
             if (!gLoRaNodes.empty() && selectedIdx >= 0 && selectedIdx < (int)gLoRaNodes.size()) {
                 showLoRaNodeInspector(gLoRaNodes[selectedIdx]);
                 drawMainBorder(true);
@@ -394,33 +511,6 @@ void runLoRaSniffer() {
                 // If empty list, toggle pause/action
                 isPaused = !isPaused;
                 needsRedraw = true;
-            }
-        }
-
-        char shortcut = checkLetterShortcutPress();
-        if (shortcut == 'p' || shortcut == 'P') {
-            isPaused = !isPaused;
-            needsRedraw = true;
-        } else if (shortcut == 'c' || shortcut == 'C') {
-            gLoRaCapturedPackets.clear();
-            gLoRaNodes.clear();
-            selectedIdx = 0;
-            scrollOffset = 0;
-            totalPackets = 0;
-            needsRedraw = true;
-        } else if (shortcut == 'e' || shortcut == 'E') {
-            String path = "";
-            if (exportLoRaPacketsToPcap(gLoRaCapturedPackets, path)) {
-                displaySuccess("PCAP: " + path);
-                drawMainBorder(true);
-                needsRedraw = true;
-            }
-        } else if ((shortcut == 't' || shortcut == 'T') && !gLoRaNodes.empty()) {
-            if (selectedIdx >= 0 && selectedIdx < (int)gLoRaNodes.size()) {
-                pcap.end();
-                stopLoRaRadio();
-                trackLoRaTarget(gLoRaNodes[selectedIdx].address, gLoRaNodes[selectedIdx].displayName);
-                return;
             }
         }
 
@@ -453,14 +543,15 @@ void runLoRaSniffer() {
                     pcap.writePacket(pkt);
                 }
 
-                needsRedraw = true;
+                statsChanged = true;
             }
         }
 
         // Render UI
-        if (millis() - lastUiUpdate > 200 || needsRedraw) {
+        if (needsRedraw || ((millis() - lastUiUpdate > 250) && statsChanged)) {
             lastUiUpdate = millis();
             needsRedraw = false;
+            statsChanged = false;
 
             int lineH = FP * LH + 1;
             int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
@@ -518,6 +609,7 @@ void runLoRaSniffer() {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+exit_sniffer:
     if (pcapActive) {
         pcap.end();
     }
