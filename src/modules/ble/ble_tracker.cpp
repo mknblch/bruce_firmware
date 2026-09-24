@@ -21,9 +21,12 @@ namespace {
 // passive-only scanner - picking a device locks onto its MAC instead of entering GATT
 // service exploration.
 void bleTrackerPickFromScan() {
-    gattScanAndPick([](const String &name, const String &mac, int rssi, uint8_t addrType) {
-        bleTrackerLockTarget(name, mac);
-    });
+    String pickedName, pickedMac;
+    int pickedRssi = 0;
+    uint8_t pickedAddrType = 0;
+    if (gattScanAndPick(pickedName, pickedMac, pickedRssi, pickedAddrType)) {
+        bleTrackerLockTarget(pickedName, pickedMac);
+    }
 }
 #else
 // LITE_VERSION has no GATT Explorer to reuse, so fall back to a plain passive
@@ -102,13 +105,16 @@ struct BleTrackerHistory {
     size_t head = 0; // next write index
     size_t count = 0;
     SemaphoreHandle_t mutex = nullptr;
-    String targetMac;
+    uint8_t targetMacBytes[6] = {0};
+    volatile bool hasTarget = false;
     volatile bool active = false;
 
     void begin(const String &mac) {
         if (!mutex) mutex = xSemaphoreCreateMutex();
         if (!mutex || !xSemaphoreTake(mutex, portMAX_DELAY)) return;
-        targetMac = mac;
+        NimBLEAddress addr(std::string(mac.c_str()), 0);
+        memcpy(targetMacBytes, addr.getVal(), 6);
+        hasTarget = true;
         head = 0;
         count = 0;
         active = true;
@@ -120,6 +126,7 @@ struct BleTrackerHistory {
     void end() {
         if (!mutex || !xSemaphoreTake(mutex, portMAX_DELAY)) return;
         active = false;
+        hasTarget = false;
         xSemaphoreGive(mutex);
     }
 
@@ -170,11 +177,11 @@ uint16_t headingDegToBucket(float deg) {
 // Persistent onResult() callback (as opposed to ble_scan()'s one-shot getResults()): stays
 // installed for the whole tracking session so every advertisement from the locked MAC,
 // not just the ones caught in a short polling slice, becomes a sample.
+// Fast 6-byte binary comparison with zero dynamic memory allocation on the Bluetooth stack.
 class TrackerScanCallbacks : public NimBLEScanCallbacks {
     void onResult(const NimBLEAdvertisedDevice *device) override {
-        if (!device || !g_history.active) return;
-        String mac = device->getAddress().toString().c_str();
-        if (!mac.equalsIgnoreCase(g_history.targetMac)) return;
+        if (!device || !g_history.active || !g_history.hasTarget) return;
+        if (memcmp(device->getAddress().getVal(), g_history.targetMacBytes, 6) != 0) return;
         g_history.append(device->getRSSI(), g_currentHeadingBucket, TRACK_SRC_ESP32);
     }
 };
@@ -725,7 +732,11 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
     }
 
     g_history.end();
-    if (pBLEScan) pBLEScan->stop();
+    if (pBLEScan) {
+        pBLEScan->stop();
+        pBLEScan->clearResults();
+        pBLEScan->setScanCallbacks(nullptr);
+    }
 
     if (pClient == nullptr && !bleWasActiveBefore) {
 #if !defined(LITE_VERSION)

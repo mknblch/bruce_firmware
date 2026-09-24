@@ -21,12 +21,11 @@ int gattListLoop(
 );
 
 // Runs the GATT Explorer's live scan + picker screen (RSSI bars, device count, cancelable
-// with ESC/SEL) and, when the user selects a device, invokes onPick with its name/MAC/RSSI/
-// address type instead of entering GATT service exploration. Reuses the exact same scan
-// engine and g_gattSettings (minRSSI, connectable/address-type filters, etc.) as the main
-// GATT Explorer menu - see gattSettingsMenu() for the settings screen callers may want to
-// expose alongside this.
-void gattScanAndPick(std::function<void(const String &name, const String &mac, int rssi, uint8_t addrType)> onPick);
+// with ESC/SEL) and, when the user selects a device, returns true and outputs its name/MAC/
+// RSSI/address type. Completely unwinds the scanner UI and stack before returning.
+// Reuses the exact same scan engine and g_gattSettings (minRSSI, connectable/address-type
+// filters, etc.) as the main GATT Explorer menu.
+bool gattScanAndPick(String &outName, String &outMac, int &outRssi, uint8_t &outAddrType);
 
 // Settings screen for the shared scan engine (minRSSI, scan timeout, address-type filter,
 // etc.) - exposed so other features reusing gattScanAndPick() can offer the same tuning menu.

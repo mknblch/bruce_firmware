@@ -700,7 +700,7 @@ static GattExplorerClientCallbacks g_gattClientCallbacks;
 //=============================================================================
 
 static void runContinuousScan(GattFilterMode filterMode);
-static void showDiscoveredDevicesList();
+static int showDiscoveredDevicesList();
 static void exploreGattDevice(GattScannedDevice &device);
 static void browseServicesAndChars(NimBLEClient *pClient, const GattScannedDevice &device);
 static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteCharacteristic *pChar, const String &serviceName);
@@ -713,147 +713,162 @@ static void runAutoDumpAll();
 //=============================================================================
 
 static void runContinuousScan(GattFilterMode filterMode) {
-    g_currentFilter = filterMode;
-    g_scanPackets = 0;
-    gattEnsureScanMutex();
-    if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        g_discoveredDevices.clear();
-        g_hasLatestScanned = false;
-        xSemaphoreGive(g_gattScanMutex);
-    }
-
-    if (!BLEStateManager::initBLE("Bruce-GATT", ESP_PWR_LVL_P9)) {
-        return;
-    }
-
-    NimBLEScan *pScan = NimBLEDevice::getScan();
-    if (!pScan) {
-        displayError("Failed to get BLE scan engine");
-        return;
-    }
-
-    pScan->setScanCallbacks(&g_gattScanCallbacks, true);
-    pScan->setActiveScan(true);
-    pScan->setInterval(100);
-    pScan->setWindow(99);
-    pScan->setDuplicateFilter(false);
-    pScan->setScanResponseTimeout(g_gattSettings.scanRespTimeout);
-    pScan->setMaxResults(0);
-    pScan->clearResults();
-
-    drawMainBorderWithTitle("GATT SCAN (LIVE)");
-
-    // Start scanning indefinitely (duration = 0)
-    pScan->start(0, false);
-    g_scanActive = true;
-
-    uint32_t lastUiUpdate = 0;
-    int animFrame = 0;
-    const char *spinner = "|/-\\";
-
-    while (g_scanActive) {
-        // User abort check: ESC or SEL stops continuous scanning
-        if (check(EscPress) || check(SelPress) || check(PrevPress) || check(NextPress)) {
-            break;
+    while (true) {
+        g_currentFilter = filterMode;
+        g_scanPackets = 0;
+        gattEnsureScanMutex();
+        if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            g_discoveredDevices.clear();
+            g_hasLatestScanned = false;
+            xSemaphoreGive(g_gattScanMutex);
         }
 
-        uint32_t now = millis();
-        if (now - lastUiUpdate > 150) {
-            lastUiUpdate = now;
-            animFrame = (animFrame + 1) % 4;
-
-            int devCount = 0;
-            bool hasLatest = false;
-            GattScannedDevice latestCopy;
-            if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                devCount = (int)g_discoveredDevices.size();
-                hasLatest = g_hasLatestScanned;
-                if (hasLatest) {
-                    latestCopy = g_latestScannedDevice;
-                }
-                xSemaphoreGive(g_gattScanMutex);
-            }
-
-            GattUiGeom g = gattUiGeom();
-            tft.setTextSize(FP);
-
-            // Row 1: Filter info
-            tft.fillRect(BORDER_PAD_X, g.top, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            tft.drawString("Filter: " + String(getFilterModeName(filterMode)), BORDER_PAD_X, g.top);
-
-            // Row 2: Live status & spinner
-            tft.fillRect(BORDER_PAD_X, g.top + 13, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-            tft.setTextColor(TFT_GREEN, bruceConfig.bgColor);
-            tft.drawString(
-                "[" + String(spinner[animFrame]) + "] Scanning... Found: " + String(devCount),
-                BORDER_PAD_X,
-                g.top + 13
-            );
-
-            // Row 3: Packets
-            tft.fillRect(BORDER_PAD_X, g.top + 26, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            tft.drawString("Packets RX: " + String(g_scanPackets), BORDER_PAD_X, g.top + 26);
-
-            // Row 4-5: Latest found device
-            tft.fillRect(BORDER_PAD_X, g.top + 39, tftWidth - 2 * BORDER_PAD_X, 24 * FP, bruceConfig.bgColor);
-            if (hasLatest) {
-                tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-                String devLine = "[" + latestCopy.tag + "] " + latestCopy.name + " (" + String(latestCopy.rssi) + "dBm)";
-                tft.drawString(gattFitText(devLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 39);
-
-                String addrLine = "MAC: " + String(latestCopy.address.toString().c_str()) + " " +
-                                  ((latestCopy.addressType == BLE_ADDR_PUBLIC) ? "[PUB]" : "[RND]");
-                tft.drawString(gattFitText(addrLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 51);
-            } else {
-                tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
-                tft.drawString("Listening for connectable beacons...", BORDER_PAD_X, g.top + 39);
-            }
-
-            // Footer instructions
-            tft.fillRect(BORDER_PAD_X, g.footY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
-            tft.setTextColor(gattDimColor(), bruceConfig.bgColor);
-            tft.drawCentreString("Press [SEL] or [ESC] to Stop", tftWidth / 2, g.footY, 1);
+        if (!BLEStateManager::initBLE("Bruce-GATT", ESP_PWR_LVL_P9)) {
+            return;
         }
 
-        vTaskDelay(30 / portTICK_PERIOD_MS);
-    }
+        NimBLEScan *pScan = NimBLEDevice::getScan();
+        if (!pScan) {
+            displayError("Failed to get BLE scan engine");
+            return;
+        }
 
-    // Stop active scan cleanly and allow controller to settle
-    if (pScan) {
-        pScan->stop();
+        pScan->setScanCallbacks(&g_gattScanCallbacks, true);
+        pScan->setActiveScan(true);
+        pScan->setInterval(100);
+        pScan->setWindow(99);
+        pScan->setDuplicateFilter(false);
+        pScan->setScanResponseTimeout(g_gattSettings.scanRespTimeout);
+        pScan->setMaxResults(0);
         pScan->clearResults();
-    }
-    g_scanActive = false;
-    vTaskDelay(150 / portTICK_PERIOD_MS);
 
-    if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        std::sort(g_discoveredDevices.begin(), g_discoveredDevices.end(), [](const GattScannedDevice &a, const GattScannedDevice &b) {
-            return a.rssi > b.rssi;
-        });
-        xSemaphoreGive(g_gattScanMutex);
-    }
+        drawMainBorderWithTitle("GATT SCAN (LIVE)");
 
-    if (g_discoveredDevices.empty()) {
-        displayWarning("No connectable GATT devices found", true);
-        return;
-    }
+        // Start scanning indefinitely (duration = 0)
+        pScan->start(0, false);
+        g_scanActive = true;
 
-    showDiscoveredDevicesList();
+        uint32_t lastUiUpdate = 0;
+        int animFrame = 0;
+        const char *spinner = "|/-\\";
+
+        while (g_scanActive) {
+            // User abort check: ESC or SEL stops continuous scanning
+            if (check(EscPress) || check(SelPress) || check(PrevPress) || check(NextPress)) {
+                break;
+            }
+
+            uint32_t now = millis();
+            if (now - lastUiUpdate > 150) {
+                lastUiUpdate = now;
+                animFrame = (animFrame + 1) % 4;
+
+                int devCount = 0;
+                bool hasLatest = false;
+                GattScannedDevice latestCopy;
+                if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    devCount = (int)g_discoveredDevices.size();
+                    hasLatest = g_hasLatestScanned;
+                    if (hasLatest) {
+                        latestCopy = g_latestScannedDevice;
+                    }
+                    xSemaphoreGive(g_gattScanMutex);
+                }
+
+                GattUiGeom g = gattUiGeom();
+                tft.setTextSize(FP);
+
+                // Row 1: Filter info
+                tft.fillRect(BORDER_PAD_X, g.top, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+                tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+                tft.drawString("Filter: " + String(getFilterModeName(filterMode)), BORDER_PAD_X, g.top);
+
+                // Row 2: Live status & spinner
+                tft.fillRect(BORDER_PAD_X, g.top + 13, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+                tft.setTextColor(TFT_GREEN, bruceConfig.bgColor);
+                tft.drawString(
+                    "[" + String(spinner[animFrame]) + "] Scanning... Found: " + String(devCount),
+                    BORDER_PAD_X,
+                    g.top + 13
+                );
+
+                // Row 3: Packets
+                tft.fillRect(BORDER_PAD_X, g.top + 26, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+                tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+                tft.drawString("Packets RX: " + String(g_scanPackets), BORDER_PAD_X, g.top + 26);
+
+                // Row 4-5: Latest found device
+                tft.fillRect(BORDER_PAD_X, g.top + 39, tftWidth - 2 * BORDER_PAD_X, 24 * FP, bruceConfig.bgColor);
+                if (hasLatest) {
+                    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+                    String devLine = "[" + latestCopy.tag + "] " + latestCopy.name + " (" + String(latestCopy.rssi) + "dBm)";
+                    tft.drawString(gattFitText(devLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 39);
+
+                    String addrLine = "MAC: " + String(latestCopy.address.toString().c_str()) + " " +
+                                      ((latestCopy.addressType == BLE_ADDR_PUBLIC) ? "[PUB]" : "[RND]");
+                    tft.drawString(gattFitText(addrLine, tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, g.top + 51);
+                } else {
+                    tft.setTextColor(bruceConfig.secColor, bruceConfig.bgColor);
+                    tft.drawString("Listening for connectable beacons...", BORDER_PAD_X, g.top + 39);
+                }
+
+                // Footer instructions
+                tft.fillRect(BORDER_PAD_X, g.footY, tftWidth - 2 * BORDER_PAD_X, 10 * FP, bruceConfig.bgColor);
+                tft.setTextColor(gattDimColor(), bruceConfig.bgColor);
+                tft.drawCentreString("Press [SEL] or [ESC] to Stop", tftWidth / 2, g.footY, 1);
+            }
+
+            vTaskDelay(30 / portTICK_PERIOD_MS);
+        }
+
+        // Stop active scan cleanly and allow controller to settle
+        if (pScan) {
+            pScan->stop();
+            pScan->clearResults();
+            pScan->setScanCallbacks(nullptr);
+        }
+        g_scanActive = false;
+        vTaskDelay(150 / portTICK_PERIOD_MS);
+
+        if (g_gattScanMutex && xSemaphoreTake(g_gattScanMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            std::sort(g_discoveredDevices.begin(), g_discoveredDevices.end(), [](const GattScannedDevice &a, const GattScannedDevice &b) {
+                return a.rssi > b.rssi;
+            });
+            xSemaphoreGive(g_gattScanMutex);
+        }
+
+        if (g_discoveredDevices.empty()) {
+            displayWarning("No connectable GATT devices found", true);
+            return;
+        }
+
+        int chosen = showDiscoveredDevicesList();
+        if (chosen == -2) {
+            // Rescan selected -> loop iteratively without recursion
+            continue;
+        }
+        if (chosen >= 0 && chosen < (int)g_discoveredDevices.size()) {
+            if (g_gattPickCallback) {
+                g_gattPickCallback(g_discoveredDevices[chosen]);
+            } else {
+                exploreGattDevice(g_discoveredDevices[chosen]);
+            }
+        }
+        break;
+    }
 }
 
 //=============================================================================
 // Discovered Devices Interactive List (Compact / FP Font)
 //=============================================================================
 
-static void showDiscoveredDevicesList() {
+static int showDiscoveredDevicesList() {
     int cursor = 0;
 
     while (true) {
         if (g_discoveredDevices.empty()) {
             displayWarning("No devices in list", true);
-            return;
+            return -1;
         }
 
         int totalCount = (int)g_discoveredDevices.size() + 3; // devices + Rescan + Auto-Dump + Back
@@ -900,17 +915,13 @@ static void showDiscoveredDevicesList() {
         int chosen = gattListLoop("GATT TARGETS", totalCount, hint, drawer, &cursor);
 
         if (chosen < 0 || chosen == devCount + 2) {
-            break;
+            return -1;
         } else if (chosen == devCount) {
-            runContinuousScan(g_currentFilter);
+            return -2; // Rescan
         } else if (chosen == devCount + 1) {
             runAutoDumpAll();
         } else if (chosen < devCount) {
-            if (g_gattPickCallback) {
-                g_gattPickCallback(g_discoveredDevices[chosen]);
-                break; // hand control back to the caller instead of exploring GATT services
-            }
-            exploreGattDevice(g_discoveredDevices[chosen]);
+            return chosen; // selected device index
         }
     }
 }
@@ -1918,13 +1929,24 @@ void gattSettingsMenu() {
 // Reusable Scan-And-Pick Entry Point (for other features, e.g. BLE Tracker)
 //=============================================================================
 
-void gattScanAndPick(std::function<void(const String &name, const String &mac, int rssi, uint8_t addrType)> onPick) {
-    g_gattPickCallback = [onPick](const GattScannedDevice &device) {
-        String name = (device.name.length() > 0) ? device.name : String(device.address.toString().c_str());
-        onPick(name, String(device.address.toString().c_str()), device.rssi, device.addressType);
+bool gattScanAndPick(String &outName, String &outMac, int &outRssi, uint8_t &outAddrType) {
+    GattScannedDevice picked;
+    bool hasPick = false;
+    g_gattPickCallback = [&picked, &hasPick](const GattScannedDevice &device) {
+        picked = device;
+        hasPick = true;
     };
     runContinuousScan(g_currentFilter);
     g_gattPickCallback = nullptr;
+
+    if (hasPick) {
+        outName = (picked.name.length() > 0) ? picked.name : String(picked.address.toString().c_str());
+        outMac = String(picked.address.toString().c_str());
+        outRssi = picked.rssi;
+        outAddrType = picked.addressType;
+        return true;
+    }
+    return false;
 }
 
 //=============================================================================
