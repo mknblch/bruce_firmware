@@ -17,43 +17,52 @@
 #include <globals.h>
 
 void BleMenu::optionsMenu() {
-    options.clear();
+    returnToMenu = false;
+    while (true) {
+        if (returnToMenu) {
+            returnToMenu = false;
+            return;
+        }
+
+        std::vector<Option> localOptions;
 #if !defined(LITE_VERSION)
-    if (BLEConnected) {
-        options.push_back({"Disconnect", [=]() {
-                               BLEDevice::deinit();
-                               BLEConnected = false;
-                               delete hid_ble;
-                               hid_ble = nullptr;
-                           }});
-    }
+        if (BLEConnected) {
+            localOptions.push_back({"Disconnect", [=]() {
+                                       BLEDevice::deinit();
+                                       BLEConnected = false;
+                                       delete hid_ble;
+                                       hid_ble = nullptr;
+                                   }});
+        }
+        localOptions.push_back({"Media Cmds", [=]() { MediaCommands(hid_ble, true); }});
+        localOptions.push_back({"BLE Scan", ble_scan});
+        localOptions.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
+        localOptions.push_back({"GATT Explorer", gattExplorerMenu});
+        localOptions.push_back({"GATT Server", gattServerMenu});
+        localOptions.push_back({"RACE Client", raceMainMenu});
+        localOptions.push_back({"iBeacon", [=]() {
+                                   ibeacon("Bruce", "e4c159a0-8c82-11e6-bdf4-0800200c9a66", 0x004C);
+                               }});
+        localOptions.push_back({"Bad BLE", [=]() { ducky_setup(hid_ble, true); }});
+        localOptions.push_back({"BLE Keyboard", [=]() { ducky_keyboard(hid_ble, true); }});
 #endif
-#if !defined(LITE_VERSION)
-    options.push_back({"Media Cmds", [=]() { MediaCommands(hid_ble, true); }});
-    options.push_back({"BLE Scan", ble_scan});
-    options.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
-    options.push_back({"GATT Explorer", gattExplorerMenu});
-    options.push_back({"GATT Server", gattServerMenu});
-    options.push_back({"RACE Client", raceMainMenu});
-    options.push_back({"iBeacon", [=]() {
-                           ibeacon("Bruce", "e4c159a0-8c82-11e6-bdf4-0800200c9a66", 0x004C);
-                       }});
-    options.push_back({"Bad BLE", [=]() { ducky_setup(hid_ble, true); }});
-    options.push_back({"BLE Keyboard", [=]() { ducky_keyboard(hid_ble, true); }});
-#endif
-    options.push_back({"BLE Spam", [=]() { spamMenu(); }});
+        localOptions.push_back({"BLE Spam", [=]() { spamMenu(); }});
 
 #if !defined(LITE_VERSION)
-    options.push_back({"BLE Suite", [=]() { BleSuiteMenu(); }});
-    options.push_back({"Ninebot", [=]() { BLENinebot(); }});
-    options.push_back({"Presenter mode", [=]() { PresenterMode(hid_ble, true); }});
+        localOptions.push_back({"BLE Suite", [=]() { BleSuiteMenu(); }});
+        localOptions.push_back({"Ninebot", [=]() { BLENinebot(); }});
+        localOptions.push_back({"Presenter mode", [=]() { PresenterMode(hid_ble, true); }});
 #else
-    options.push_back({"BLE Sniffer", [=]() { BLE_SnifferMenu(); }});
-    options.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
+        localOptions.push_back({"BLE Sniffer", [=]() { BLE_SnifferMenu(); }});
+        localOptions.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
 #endif
-    addOptionToMainMenu();
+        localOptions.push_back({"Main Menu", []() {}});
 
-    loopOptions(options, MENU_TYPE_SUBMENU, "Bluetooth", 0, false);
+        int selected = loopOptions(localOptions, MENU_TYPE_SUBMENU, "Bluetooth", 0, false);
+        if (selected == -1 || selected == (int)localOptions.size() - 1) {
+            return;
+        }
+    }
 }
 
 void BleMenu::drawIcon(float scale) {

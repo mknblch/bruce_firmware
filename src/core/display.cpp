@@ -891,7 +891,9 @@ int loopOptions(
             }
             if (chosen >= options.size() || !options[chosen].enabled) continue;
             Serial.println("Selected: " + String(options[chosen].label));
-            options[chosen].operation();
+            if (options[chosen].operation) {
+                options[chosen].operation();
+            }
             break;
         }
         // interpreter_start -> running the interpreter

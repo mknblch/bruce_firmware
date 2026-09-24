@@ -66,7 +66,7 @@ void bleTrackerPickFromScan() {
             scanOptions.emplace_back(title, [=]() { bleTrackerLockTarget(name.isEmpty() ? mac : name, mac); });
         }
 
-        if (scanOptions.size() >= MAX_DISPLAY_DEVICES) { scanOptions.emplace_back("... and more devices", nullptr); }
+        if (scanOptions.size() >= MAX_DISPLAY_DEVICES) { scanOptions.emplace_back("... and more devices", []() {}); }
     } catch (...) {
         displayError("BLE scan error");
         if (pBLEScan) pBLEScan->clearResults();
@@ -376,7 +376,7 @@ void bleTrackerLockTarget(const String &label, const String &mac) {
                 bleTrackerRun(mac, saved);
             }});
         }
-        targetOptions.push_back({"< Back", nullptr});
+        targetOptions.push_back({"< Back", []() {}});
 
         int chosen = loopOptions(targetOptions, MENU_TYPE_SUBMENU, "Target Options");
         if (chosen < 0 || chosen == (int)targetOptions.size() - 1) {
@@ -406,7 +406,7 @@ void BleTrackerMenu() {
             });
         }
 
-        trackerOptions.emplace_back("< Back to BLE Menu", nullptr);
+        trackerOptions.emplace_back("< Back to BLE Menu", []() {});
 
         int chosen = loopOptions(trackerOptions, MENU_TYPE_SUBMENU, "BLE Tracker", 0, false);
         if (chosen < 0 || chosen == (int)trackerOptions.size() - 1) {
