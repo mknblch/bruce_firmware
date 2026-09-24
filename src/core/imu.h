@@ -21,6 +21,7 @@
  * instead of hanging or throwing.
  */
 
+#include <functional>
 #include <stdint.h>
 
 // Probes the BMI270 CHIP_ID register on bruceConfigPins.sys_i2c and caches the result.
@@ -40,6 +41,11 @@ bool imu_init();
 // degrees, wrapped to [0, 360). Returns 0 on boards without an IMU or if a read fails, so
 // callers never need to special-case the no-IMU path beyond checking imu_available() once.
 float imu_get_heading_delta_deg();
+
+// Calibrates the gyroscope zero-rate offset by averaging samples over `durationMs`.
+// If `progressCb` is provided, it is invoked with progress percentage (0..100).
+// Resets heading accumulator to 0. Returns true if calibration succeeded.
+bool imu_calibrate(uint32_t durationMs = 600, std::function<void(int)> progressCb = nullptr);
 
 // Resets the internal heading accumulator to 0. Call this whenever a new tracking session
 // starts so stale heading data from a previous session/target doesn't bleed into a new one.

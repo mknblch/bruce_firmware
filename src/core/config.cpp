@@ -904,7 +904,7 @@ void BruceConfig::removeQrCodeEntry(const String &menuName) {
 
 void BruceConfig::addBleTrackerFavorite(const String &label, const String &mac) {
     for (auto &entry : bleTrackerFavorites) {
-        if (entry.mac == mac) {
+        if (entry.mac.equalsIgnoreCase(mac)) {
             entry.label = label;
             saveFile();
             return;
@@ -920,7 +920,7 @@ void BruceConfig::removeBleTrackerFavorite(const String &mac) {
     for (size_t readIndex = 0; readIndex < bleTrackerFavorites.size(); ++readIndex) {
         const BleTrackerTarget &entry = bleTrackerFavorites[readIndex];
 
-        if (entry.mac != mac) {
+        if (!entry.mac.equalsIgnoreCase(mac)) {
             if (writeIndex != readIndex) {
                 bleTrackerFavorites[writeIndex] = std::move(bleTrackerFavorites[readIndex]);
             }
@@ -933,6 +933,20 @@ void BruceConfig::removeBleTrackerFavorite(const String &mac) {
     }
 
     saveFile();
+}
+
+void BruceConfig::clearBleTrackerFavorites() {
+    bleTrackerFavorites.clear();
+    saveFile();
+}
+
+bool BruceConfig::isBleTrackerFavorite(const String &mac) const {
+    for (const auto &entry : bleTrackerFavorites) {
+        if (entry.mac.equalsIgnoreCase(mac)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void BruceConfig::addWebUISession(const String &token) {

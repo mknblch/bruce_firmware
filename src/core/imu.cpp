@@ -67,6 +67,7 @@ bool i2cReadAddr(uint8_t addr, uint8_t reg, uint8_t *buf, size_t len) {
     wire->beginTransmission(addr);
     wire->write(reg);
     if (wire->endTransmission(false) != 0) {
+        wire->endTransmission(true);
         unlockSysI2CBus();
         return false; // no repeated-start support -> bail
     }
@@ -84,36 +85,40 @@ bool i2cWrite(uint8_t reg, uint8_t value) { return i2cWriteAddr(bmi270Addr, reg,
 
 bool i2cRead(uint8_t reg, uint8_t *buf, size_t len) { return i2cReadAddr(bmi270Addr, reg, buf, len); }
 
-// Writes a single <=32-byte chunk starting at `reg` in one I2C transaction (register address
-// byte + up to 32 data bytes), used both for the 2-byte INIT_ADDR_0/1 word-address write and
-// for each 32-byte page of the INIT_DATA config upload below.
-bool i2cWriteChunk(uint8_t reg, const uint8_t *data, size_t len) {
-    TwoWire *wire = getSysI2CBus();
-    if (wire == nullptr) return false;
-    lockSysI2CBus();
-    wire->beginTransmission(bmi270Addr);
-    wire->write(reg);
-    wire->write(data, len);
-    bool ok = wire->endTransmission() == 0;
-    unlockSysI2CBus();
-    return ok;
-}
-
 // Uploads the BMI270 config-file blob, mirroring Bosch's own reference driver (bmi2.c's
 // upload_file()/write_config_file()) exactly: the chip has NO internal auto-incrementing
 // write pointer for INIT_DATA across separate I2C transactions, so every 32-byte page must be
 // preceded by writing that page's 16-bit *word* address (index/2, low nibble then high byte)
-// to INIT_ADDR_0/INIT_ADDR_1. Streaming the whole blob at INIT_DATA without this address step
-// (as an earlier revision did) writes every page to the same location, corrupting the upload.
+// to INIT_ADDR_0/INIT_ADDR_1. The entire upload holds lockSysI2CBus() so background keyboard
+// polling tasks cannot interleave transactions on the shared I2C bus.
 bool bmi270UploadConfigFile(const uint8_t *data, size_t len) {
     constexpr size_t CHUNK = 32;
+    TwoWire *wire = getSysI2CBus();
+    if (wire == nullptr) return false;
+
+    lockSysI2CBus();
     for (size_t off = 0; off < len; off += CHUNK) {
         size_t n = min(CHUNK, len - off);
         uint16_t word = (uint16_t)(off / 2);
         uint8_t addr[2] = {(uint8_t)(word & 0x0F), (uint8_t)(word >> 4)};
-        if (!i2cWriteChunk(REG_INIT_ADDR_0, addr, sizeof(addr))) return false;
-        if (!i2cWriteChunk(REG_INIT_DATA, data + off, n)) return false;
+
+        wire->beginTransmission(bmi270Addr);
+        wire->write(REG_INIT_ADDR_0);
+        wire->write(addr, sizeof(addr));
+        if (wire->endTransmission() != 0) {
+            unlockSysI2CBus();
+            return false;
+        }
+
+        wire->beginTransmission(bmi270Addr);
+        wire->write(REG_INIT_DATA);
+        wire->write(data + off, n);
+        if (wire->endTransmission() != 0) {
+            unlockSysI2CBus();
+            return false;
+        }
     }
+    unlockSysI2CBus();
     return true;
 }
 
@@ -248,4 +253,41 @@ float imu_get_heading_delta_deg() {
 void imu_reset_heading() {
     headingDeg = 0.0f;
     lastSampleMs = millis();
+}
+
+bool imu_calibrate(uint32_t durationMs, std::function<void(int)> progressCb) {
+    if (!detected) return false;
+    if (!initialized && !imu_init()) return false;
+
+    constexpr uint32_t sampleIntervalMs = 10;
+    uint32_t totalSamples = durationMs / sampleIntervalMs;
+    if (totalSamples < 10) totalSamples = 10;
+
+    float sumGz = 0.0f;
+    int samplesTaken = 0;
+    int lastPct = -1;
+
+    for (uint32_t i = 0; i < totalSamples; i++) {
+        uint8_t raw[6];
+        if (i2cRead(REG_GYR_DATA, raw, sizeof(raw))) {
+            int16_t gz = (int16_t)((raw[5] << 8) | raw[4]);
+            sumGz += (float)gz;
+            samplesTaken++;
+        }
+        if (progressCb) {
+            int pct = (int)((i + 1) * 100 / totalSamples);
+            if (pct != lastPct && (pct % 5 == 0 || pct == 100)) {
+                lastPct = pct;
+                progressCb(pct);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(sampleIntervalMs));
+    }
+
+    if (samplesTaken > 0) {
+        gyroZOffset = (sumGz / (float)samplesTaken) * GYRO_DPS_PER_LSB;
+        Serial.printf("DEBUG: IMU - calibrated gyroZOffset=%.4f dps (%d samples)\n", gyroZOffset, samplesTaken);
+    }
+    imu_reset_heading();
+    return (samplesTaken >= (int)(totalSamples / 2));
 }

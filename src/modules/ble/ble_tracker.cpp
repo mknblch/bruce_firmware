@@ -6,6 +6,7 @@
 #include "core/mykeyboard.h"
 #include "core/utils.h"
 #include "modules/ble/ble_common.h"
+#include <NimBLEClient.h>
 #if !defined(LITE_VERSION)
 #include "BLE_Suite.h"
 #include "modules/ble/gatt_explorer.h"
@@ -32,8 +33,8 @@ void bleTrackerPickFromScan() {
 void bleTrackerPickFromScan() {
     displayTextLine("Scanning (passive)..");
 
-    options = {};
-    options.reserve(MAX_DISPLAY_DEVICES);
+    std::vector<Option> scanOptions;
+    scanOptions.reserve(MAX_DISPLAY_DEVICES);
 
     bool bleWasActiveBefore = BLEConnected || (BLEDevice::getServer() != nullptr);
 
@@ -59,10 +60,10 @@ void bleTrackerPickFromScan() {
             String rssi = String(advertisedDevice->getRSSI());
             String title = (name.isEmpty() ? mac : name) + " (" + rssi + "dBm)";
 
-            options.emplace_back(title.c_str(), [=]() { bleTrackerLockTarget(name.isEmpty() ? mac : name, mac); });
+            scanOptions.emplace_back(title, [=]() { bleTrackerLockTarget(name.isEmpty() ? mac : name, mac); });
         }
 
-        if (options.size() >= MAX_DISPLAY_DEVICES) { options.emplace_back("... and more devices", nullptr); }
+        if (scanOptions.size() >= MAX_DISPLAY_DEVICES) { scanOptions.emplace_back("... and more devices", nullptr); }
     } catch (...) {
         displayError("BLE scan error");
         if (pBLEScan) pBLEScan->clearResults();
@@ -73,15 +74,13 @@ void bleTrackerPickFromScan() {
 
     if (!bleWasActiveBefore) { stopBLEStack(); }
 
-    if (options.empty()) {
+    if (scanOptions.empty()) {
         displayError("No devices found");
         delay(1000);
         return;
     }
 
-    addOptionToMainMenu();
-    loopOptions(options);
-    options.clear();
+    loopOptions(scanOptions, MENU_TYPE_SUBMENU, "Select Target");
 }
 #endif
 
@@ -92,7 +91,7 @@ String promptForLabel(const String &defaultLabel) {
     return label.isEmpty() ? defaultLabel : label;
 }
 
-constexpr size_t BLE_TRACKER_RING_SIZE = 32;
+constexpr size_t BLE_TRACKER_RING_SIZE = 64;
 
 // Small mutex-guarded ring buffer fed by TrackerScanCallbacks::onResult() (running on the
 // NimBLE host task) and drained by bleTrackerRun()'s UI loop (running on the main task).
@@ -151,17 +150,19 @@ struct BleTrackerHistory {
 
 BleTrackerHistory g_history;
 
-// Current heading bucket (16 x 22.5deg sectors), refreshed once per UI frame from
+// Current heading bucket (36 x 10deg sectors), refreshed once per UI frame from
 // imu_get_heading_delta_deg() - never read from the scan callback itself, since that runs on
 // the NimBLE host task and must not touch the I2C bus. On boards without an IMU this simply
 // stays 0 forever, which is exactly what every sample should be tagged with in that case.
 volatile uint16_t g_currentHeadingBucket = 0;
 
-constexpr int HEADING_BUCKETS = 16;
-constexpr float HEADING_BUCKET_DEG = 360.0f / HEADING_BUCKETS;
+constexpr int HEADING_BUCKETS = 36;
+constexpr float HEADING_BUCKET_DEG = 360.0f / HEADING_BUCKETS; // 10 degrees per bin
 
 uint16_t headingDegToBucket(float deg) {
-    int bucket = ((int)((deg + HEADING_BUCKET_DEG / 2.0f) / HEADING_BUCKET_DEG)) % HEADING_BUCKETS;
+    float norm = fmodf(deg, 360.0f);
+    if (norm < 0.0f) norm += 360.0f;
+    int bucket = ((int)((norm + HEADING_BUCKET_DEG / 2.0f) / HEADING_BUCKET_DEG)) % HEADING_BUCKETS;
     if (bucket < 0) bucket += HEADING_BUCKETS;
     return (uint16_t)bucket;
 }
@@ -180,65 +181,105 @@ class TrackerScanCallbacks : public NimBLEScanCallbacks {
 
 TrackerScanCallbacks g_trackerScanCallbacks;
 
-// Maps a raw RSSI (dBm) reading to a 0-100 "close/far" percentage using one shared default
-// curve (per the plan's non-goal of per-hardware-revision calibration). -40dBm and closer is
-// treated as 100% (touching distance); -100dBm and further is 0% (out of useful range).
-int rssiToRangePercent(float rssi) {
-    constexpr float RSSI_NEAR = -40.0f;
-    constexpr float RSSI_FAR = -100.0f;
-    float pct = (rssi - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR) * 100.0f;
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    return (int)(pct + 0.5f);
-}
-
-// Heuristic sweep-and-compare direction estimator: remembers the strongest RSSI seen per
-// heading bucket, decaying every bucket over time so the arrow keeps following the target as
-// the device (and the world around it) moves, rather than freezing on a one-off strong
-// reading from minutes ago.
-constexpr float HEADING_BEST_DECAY_DB_PER_SEC = 1.0f;
-constexpr float HEADING_BEST_FLOOR = -127.0f;
+// Direction estimator using Circular Vector Average (Angular Centroid):
+// Accumulates EMA signal levels across 36 angular bins (10° resolution) and computes
+// the 2D vector centroid sum to provide a smooth, continuous target direction robust
+// against multi-path reflections and noise spikes.
+constexpr float HEADING_BEST_DECAY_DB_PER_SEC = 2.0f;
+constexpr float HEADING_NOISE_FLOOR = -100.0f;
 
 struct BestHeadingTable {
-    float bestRssi[HEADING_BUCKETS];
+    float binRssi[HEADING_BUCKETS];
+    uint16_t sampleCount[HEADING_BUCKETS];
     unsigned long lastDecayMs = 0;
-    int lastKnownBestBucket = -1;
+    float lastTargetDeg = -1.0f;
+    bool hasTarget = false;
 
     void reset() {
-        for (int i = 0; i < HEADING_BUCKETS; i++) bestRssi[i] = HEADING_BEST_FLOOR;
+        for (int i = 0; i < HEADING_BUCKETS; i++) {
+            binRssi[i] = HEADING_NOISE_FLOOR;
+            sampleCount[i] = 0;
+        }
         lastDecayMs = millis();
-        lastKnownBestBucket = -1;
+        lastTargetDeg = -1.0f;
+        hasTarget = false;
     }
 
     void decay() {
         unsigned long now = millis();
         float dtSec = (now - lastDecayMs) / 1000.0f;
         lastDecayMs = now;
-        if (dtSec <= 0) return;
+        if (dtSec <= 0.0f) return;
         float drop = HEADING_BEST_DECAY_DB_PER_SEC * dtSec;
         for (int i = 0; i < HEADING_BUCKETS; i++) {
-            if (bestRssi[i] > HEADING_BEST_FLOOR) bestRssi[i] -= drop;
+            if (binRssi[i] > HEADING_NOISE_FLOOR) {
+                binRssi[i] -= drop;
+                if (binRssi[i] < HEADING_NOISE_FLOOR) {
+                    binRssi[i] = HEADING_NOISE_FLOOR;
+                    sampleCount[i] = 0;
+                }
+            }
         }
     }
 
     void feed(uint16_t bucket, int8_t rssi) {
         if (bucket >= HEADING_BUCKETS) return;
-        if (rssi > bestRssi[bucket]) bestRssi[bucket] = rssi;
-        if (bestRssi[bucket] > HEADING_BEST_FLOOR) lastKnownBestBucket = bucket;
+        float r = (float)rssi;
+        if (r < HEADING_NOISE_FLOOR) r = HEADING_NOISE_FLOOR;
+
+        if (sampleCount[bucket] == 0 || binRssi[bucket] <= HEADING_NOISE_FLOOR) {
+            binRssi[bucket] = r;
+            sampleCount[bucket] = 1;
+        } else {
+            binRssi[bucket] = 0.35f * r + 0.65f * binRssi[bucket];
+            if (sampleCount[bucket] < 100) sampleCount[bucket]++;
+        }
     }
 
-    // Bucket with the strongest decayed RSSI, or lastKnownBestBucket if still valid, or -1.
-    int bestBucket() const {
-        int best = -1;
-        float bestVal = HEADING_BEST_FLOOR;
+    // Circular Vector Average (Angular Centroid) across all heading bins
+    float getTargetBearingDeg(bool &resolved) {
+        decay();
+
+        float sumX = 0.0f;
+        float sumY = 0.0f;
+        float totalWeight = 0.0f;
+
         for (int i = 0; i < HEADING_BUCKETS; i++) {
-            if (bestRssi[i] > bestVal) {
-                bestVal = bestRssi[i];
-                best = i;
+            if (binRssi[i] > HEADING_NOISE_FLOOR && sampleCount[i] > 0) {
+                float sig = binRssi[i] - HEADING_NOISE_FLOOR; // 0..60
+                float countFactor = min((float)sampleCount[i], 4.0f) / 4.0f;
+                float w = (sig * sig) * (0.4f + 0.6f * countFactor);
+
+                float rad = (i * HEADING_BUCKET_DEG) * (M_PI / 180.0f);
+                sumX += w * cosf(rad);
+                sumY += w * sinf(rad);
+                totalWeight += w;
             }
         }
-        if (best < 0) return lastKnownBestBucket;
-        return best;
+
+        float vectorMag = sqrtf(sumX * sumX + sumY * sumY);
+
+        if (totalWeight > 8.0f && vectorMag > 4.0f) {
+            float angleRad = atan2f(sumY, sumX);
+            float targetDeg = angleRad * (180.0f / M_PI);
+            targetDeg = fmodf(targetDeg + 360.0f, 360.0f);
+
+            if (!hasTarget) {
+                lastTargetDeg = targetDeg;
+                hasTarget = true;
+            } else {
+                // Circular low-pass filter to smooth angle changes
+                float diff = targetDeg - lastTargetDeg;
+                while (diff > 180.0f) diff -= 360.0f;
+                while (diff < -180.0f) diff += 360.0f;
+                lastTargetDeg = fmodf(lastTargetDeg + 0.25f * diff + 360.0f, 360.0f);
+            }
+            resolved = true;
+            return lastTargetDeg;
+        }
+
+        resolved = hasTarget;
+        return hasTarget ? lastTargetDeg : 0.0f;
     }
 };
 
@@ -290,45 +331,68 @@ uint16_t getDimColor(uint16_t color) {
 } // namespace
 
 void bleTrackerLockTarget(const String &label, const String &mac) {
-    options = {
-        {"Track now", [=]() { bleTrackerRun(mac, label); }},
-        {"Save as favorite & track",
-         [=]() {
-             String saved = promptForLabel(label);
-             bruceConfig.addBleTrackerFavorite(saved, mac);
-             bleTrackerRun(mac, saved);
-         }},
-    };
-    addOptionToMainMenu();
-    loopOptions(options);
-    options.clear();
+    while (true) {
+        bool isFav = bruceConfig.isBleTrackerFavorite(mac);
+        std::vector<Option> targetOptions = {
+            {"Track now", [=]() { bleTrackerRun(mac, label); }},
+        };
+        if (isFav) {
+            targetOptions.push_back({"Remove from favorites", [=]() {
+                bruceConfig.removeBleTrackerFavorite(mac);
+                displaySuccess("Removed from favs", true);
+            }});
+        } else {
+            targetOptions.push_back({"Save as favorite & track", [=]() {
+                String saved = promptForLabel(label);
+                bruceConfig.addBleTrackerFavorite(saved, mac);
+                bleTrackerRun(mac, saved);
+            }});
+        }
+        targetOptions.push_back({"< Back", nullptr});
+
+        int chosen = loopOptions(targetOptions, MENU_TYPE_SUBMENU, "Target Options");
+        if (chosen < 0 || chosen == (int)targetOptions.size() - 1) {
+            break;
+        }
+    }
 }
 
 void bleTrackerScanAndPick() { bleTrackerPickFromScan(); }
 
 void BleTrackerMenu() {
-    options = {};
+    while (true) {
+        std::vector<Option> trackerOptions;
 
-    for (const auto &fav : bruceConfig.bleTrackerFavorites) {
-        String label = fav.label;
-        String mac = fav.mac;
-        options.emplace_back(label.c_str(), [=]() { bleTrackerLockTarget(label, mac); });
+        for (const auto &fav : bruceConfig.bleTrackerFavorites) {
+            String label = fav.label;
+            String mac = fav.mac;
+            trackerOptions.emplace_back(label, [=]() { bleTrackerLockTarget(label, mac); });
+        }
+
+        trackerOptions.emplace_back("Live Scan", bleTrackerScanAndPick);
+
+        if (!bruceConfig.bleTrackerFavorites.empty()) {
+            trackerOptions.emplace_back("Clear all favorites", [=]() {
+                bruceConfig.clearBleTrackerFavorites();
+                displaySuccess("Favorites cleared", true);
+            });
+        }
+
+        trackerOptions.emplace_back("< Back to BLE Menu", nullptr);
+
+        int chosen = loopOptions(trackerOptions, MENU_TYPE_SUBMENU, "BLE Tracker", 0, false);
+        if (chosen < 0 || chosen == (int)trackerOptions.size() - 1) {
+            break;
+        }
     }
-
-    options.emplace_back("Live Scan", bleTrackerScanAndPick);
-
-    addOptionToMainMenu();
-    loopOptions(options, MENU_TYPE_SUBMENU, "BLE Tracker", 0, false);
-    options.clear();
 }
 
-void bleTrackerRun(const String &targetMac, const String &label) {
+void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient) {
     // Full-screen tracking view, sized for 240x135 (Cardputer/ADV) and smaller displays: a
-    // title row, an audio-mixer style VU meter with smoothed RSSI & decaying peak hold, and a
-    // dBm/stale readout. A persistent onResult() callback (TrackerScanCallbacks) keeps feeding
-    // the ring buffer in the background while this loop just reads its latest sample and
-    // redraws every ~50ms - there's no blocking delay in here longer than that, so EscPress
-    // stays responsive.
+    // title row with [ACTIVE]/[PASSIVE] status indicator, an audio-mixer style VU meter with
+    // smoothed RSSI & decaying peak hold, and a dBm/stale readout. A persistent onResult()
+    // callback (TrackerScanCallbacks) keeps feeding the ring buffer in the background, while
+    // active central connections poll link-layer RSSI directly.
     bool bleWasActiveBefore = BLEConnected || (BLEDevice::getServer() != nullptr);
 #if !defined(LITE_VERSION)
     bleWasActiveBefore =
@@ -345,12 +409,27 @@ void bleTrackerRun(const String &targetMac, const String &label) {
     g_history.begin(targetMac);
 
     // IMU boards additionally show a direction arrow, built from a user-guided rotation
-    // sweep - reset both the heading accumulator and the best-heading table so a previous
-    // session/target's data never bleeds into this one.
+    // sweep - calibrate resting gyro bias and reset both the heading accumulator and the
+    // best-heading table so a previous session/target's data never bleeds into this one.
     bool hasImu = imu_available();
     if (hasImu) {
-        imu_init();
-        imu_reset_heading();
+        drawMainBorder();
+        tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+        tft.drawCentreString("IMU Calibration", tftWidth / 2, BORDER_PAD_Y, SMOOTH_FONT);
+        tft.drawCentreString("Hold device still...", tftWidth / 2, tftHeight / 2 - 16, SMOOTH_FONT);
+
+        int calBarW = tftWidth - 2 * BORDER_PAD_X - 20;
+        int calBarH = 10;
+        int calBarX = (tftWidth - calBarW) / 2;
+        int calBarY = tftHeight / 2 + 8;
+        tft.drawRect(calBarX, calBarY, calBarW, calBarH, TFT_DARKGREY);
+
+        imu_calibrate(600, [=](int pct) {
+            int fillW = (calBarW - 4) * pct / 100;
+            if (fillW > 0) {
+                tft.fillRect(calBarX + 2, calBarY + 2, fillW, calBarH - 4, bruceConfig.priColor);
+            }
+        });
         g_currentHeadingBucket = 0;
     }
     BestHeadingTable bestHeading;
@@ -359,7 +438,6 @@ void bleTrackerRun(const String &targetMac, const String &label) {
     drawMainBorder();
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
     tft.drawCentreString(label, tftWidth / 2, BORDER_PAD_Y, SMOOTH_FONT);
-    if (hasImu) printFootnote("Rotate slowly to locate");
 
     // Audio-mixer style VU meter geometry
     int barX = BORDER_PAD_X;
@@ -374,16 +452,17 @@ void bleTrackerRun(const String &targetMac, const String &label) {
     int actualBarW = numSegments * (segW + segGap) - segGap + 4;
     int actualBarX = barX + (barW - actualBarW) / 2;
 
-    // Arrow area, only used on IMU boards: a small compass rose in the remaining vertical
-    // space below the readout row, clamped so it never grows large enough to collide with
-    // the sweep-prompt footnote on the smallest supported displays.
-    int arrowCenterX = tftWidth / 2;
-    int arrowCenterY = readoutY + LH * FP + 6 + 22;
-    int arrowRadius = 20;
-    if (arrowCenterY + arrowRadius + LH * FP + 4 > tftHeight) {
-        arrowRadius = max(10, tftHeight - (readoutY + LH * FP + 6) - LH * FP - 8);
-        arrowCenterY = readoutY + LH * FP + 6 + arrowRadius;
+    // Arrow and text geometry on IMU boards:
+    // Placed on the left side (X ~ 28) with compass rose, and informative sweep / bearing
+    // text on the right side (X ~ 60..235), avoiding any overlap on 240x135 displays.
+    int arrowCenterX = BORDER_PAD_X + 24;
+    int arrowCenterY = readoutY + LH * FP + 24;
+    int arrowRadius = 18;
+    if (arrowCenterY + arrowRadius + 4 > tftHeight) {
+        arrowRadius = max(10, (tftHeight - 4 - (readoutY + LH * FP + 4)) / 2);
+        arrowCenterY = (readoutY + LH * FP + 4) + arrowRadius + 2;
     }
+    int infoTextX = arrowCenterX + arrowRadius + 12;
 
     float emaRssi = -100.0f;
     bool emaInitialized = false;
@@ -399,8 +478,9 @@ void bleTrackerRun(const String &targetMac, const String &label) {
     bool lastDrawnStale = false;
     float currentHeadingDeg = 0.0f;
     int lastDrawnAngleDeg = -999;
-    int lastDrawnArrowBucket = -2;
+    bool lastDrawnResolved = false;
     bool lastDrawnArrowStale = false;
+    int lastDrawnConnState = -1;
     bool firstDraw = true;
 
     pBLEScan->start(0, false); // duration=0: scan indefinitely until stop()
@@ -410,6 +490,15 @@ void bleTrackerRun(const String &targetMac, const String &label) {
         float dtSec = (nowMs - lastFrameMs) / 1000.0f;
         if (dtSec < 0.0f || dtSec > 1.0f) dtSec = 0.05f;
         lastFrameMs = nowMs;
+
+        // Active connection RSSI polling (when tracking directly from GATT Explorer while connected)
+        bool isActivelyConnected = (pClient != nullptr && pClient->isConnected());
+        if (isActivelyConnected) {
+            int connRssi = pClient->getRssi();
+            if (connRssi != 0) {
+                g_history.append((int8_t)connRssi, g_currentHeadingBucket, TRACK_SRC_ESP32);
+            }
+        }
 
         if (hasImu) {
             currentHeadingDeg = imu_get_heading_delta_deg();
@@ -434,6 +523,19 @@ void bleTrackerRun(const String &targetMac, const String &label) {
         }
 
         bool stale = !emaInitialized || (nowMs - lastSeenMs) > 5000;
+
+        // Mode badge in top right header: [ACTIVE] vs [PASSIVE]
+        int connState = isActivelyConnected ? 1 : 0;
+        if (firstDraw || connState != lastDrawnConnState) {
+            int badgeW = FP * LH * 5 + 4;
+            tft.fillRect(tftWidth - BORDER_PAD_X - badgeW, BORDER_PAD_Y, badgeW, FM * LH, bruceConfig.bgColor);
+            tft.setTextColor(isActivelyConnected ? TFT_GREEN : TFT_CYAN, bruceConfig.bgColor);
+            tft.drawRightString(
+                isActivelyConnected ? "[ACTIVE]" : "[PASSIVE]", tftWidth - BORDER_PAD_X, BORDER_PAD_Y, SMOOTH_FONT
+            );
+            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+            lastDrawnConnState = connState;
+        }
 
         // Peak decay after hold period expires (or faster decay when stale)
         if (stale) {
@@ -482,7 +584,7 @@ void bleTrackerRun(const String &targetMac, const String &label) {
             tft.setCursor(BORDER_PAD_X, readoutY);
             if (stale) {
                 tft.setTextColor(TFT_DARKGREY, bruceConfig.bgColor);
-                tft.print("stale, no adv. seen");
+                tft.print("stale, no signal seen");
                 tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
             } else {
                 int pct = (int)(smoothedFraction * 100.0f + 0.5f);
@@ -492,32 +594,67 @@ void bleTrackerRun(const String &targetMac, const String &label) {
         }
 
         if (hasImu) {
-            int bestBucket = bestHeading.bestBucket();
+            bool resolved = false;
+            float targetDeg = bestHeading.getTargetBearingDeg(resolved);
             int angleDeg = 0;
-            if (bestBucket >= 0) {
-                float targetDeg = bestBucket * HEADING_BUCKET_DEG;
+            if (resolved) {
                 angleDeg = (int)fmodf(targetDeg - currentHeadingDeg + 360.0f, 360.0f);
             }
 
-            // Redraw if relative angle rotated by at least 2 degrees, or best bucket changed,
+            // Redraw if relative angle rotated by at least 2 degrees, or resolution status changed,
             // or staleness changed, or first frame.
-            if (firstDraw || abs(angleDeg - lastDrawnAngleDeg) >= 2 || bestBucket != lastDrawnArrowBucket ||
+            if (firstDraw || abs(angleDeg - lastDrawnAngleDeg) >= 2 || resolved != lastDrawnResolved ||
                 stale != lastDrawnArrowStale) {
                 tft.fillCircle(arrowCenterX, arrowCenterY, arrowRadius + 2, bruceConfig.bgColor);
                 tft.drawCircle(arrowCenterX, arrowCenterY, arrowRadius, bruceConfig.priColor);
-                if (bestBucket >= 0) {
+                if (resolved) {
                     uint16_t arrowColor = stale ? TFT_DARKGREY : bruceConfig.priColor;
-                    drawHeadingArrow(arrowCenterX, arrowCenterY, arrowRadius - 4, (float)angleDeg, arrowColor);
+                    drawHeadingArrow(arrowCenterX, arrowCenterY, arrowRadius - 3, (float)angleDeg, arrowColor);
                 } else {
-                    // No packets seen yet - draw a center crosshair so the compass area is never empty/blank
+                    // No confident direction yet - draw a center crosshair so the compass area is never empty/blank
                     tft.drawPixel(arrowCenterX, arrowCenterY, bruceConfig.priColor);
                     tft.drawPixel(arrowCenterX - 1, arrowCenterY, bruceConfig.priColor);
                     tft.drawPixel(arrowCenterX + 1, arrowCenterY, bruceConfig.priColor);
                     tft.drawPixel(arrowCenterX, arrowCenterY - 1, bruceConfig.priColor);
                     tft.drawPixel(arrowCenterX, arrowCenterY + 1, bruceConfig.priColor);
                 }
+
+                // Render side text cleanly separated from compass rose
+                int textW = tftWidth - BORDER_PAD_X - infoTextX;
+                if (textW > 20) {
+                    int line1Y = arrowCenterY - arrowRadius + 2;
+                    int line2Y = line1Y + LH * FP + 3;
+                    tft.fillRect(infoTextX, line1Y, textW, LH * FP * 2 + 8, bruceConfig.bgColor);
+
+                    tft.setTextSize(FP);
+                    tft.setCursor(infoTextX, line1Y);
+                    if (resolved) {
+                        String dirStr;
+                        if (angleDeg <= 25 || angleDeg >= 335) dirStr = "Ahead";
+                        else if (angleDeg < 70) dirStr = "+" + String(angleDeg) + "d R";
+                        else if (angleDeg <= 110) dirStr = "Right";
+                        else if (angleDeg < 160) dirStr = "Behind-R";
+                        else if (angleDeg <= 200) dirStr = "Behind";
+                        else if (angleDeg < 250) dirStr = "Behind-L";
+                        else if (angleDeg <= 290) dirStr = "Left";
+                        else dirStr = "-" + String(360 - angleDeg) + "d L";
+
+                        tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+                        tft.print("Dir: ");
+                        tft.print(dirStr);
+                    } else {
+                        tft.setTextColor(TFT_DARKGREY, bruceConfig.bgColor);
+                        tft.print("Target: locating");
+                    }
+
+                    tft.setCursor(infoTextX, line2Y);
+                    tft.setTextColor(TFT_DARKGREY, bruceConfig.bgColor);
+                    tft.print("Rotate to sweep");
+                    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+                }
+
                 lastDrawnAngleDeg = angleDeg;
-                lastDrawnArrowBucket = bestBucket;
+                lastDrawnResolved = resolved;
                 lastDrawnArrowStale = stale;
             }
         }
@@ -529,7 +666,7 @@ void bleTrackerRun(const String &targetMac, const String &label) {
     g_history.end();
     if (pBLEScan) pBLEScan->stop();
 
-    if (!bleWasActiveBefore) {
+    if (pClient == nullptr && !bleWasActiveBefore) {
 #if !defined(LITE_VERSION)
         if (!BLEStateManager::isBLEActive()) stopBLEStack();
 #else

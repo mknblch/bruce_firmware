@@ -38,11 +38,14 @@ void bleTrackerScanAndPick();
 // `label` is only used for on-screen display and as the default favorite name.
 void bleTrackerLockTarget(const String &label, const String &mac);
 
+class NimBLEClient;
+
 // Main tracking loop/UI for a locked target, identified by its MAC address string (as
 // returned by NimBLEAddress::toString()/NimBLEAdvertisedDevice::getAddress()). Filters every
 // subsequent advertisement to `targetMac` and renders a live range readout (plus a
-// directional arrow on IMU boards, added in a later revision). Returns when the user
-// presses EscPress.
-void bleTrackerRun(const String &targetMac, const String &label);
+// directional arrow on IMU boards, added in a later revision). If `pClient` is provided and
+// connected, actively samples link-layer connection RSSI with automatic fallback to passive
+// scan if disconnected. Returns when the user presses EscPress.
+void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient = nullptr);
 
 #endif

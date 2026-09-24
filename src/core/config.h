@@ -177,6 +177,8 @@ public:
     void removeQrCodeEntry(const String &menuName);
     void addBleTrackerFavorite(const String &label, const String &mac);
     void removeBleTrackerFavorite(const String &mac);
+    void clearBleTrackerFavorites();
+    bool isBleTrackerFavorite(const String &mac) const;
     String getWifiPassword(const String &ssid) const;
     void addEvilWifiName(String value);
     void removeEvilWifiName(String value);

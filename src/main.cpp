@@ -533,7 +533,9 @@ void setup() {
     setBrightness(bruceConfig.bright, false);
     // bruceConfigPins.sys_i2c is only finalized once board-specific _post_setup_gpio() runs
     // (e.g. Cardputer ADV remaps it to the TCA8418 pins), so IMU detection must happen after it.
-    imu_detect();
+    if (imu_detect()) {
+        imu_init();
+    }
     // end of post gpio begin
 
     // #ifndef USE_TFT_eSPI_TOUCH

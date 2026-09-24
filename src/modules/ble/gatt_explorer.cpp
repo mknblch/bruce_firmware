@@ -722,7 +722,9 @@ static void runContinuousScan(GattFilterMode filterMode) {
         xSemaphoreGive(g_gattScanMutex);
     }
 
-    BLEStateManager::initBLE("Bruce-GATT", ESP_PWR_LVL_P9);
+    if (!BLEStateManager::initBLE("Bruce-GATT", ESP_PWR_LVL_P9)) {
+        return;
+    }
 
     NimBLEScan *pScan = NimBLEDevice::getScan();
     if (!pScan) {
@@ -1273,7 +1275,6 @@ static void exploreGattDevice(GattScannedDevice &device) {
 
     // Device Operation Menu
     int devCursor = 0;
-    bool trackRequested = false;
     while (pClient->isConnected()) {
         std::vector<GattMenuItem> devOps;
 
@@ -1298,18 +1299,19 @@ static void exploreGattDevice(GattScannedDevice &device) {
             }
         }});
 
-        // Just sets a flag instead of disconnecting/handing off directly - the pClient
-        // disconnect+delete below (shared with every other exit from this menu) runs first,
-        // then bleTrackerLockTarget() is called with only the MAC/name; the tracker only ever
-        // deals with a passive scan, never a live NimBLEClient, so there's nothing to hand off.
-        devOps.push_back({"5. Track this device", [&trackRequested]() { trackRequested = true; }});
+        // Runs the live tracker while keeping the active GATT connection open for high-rate
+        // link-layer RSSI reads; returns right back to this menu on ESC.
+        devOps.push_back({"5. Track this device", [pClient, &device]() {
+            String label = device.name.length() > 0 ? device.name : String(device.address.toString().c_str());
+            bleTrackerRun(String(device.address.toString().c_str()), label, pClient);
+        }});
 
         devOps.push_back({"6. Disconnect & Back", [pClient]() {
             if (pClient->isConnected()) pClient->disconnect();
         }});
 
         int sel = gattMenu(device.name.c_str(), devOps, "SEL choose  ESC back", &devCursor);
-        if (sel == -1 || sel == (int)devOps.size() - 1 || trackRequested || !pClient->isConnected()) {
+        if (sel == -1 || sel == (int)devOps.size() - 1 || !pClient->isConnected()) {
             break;
         }
     }
@@ -1319,11 +1321,6 @@ static void exploreGattDevice(GattScannedDevice &device) {
     }
     NimBLEDevice::deleteClient(pClient);
     delay(50);
-
-    if (trackRequested) {
-        String label = device.name.length() > 0 ? device.name : String(device.address.toString().c_str());
-        bleTrackerLockTarget(label, String(device.address.toString().c_str()));
-    }
 }
 
 //=============================================================================
