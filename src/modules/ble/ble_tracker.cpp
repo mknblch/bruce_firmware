@@ -188,6 +188,12 @@ TrackerScanCallbacks g_trackerScanCallbacks;
 constexpr float HEADING_BEST_DECAY_DB_PER_SEC = 2.0f;
 constexpr float HEADING_NOISE_FLOOR = -100.0f;
 
+enum HeadingConfidence {
+    CONFIDENCE_LOW = 0,  // Red: Need more samples / sweep sectors
+    CONFIDENCE_MED = 1,  // Yellow: Gathering sweep data, refining estimate
+    CONFIDENCE_HIGH = 2  // Green: High multi-sector confidence
+};
+
 struct BestHeadingTable {
     float binRssi[HEADING_BUCKETS];
     uint16_t sampleCount[HEADING_BUCKETS];
@@ -236,16 +242,21 @@ struct BestHeadingTable {
         }
     }
 
-    // Circular Vector Average (Angular Centroid) across all heading bins
-    float getTargetBearingDeg(bool &resolved) {
+    // Circular Vector Average (Angular Centroid) across all heading bins with confidence scoring
+    float getTargetBearingDeg(bool &resolved, HeadingConfidence &conf) {
         decay();
 
         float sumX = 0.0f;
         float sumY = 0.0f;
         float totalWeight = 0.0f;
+        int totalSamples = 0;
+        int populatedSectors = 0;
 
         for (int i = 0; i < HEADING_BUCKETS; i++) {
             if (binRssi[i] > HEADING_NOISE_FLOOR && sampleCount[i] > 0) {
+                totalSamples += sampleCount[i];
+                populatedSectors++;
+
                 float sig = binRssi[i] - HEADING_NOISE_FLOOR; // 0..60
                 float countFactor = min((float)sampleCount[i], 4.0f) / 4.0f;
                 float w = (sig * sig) * (0.4f + 0.6f * countFactor);
@@ -258,6 +269,16 @@ struct BestHeadingTable {
         }
 
         float vectorMag = sqrtf(sumX * sumX + sumY * sumY);
+        float directivity = (totalWeight > 0.001f) ? (vectorMag / totalWeight) : 0.0f;
+
+        // Confidence estimation: rewards both packet count, angular spread, and lobe distinctiveness
+        if (totalSamples < 6 || populatedSectors < 3) {
+            conf = CONFIDENCE_LOW;
+        } else if (totalSamples < 14 || populatedSectors < 5 || directivity < 0.25f) {
+            conf = CONFIDENCE_MED;
+        } else {
+            conf = CONFIDENCE_HIGH;
+        }
 
         if (totalWeight > 8.0f && vectorMag > 4.0f) {
             float angleRad = atan2f(sumY, sumX);
@@ -480,6 +501,7 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
     int lastDrawnAngleDeg = -999;
     bool lastDrawnResolved = false;
     bool lastDrawnArrowStale = false;
+    HeadingConfidence lastDrawnConf = (HeadingConfidence)-1;
     int lastDrawnConnState = -1;
     bool firstDraw = true;
 
@@ -595,28 +617,55 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
 
         if (hasImu) {
             bool resolved = false;
-            float targetDeg = bestHeading.getTargetBearingDeg(resolved);
+            HeadingConfidence conf = CONFIDENCE_LOW;
+            float targetDeg = bestHeading.getTargetBearingDeg(resolved, conf);
             int angleDeg = 0;
             if (resolved) {
                 angleDeg = (int)fmodf(targetDeg - currentHeadingDeg + 360.0f, 360.0f);
             }
 
             // Redraw if relative angle rotated by at least 2 degrees, or resolution status changed,
-            // or staleness changed, or first frame.
+            // or confidence changed, or staleness changed, or first frame.
             if (firstDraw || abs(angleDeg - lastDrawnAngleDeg) >= 2 || resolved != lastDrawnResolved ||
-                stale != lastDrawnArrowStale) {
+                conf != lastDrawnConf || stale != lastDrawnArrowStale) {
                 tft.fillCircle(arrowCenterX, arrowCenterY, arrowRadius + 2, bruceConfig.bgColor);
-                tft.drawCircle(arrowCenterX, arrowCenterY, arrowRadius, bruceConfig.priColor);
+
+                uint16_t bgCol, ringCol, arrowCol;
+                if (stale) {
+                    bgCol = bruceConfig.bgColor;
+                    ringCol = TFT_DARKGREY;
+                    arrowCol = TFT_DARKGREY;
+                } else {
+                    switch (conf) {
+                        case CONFIDENCE_LOW:
+                            bgCol = tft.color565(55, 12, 12);     // Dark red background
+                            ringCol = tft.color565(220, 45, 45);  // Red ring
+                            break;
+                        case CONFIDENCE_MED:
+                            bgCol = tft.color565(55, 45, 10);     // Dark amber background
+                            ringCol = tft.color565(230, 180, 25); // Yellow/amber ring
+                            break;
+                        case CONFIDENCE_HIGH:
+                        default:
+                            bgCol = tft.color565(12, 55, 20);     // Dark green background
+                            ringCol = tft.color565(45, 210, 75);  // Green ring
+                            break;
+                    }
+                    arrowCol = TFT_WHITE;
+                }
+
+                tft.fillCircle(arrowCenterX, arrowCenterY, arrowRadius, bgCol);
+                tft.drawCircle(arrowCenterX, arrowCenterY, arrowRadius, ringCol);
+
                 if (resolved) {
-                    uint16_t arrowColor = stale ? TFT_DARKGREY : bruceConfig.priColor;
-                    drawHeadingArrow(arrowCenterX, arrowCenterY, arrowRadius - 3, (float)angleDeg, arrowColor);
+                    drawHeadingArrow(arrowCenterX, arrowCenterY, arrowRadius - 3, (float)angleDeg, arrowCol);
                 } else {
                     // No confident direction yet - draw a center crosshair so the compass area is never empty/blank
-                    tft.drawPixel(arrowCenterX, arrowCenterY, bruceConfig.priColor);
-                    tft.drawPixel(arrowCenterX - 1, arrowCenterY, bruceConfig.priColor);
-                    tft.drawPixel(arrowCenterX + 1, arrowCenterY, bruceConfig.priColor);
-                    tft.drawPixel(arrowCenterX, arrowCenterY - 1, bruceConfig.priColor);
-                    tft.drawPixel(arrowCenterX, arrowCenterY + 1, bruceConfig.priColor);
+                    tft.drawPixel(arrowCenterX, arrowCenterY, arrowCol);
+                    tft.drawPixel(arrowCenterX - 1, arrowCenterY, arrowCol);
+                    tft.drawPixel(arrowCenterX + 1, arrowCenterY, arrowCol);
+                    tft.drawPixel(arrowCenterX, arrowCenterY - 1, arrowCol);
+                    tft.drawPixel(arrowCenterX, arrowCenterY + 1, arrowCol);
                 }
 
                 // Render side text cleanly separated from compass rose
@@ -648,13 +697,25 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                     }
 
                     tft.setCursor(infoTextX, line2Y);
-                    tft.setTextColor(TFT_DARKGREY, bruceConfig.bgColor);
-                    tft.print("Rotate to sweep");
+                    if (stale) {
+                        tft.setTextColor(TFT_DARKGREY, bruceConfig.bgColor);
+                        tft.print("Rotate to sweep");
+                    } else if (conf == CONFIDENCE_LOW) {
+                        tft.setTextColor(tft.color565(240, 80, 80), bruceConfig.bgColor);
+                        tft.print("Sweep: need data");
+                    } else if (conf == CONFIDENCE_MED) {
+                        tft.setTextColor(tft.color565(240, 200, 50), bruceConfig.bgColor);
+                        tft.print("Sweep: refining");
+                    } else {
+                        tft.setTextColor(tft.color565(60, 220, 80), bruceConfig.bgColor);
+                        tft.print("Sweep: locked");
+                    }
                     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
                 }
 
                 lastDrawnAngleDeg = angleDeg;
                 lastDrawnResolved = resolved;
+                lastDrawnConf = conf;
                 lastDrawnArrowStale = stale;
             }
         }
