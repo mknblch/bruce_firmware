@@ -5,6 +5,7 @@
 #include "modules/ble/ble_common.h"
 #include "modules/ble/ble_ninebot.h"
 #include "modules/ble/ble_spam.h"
+#include "modules/ble/ble_tracker.h"
 #if !defined(LITE_VERSION)
 #include "modules/ble/BLE_Suite.h"
 #include "modules/ble/gatt_explorer.h"
@@ -30,6 +31,7 @@ void BleMenu::optionsMenu() {
 #if !defined(LITE_VERSION)
     options.push_back({"Media Cmds", [=]() { MediaCommands(hid_ble, true); }});
     options.push_back({"BLE Scan", ble_scan});
+    options.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
     options.push_back({"GATT Explorer", gattExplorerMenu});
     options.push_back({"GATT Server", gattServerMenu});
     options.push_back({"RACE Client", raceMainMenu});
@@ -47,6 +49,7 @@ void BleMenu::optionsMenu() {
     options.push_back({"Presenter mode", [=]() { PresenterMode(hid_ble, true); }});
 #else
     options.push_back({"BLE Sniffer", [=]() { BLE_SnifferMenu(); }});
+    options.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
 #endif
     addOptionToMainMenu();
 

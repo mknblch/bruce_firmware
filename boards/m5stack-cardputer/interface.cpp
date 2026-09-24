@@ -1,3 +1,4 @@
+#include "core/bus_HAL.h"
 #include "core/powerSave.h"
 #include "core/utils.h"
 #include <Adafruit_TCA8418.h>
@@ -132,6 +133,10 @@ void _post_setup_gpio() {
     }
     bruceConfigPins.sys_i2c.sda = (gpio_num_t)8;
     bruceConfigPins.sys_i2c.scl = (gpio_num_t)9;
+    // TCA8418 (and, on this board, the BMI270 IMU) live directly on Wire1 - a different
+    // physical I2C port than M5.In_I2C - so bus_HAL's default M5Unified-backed sys_i2c adapter
+    // must be overridden to point at Wire1 instead (see setSysI2CBus()'s doc comment).
+    setSysI2CBus(&Wire1);
 
     bruceConfigPins.gps_bus.rx = (gpio_num_t)15;
     bruceConfigPins.gps_bus.tx = (gpio_num_t)13;
@@ -224,6 +229,10 @@ void InputHandler(void) {
         keyStroke key;
 
         if (kb_interrupt || digitalRead(11) == LOW) {
+            // Wire1 (sys_i2c) is also used by the BMI270 IMU driver from other tasks (e.g. the
+            // BLE Tracker's tracking loop) - lock it for the whole TCA8418 polling burst below
+            // so the two never interleave transactions on the same physical bus.
+            lockSysI2CBus();
             if (!kb_interrupt && digitalRead(11) == LOW) {
                 detachInterrupt(digitalPinToInterrupt(11));
                 attachInterruptArg(digitalPinToInterrupt(11), gpio_isr_handler, nullptr, CHANGE);
@@ -355,6 +364,7 @@ void InputHandler(void) {
             tca.writeRegister(TCA8418_REG_INT_STAT, 1);
             int intstat = tca.readRegister(TCA8418_REG_INT_STAT);
             if ((intstat & 0x01) == 0) { kb_interrupt = false; }
+            unlockSysI2CBus();
         }
 
         unsigned long now = millis();

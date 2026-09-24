@@ -5,6 +5,7 @@
 #include "race_client.h"
 #include "BLE_Suite.h"
 #include "ble_oui.h"
+#include "ble_tracker.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
 #include "core/sd_functions.h"
@@ -66,6 +67,11 @@ static volatile bool g_scanActive = false;
 static GattFilterMode g_currentFilter = FILTER_CONNECTABLE;
 static StaticSemaphore_t g_gattScanMutexBuf;
 static SemaphoreHandle_t g_gattScanMutex = nullptr;
+
+// When set (via gattScanAndPick()), showDiscoveredDevicesList() hands the selected device to
+// this callback instead of entering exploreGattDevice()'s GATT connect/browse flow - lets
+// other features (e.g. the BLE Tracker) reuse this screen purely as a device picker.
+static std::function<void(const GattScannedDevice &)> g_gattPickCallback = nullptr;
 
 static void gattEnsureScanMutex() {
     if (!g_gattScanMutex) {
@@ -701,7 +707,6 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
 static void readStandardDeviceInfo(NimBLEClient *pClient);
 static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevice &device, String *outFilePath = nullptr);
 static void runAutoDumpAll();
-static void gattSettingsMenu();
 
 //=============================================================================
 // Continuous Scan Implementation
@@ -889,7 +894,8 @@ static void showDiscoveredDevicesList() {
             }
         };
 
-        int chosen = gattListLoop("GATT TARGETS", totalCount, "SEL explore  ESC back", drawer, &cursor);
+        const char *hint = g_gattPickCallback ? "SEL pick  ESC back" : "SEL explore  ESC back";
+        int chosen = gattListLoop("GATT TARGETS", totalCount, hint, drawer, &cursor);
 
         if (chosen < 0 || chosen == devCount + 2) {
             break;
@@ -898,6 +904,10 @@ static void showDiscoveredDevicesList() {
         } else if (chosen == devCount + 1) {
             runAutoDumpAll();
         } else if (chosen < devCount) {
+            if (g_gattPickCallback) {
+                g_gattPickCallback(g_discoveredDevices[chosen]);
+                break; // hand control back to the caller instead of exploring GATT services
+            }
             exploreGattDevice(g_discoveredDevices[chosen]);
         }
     }
@@ -1263,6 +1273,7 @@ static void exploreGattDevice(GattScannedDevice &device) {
 
     // Device Operation Menu
     int devCursor = 0;
+    bool trackRequested = false;
     while (pClient->isConnected()) {
         std::vector<GattMenuItem> devOps;
 
@@ -1287,12 +1298,18 @@ static void exploreGattDevice(GattScannedDevice &device) {
             }
         }});
 
-        devOps.push_back({"5. Disconnect & Back", [pClient]() {
+        // Just sets a flag instead of disconnecting/handing off directly - the pClient
+        // disconnect+delete below (shared with every other exit from this menu) runs first,
+        // then bleTrackerLockTarget() is called with only the MAC/name; the tracker only ever
+        // deals with a passive scan, never a live NimBLEClient, so there's nothing to hand off.
+        devOps.push_back({"5. Track this device", [&trackRequested]() { trackRequested = true; }});
+
+        devOps.push_back({"6. Disconnect & Back", [pClient]() {
             if (pClient->isConnected()) pClient->disconnect();
         }});
 
         int sel = gattMenu(device.name.c_str(), devOps, "SEL choose  ESC back", &devCursor);
-        if (sel == -1 || sel == (int)devOps.size() - 1 || !pClient->isConnected()) {
+        if (sel == -1 || sel == (int)devOps.size() - 1 || trackRequested || !pClient->isConnected()) {
             break;
         }
     }
@@ -1302,6 +1319,11 @@ static void exploreGattDevice(GattScannedDevice &device) {
     }
     NimBLEDevice::deleteClient(pClient);
     delay(50);
+
+    if (trackRequested) {
+        String label = device.name.length() > 0 ? device.name : String(device.address.toString().c_str());
+        bleTrackerLockTarget(label, String(device.address.toString().c_str()));
+    }
 }
 
 //=============================================================================
@@ -1827,7 +1849,7 @@ static void runAutoDumpAll() {
 // Settings Menu (Compact / FP Font)
 //=============================================================================
 
-static void gattSettingsMenu() {
+void gattSettingsMenu() {
     int cursor = 0;
     while (true) {
         std::vector<GattMenuItem> setOptions;
@@ -1893,6 +1915,19 @@ static void gattSettingsMenu() {
             break;
         }
     }
+}
+
+//=============================================================================
+// Reusable Scan-And-Pick Entry Point (for other features, e.g. BLE Tracker)
+//=============================================================================
+
+void gattScanAndPick(std::function<void(const String &name, const String &mac, int rssi, uint8_t addrType)> onPick) {
+    g_gattPickCallback = [onPick](const GattScannedDevice &device) {
+        String name = (device.name.length() > 0) ? device.name : String(device.address.toString().c_str());
+        onPick(name, String(device.address.toString().c_str()), device.rssi, device.addressType);
+    };
+    runContinuousScan(g_currentFilter);
+    g_gattPickCallback = nullptr;
 }
 
 //=============================================================================

@@ -85,6 +85,13 @@ JsonDocument BruceConfig::toJson() const {
         qrEntry["content"] = entry.content;
     }
 
+    JsonArray bleTrackerArray = setting["bleTrackerFavorites"].to<JsonArray>();
+    for (const auto &entry : bleTrackerFavorites) {
+        JsonObject bleTrackerEntry = bleTrackerArray.add<JsonObject>();
+        bleTrackerEntry["label"] = entry.label;
+        bleTrackerEntry["mac"] = entry.mac;
+    }
+
     return jsonDoc;
 }
 
@@ -442,6 +449,16 @@ void BruceConfig::fromFile(bool checkFS) {
     } else {
         count++;
         log_e("Fail to load qrCodes");
+    }
+
+    if (!setting["bleTrackerFavorites"].isNull()) {
+        bleTrackerFavorites.clear();
+        JsonArray bleTrackerArray = setting["bleTrackerFavorites"].as<JsonArray>();
+        for (JsonObject bleTrackerEntry : bleTrackerArray) {
+            String label = bleTrackerEntry["label"].as<String>();
+            String mac = bleTrackerEntry["mac"].as<String>();
+            bleTrackerFavorites.push_back({label, mac});
+        }
     }
 
     validateConfig();
@@ -881,6 +898,39 @@ void BruceConfig::removeQrCodeEntry(const String &menuName) {
     }
 
     if (writeIndex < qrCodes.size()) { qrCodes.erase(qrCodes.begin() + writeIndex, qrCodes.end()); }
+
+    saveFile();
+}
+
+void BruceConfig::addBleTrackerFavorite(const String &label, const String &mac) {
+    for (auto &entry : bleTrackerFavorites) {
+        if (entry.mac == mac) {
+            entry.label = label;
+            saveFile();
+            return;
+        }
+    }
+    bleTrackerFavorites.push_back({label, mac});
+    saveFile();
+}
+
+void BruceConfig::removeBleTrackerFavorite(const String &mac) {
+    size_t writeIndex = 0;
+
+    for (size_t readIndex = 0; readIndex < bleTrackerFavorites.size(); ++readIndex) {
+        const BleTrackerTarget &entry = bleTrackerFavorites[readIndex];
+
+        if (entry.mac != mac) {
+            if (writeIndex != readIndex) {
+                bleTrackerFavorites[writeIndex] = std::move(bleTrackerFavorites[readIndex]);
+            }
+            ++writeIndex;
+        }
+    }
+
+    if (writeIndex < bleTrackerFavorites.size()) {
+        bleTrackerFavorites.erase(bleTrackerFavorites.begin() + writeIndex, bleTrackerFavorites.end());
+    }
 
     saveFile();
 }

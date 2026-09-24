@@ -17,35 +17,23 @@
 #define BRUCE_HAS_M5UNIFIED 1
 #endif
 
-#ifdef BRUCE_HAS_M5UNIFIED
-// Guards every sys_i2c transaction issued through M5SysWireAdapter (below) against M5.update()'s
-// own internal I2C polling, which bypasses the adapter entirely and would otherwise race it from
-// a different FreeRTOS task - see the comment on lockSysI2CBus() in bus_HAL.h.
+// Guards every sys_i2c transaction against concurrent access from a different FreeRTOS task -
+// on M5Unified boards that's M5.update()'s own internal I2C polling (bypassing M5SysWireAdapter
+// below entirely); on plain-TwoWire boards (e.g. Cardputer ADV's Wire1, shared between the
+// TCA8418 keyboard poll and the BMI270 IMU driver) it's whichever board/driver code calls
+// lockSysI2CBus()/unlockSysI2CBus() directly - see the comment on lockSysI2CBus() in bus_HAL.h.
+// Kept as a real mutex unconditionally (not gated on BRUCE_HAS_M5UNIFIED) so both cases share the
+// exact same protection instead of silently no-op'ing on boards without M5Unified.
 static SemaphoreHandle_t sysI2CMutex() {
     static SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
     return mutex;
 }
-#endif
 
-void lockSysI2CBus() {
-#ifdef BRUCE_HAS_M5UNIFIED
-    xSemaphoreTake(sysI2CMutex(), portMAX_DELAY);
-#endif
-}
+void lockSysI2CBus() { xSemaphoreTake(sysI2CMutex(), portMAX_DELAY); }
 
-void unlockSysI2CBus() {
-#ifdef BRUCE_HAS_M5UNIFIED
-    xSemaphoreGive(sysI2CMutex());
-#endif
-}
+void unlockSysI2CBus() { xSemaphoreGive(sysI2CMutex()); }
 
-bool trylockSysI2CBus() {
-#ifdef BRUCE_HAS_M5UNIFIED
-    return xSemaphoreTake(sysI2CMutex(), 0) == pdTRUE;
-#else
-    return true;
-#endif
-}
+bool trylockSysI2CBus() { return xSemaphoreTake(sysI2CMutex(), 0) == pdTRUE; }
 
 // Some chips (e.g. ESP32-C6/-C5: SOC_HP_I2C_NUM == 1) only have one general-purpose I2C
 // controller. Wire1 may still exist as a symbol there (backed by the separate, restricted
@@ -64,6 +52,11 @@ static TwoWire *sysWire = &Wire1;
 #else
 static TwoWire *sysWire = &Wire;
 #endif
+
+// Set by setSysI2CBus() whenever a board explicitly names its sys_i2c TwoWire instance -
+// distinguishes that case from the BRUCE_HAS_DUAL_I2C default above, which getSysI2CBus()
+// must NOT use on M5Unified boards (see getSysI2CBus() below).
+static bool sysWireOverridden = false;
 
 #ifdef BRUCE_HAS_M5UNIFIED
 // On M5Stack boards the sys_i2c port's ESP-IDF i2c_master_bus_handle_t is created and owned by
@@ -177,10 +170,17 @@ static bool userBusShared = false;
 static int8_t activeSda = -1;
 static int8_t activeScl = -1;
 
-void setSysI2CBus(TwoWire *wire) { sysWire = wire; }
+void setSysI2CBus(TwoWire *wire) {
+    sysWire = wire;
+    sysWireOverridden = true;
+}
 
 TwoWire *getSysI2CBus() {
 #ifdef BRUCE_HAS_M5UNIFIED
+    // M5.In_I2C only actually owns the sys_i2c port on boards where no board-specific code
+    // called setSysI2CBus() to say otherwise - e.g. Cardputer ADV wires its TCA8418/BMI270 to
+    // Wire1 directly (a different physical port than M5.In_I2C), so it must override this.
+    if (sysWireOverridden) return sysWire;
     return sysWireAdapter();
 #else
     return sysWire;
@@ -204,11 +204,7 @@ TwoWire *acquireI2CBus(int8_t sda, int8_t scl) {
     if (sharesSysBus) {
         userWire = nullptr;
         userBusShared = true;
-#ifdef BRUCE_HAS_M5UNIFIED
-        return sysWireAdapter();
-#else
-        return sysWire;
-#endif
+        return getSysI2CBus();
     }
 
     TwoWire *boardWire = acquireBoardI2CBus(sda, scl);

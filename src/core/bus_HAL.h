@@ -15,7 +15,9 @@
 
 // Tells the HAL which TwoWire instance is physically wired to bruceConfigPins.sys_i2c.
 // Call from boards/*/interface.cpp (_setup_gpio/_post_setup_gpio) only if that board does not use
-// the default (&Wire1).
+// the default (&Wire1). On M5Unified boards this also overrides the default M5.In_I2C-backed
+// adapter returned by getSysI2CBus() - needed on boards (e.g. Cardputer ADV) where a sys_i2c
+// peripheral (TCA8418/BMI270) is wired to a physically different port than M5.In_I2C.
 void setSysI2CBus(TwoWire *wire);
 
 // Returns the TwoWire instance currently wired to sys_i2c.

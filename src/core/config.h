@@ -29,6 +29,10 @@ public:
         String menuName;
         String content;
     };
+    struct BleTrackerTarget {
+        String label;
+        String mac;
+    };
     struct EvilPortalEndpoints {
         String getCredsEndpoint;
         String setSsidEndpoint;
@@ -106,6 +110,8 @@ public:
         {"Rickroll",   "https://youtu.be/dQw4w9WgXcQ"      }
     };
 
+    std::vector<BleTrackerTarget> bleTrackerFavorites = {};
+
     /////////////////////////////////////////////////////////////////////////////////////
     // Constructor
     /////////////////////////////////////////////////////////////////////////////////////
@@ -169,6 +175,8 @@ public:
     void addWifiCredential(const String &ssid, const String &pwd);
     void addQrCodeEntry(const String &menuName, const String &content);
     void removeQrCodeEntry(const String &menuName);
+    void addBleTrackerFavorite(const String &label, const String &mac);
+    void removeBleTrackerFavorite(const String &mac);
     String getWifiPassword(const String &ssid) const;
     void addEvilWifiName(String value);
     void removeEvilWifiName(String value);
