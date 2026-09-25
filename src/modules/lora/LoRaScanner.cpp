@@ -20,6 +20,20 @@ struct ScanChannelEntry {
     uint32_t lastSeenMs;
 };
 
+static void drainKeyboardInput() {
+    vTaskDelay(pdMS_TO_TICKS(150));
+    SelPress = false;
+    EscPress = false;
+    PrevPress = false;
+    NextPress = false;
+    UpPress = false;
+    DownPress = false;
+    AnyKeyPress = false;
+    NextPagePress = false;
+    PrevPagePress = false;
+    KeyStroke.Clear();
+}
+
 void runLoRaChannelDetector() {
     loadLoRaConfig();
     if (!isLoraHardwareConfigured()) {
@@ -87,10 +101,7 @@ void runLoRaChannelDetector() {
     if (chosen < 0 || channels.empty()) return;
 
     // Drain any leftover Enter/Esc press from menu selection
-    vTaskDelay(pdMS_TO_TICKS(150));
-    check(SelPress);
-    check(EscPress);
-    _getKeyPress();
+    drainKeyboardInput();
 
     // Start Radio
     LoRaConfigData scanCfg = loraConfig;
@@ -106,20 +117,126 @@ void runLoRaChannelDetector() {
     int selectedIdx = 0;
     int scrollOffset = 0;
     size_t currentChIdx = 0;
-    uint32_t lastUiUpdate = 0;
     uint32_t lastHopTime = millis();
+    uint32_t lastRssiCheck = 0;
     bool isPaused = false;
-    bool needsRedraw = true;
-    bool statsChanged = false;
     uint8_t rxBuffer[256];
 
+    int lineH = FP * LH + 1;
+    int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
+    if (maxLines < 1) maxLines = 1;
+    int startY = BORDER_PAD_Y + lineH;
+
+    auto drawStatus = [&]() {
+        tft.setTextSize(FP);
+        tft.fillRect(7, BORDER_PAD_Y, tftWidth - 14, lineH, bruceConfig.bgColor);
+        String status = "Detector: " + String(channels.size()) + " Ch";
+        if (isPaused) {
+            status += " [PAUSED]";
+        } else if (!channels.empty()) {
+            status += " [Scan: " + String(channels[currentChIdx].freqMHz, 2) + "M]";
+        }
+        tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+        tft.drawString(status, 10, BORDER_PAD_Y);
+    };
+
+    auto drawChannelLine = [&](int slotIdx, int chIdx, bool isSel) {
+        if (slotIdx < 0 || slotIdx >= maxLines) return;
+        int currentY = startY + slotIdx * lineH;
+        tft.fillRect(7, currentY, tftWidth - 14, lineH, isSel ? bruceConfig.priColor : bruceConfig.bgColor);
+
+        if (chIdx >= 0 && chIdx < (int)channels.size()) {
+            const auto &ch = channels[chIdx];
+            if (isSel) {
+                tft.setTextColor(bruceConfig.bgColor, bruceConfig.priColor);
+            } else {
+                tft.setTextColor(
+                    (ch.hits > 0 && millis() - ch.lastSeenMs < 3000) ? 0x07E0 : TFT_WHITE,
+                    bruceConfig.bgColor
+                );
+            }
+
+            String line = ch.label;
+            if (line.length() > 14) line = line.substring(0, 14);
+            while (line.length() < 14) line += " ";
+
+            line += " H:" + String(ch.hits);
+            if (ch.peakRssi > -130.0f) {
+                line += " " + String((int)ch.peakRssi) + "dB";
+            }
+
+            tft.drawString(line, 10, currentY);
+
+            // Activity mini-bar on right
+            int barX = tftWidth - 40;
+            int barW = 30;
+            int barH = lineH - 2;
+            int fillW = map(constrain((int)ch.lastRssi, -130, -50), -130, -50, 0, barW);
+
+            if (!isSel) {
+                tft.drawRect(barX, currentY + 1, barW, barH, TFT_DARKGREY);
+                if (fillW > 0) {
+                    tft.fillRect(barX + 1, currentY + 2, fillW - 2, barH - 2,
+                                 (ch.lastRssi > -90) ? TFT_GREEN : TFT_ORANGE);
+                }
+            }
+        }
+    };
+
+    auto drawFullUI = [&]() {
+        drawStatus();
+        for (int i = 0; i < maxLines; i++) {
+            int chIdx = scrollOffset + i;
+            bool isSel = (chIdx == selectedIdx);
+            drawChannelLine(i, chIdx, isSel);
+        }
+        printCenterFootnote("[UP/DN]Pick [SEL]Lock&Action [ESC]Exit");
+    };
+
+    auto updateSelection = [&](int oldIdx, int newIdx) {
+        int oldSlot = oldIdx - scrollOffset;
+        int newSlot = newIdx - scrollOffset;
+
+        int prevScroll = scrollOffset;
+        if (selectedIdx < scrollOffset) scrollOffset = selectedIdx;
+        if (selectedIdx >= scrollOffset + maxLines) {
+            scrollOffset = selectedIdx - maxLines + 1;
+        }
+
+        if (scrollOffset != prevScroll) {
+            for (int i = 0; i < maxLines; i++) {
+                int chIdx = scrollOffset + i;
+                drawChannelLine(i, chIdx, chIdx == selectedIdx);
+            }
+        } else {
+            if (oldSlot >= 0 && oldSlot < maxLines) {
+                drawChannelLine(oldSlot, oldIdx, false);
+            }
+            if (newSlot >= 0 && newSlot < maxLines) {
+                drawChannelLine(newSlot, newIdx, true);
+            }
+        }
+    };
+
     drawMainBorder(true);
+    drawFullUI();
 
     while (true) {
-        bool up = check(PrevPress) || check(UpPress) || check(PrevPagePress);
-        bool down = check(NextPress) || check(DownPress) || check(NextPagePress);
-        bool sel = check(SelPress);
-        bool esc = check(EscPress);
+        bool up = false;
+        bool down = false;
+        bool sel = false;
+        bool esc = false;
+
+        if (check(PrevPress)) up = true;
+        if (check(UpPress)) up = true;
+        if (check(PrevPagePress)) up = true;
+
+        if (check(NextPress)) down = true;
+        if (check(DownPress)) down = true;
+        if (check(NextPagePress)) down = true;
+
+        if (check(SelPress)) sel = true;
+        if (check(EscPress)) esc = true;
 
 #if defined(HAS_ENCODER)
         int encSteps = (int)drainRotarySteps();
@@ -129,44 +246,56 @@ void runLoRaChannelDetector() {
 
         keyStroke k = _getKeyPress();
         if (k.pressed || !k.word.empty()) {
-            if (k.del || k.exit_key) {
-                break;
-            }
-            if (k.enter) {
-                sel = true;
-            }
+            if (k.enter) sel = true;
+            if (k.del) esc = true;
             for (auto ch : k.word) {
-                char lowerKey = tolower(ch);
-                if (lowerKey == '`' || lowerKey == 'q' || lowerKey == 0x1B) {
-                    goto exit_detector;
-                } else if (lowerKey == 'p') {
+                char lowerKey = tolower((char)ch);
+                uint8_t uKey = (uint8_t)ch;
+
+                if (lowerKey == '`' || lowerKey == 'q' || uKey == 0x1B) {
+                    esc = true;
+                } else if (ch == ';' || uKey == 0xDA || lowerKey == 'w' || lowerKey == 'k' || ch == '+' || ch == '=') {
+                    up = true;
+                } else if (ch == '.' || uKey == 0xD9 || lowerKey == 's' || lowerKey == 'j' || ch == '-' || ch == '_') {
+                    down = true;
+                } else if (ch == '\n' || ch == '\r' || uKey == 13 || lowerKey == 'e') {
+                    sel = true;
+                } else if (lowerKey == 'p' || ch == ' ') {
                     isPaused = !isPaused;
-                    needsRedraw = true;
+                    drawStatus();
                 } else if (lowerKey == 'c') {
                     for (auto &c : channels) {
                         c.hits = 0;
                         c.peakRssi = -140.0f;
                         c.lastRssi = -140.0f;
                     }
-                    needsRedraw = true;
-                } else if (lowerKey == 's') {
-                    sel = true;
+                    drawFullUI();
                 }
             }
         }
 
         if (esc) break;
 
-        if (up) {
+        if (up && !channels.empty()) {
+            int prevIdx = selectedIdx;
             if (selectedIdx > 0) {
                 selectedIdx--;
-                needsRedraw = true;
+            } else {
+                selectedIdx = (int)channels.size() - 1;
+            }
+            if (selectedIdx != prevIdx) {
+                updateSelection(prevIdx, selectedIdx);
             }
         }
-        if (down) {
+        if (down && !channels.empty()) {
+            int prevIdx = selectedIdx;
             if (selectedIdx + 1 < (int)channels.size()) {
                 selectedIdx++;
-                needsRedraw = true;
+            } else {
+                selectedIdx = 0;
+            }
+            if (selectedIdx != prevIdx) {
+                updateSelection(prevIdx, selectedIdx);
             }
         }
 
@@ -181,12 +310,7 @@ void runLoRaChannelDetector() {
                 stopLoRaRadio();
 
                 // Clear input and wait for key release before opening submenu
-                vTaskDelay(pdMS_TO_TICKS(150));
-                check(SelPress);
-                check(PrevPress);
-                check(NextPress);
-                check(EscPress);
-                _getKeyPress();
+                drainKeyboardInput();
 
                 std::vector<Option> actionOpts = {
                     {"Start Sniffer on " + String(selCh.freqMHz, 3) + "MHz", runLoRaSniffer},
@@ -198,19 +322,14 @@ void runLoRaChannelDetector() {
                 if (a == 0 || a == 1) return;
 
                 // Clear input before returning to detector
-                vTaskDelay(pdMS_TO_TICKS(150));
-                check(SelPress);
-                check(PrevPress);
-                check(NextPress);
-                check(EscPress);
-                _getKeyPress();
+                drainKeyboardInput();
 
                 scanCfg.freqMHz = channels[currentChIdx].freqMHz;
                 scanCfg.sf = channels[currentChIdx].sf;
                 scanCfg.bwKHz = channels[currentChIdx].bwKHz;
                 initLoRaRadio(scanCfg, true);
                 drawMainBorder(true);
-                needsRedraw = true;
+                drawFullUI();
             }
         }
 
@@ -226,7 +345,12 @@ void runLoRaChannelDetector() {
                 ch.lastSeenMs = millis();
                 ch.lastRssi = rssi;
                 if (rssi > ch.peakRssi) ch.peakRssi = rssi;
-                statsChanged = true;
+
+                // Redraw line if visible
+                int slot = (int)currentChIdx - scrollOffset;
+                if (slot >= 0 && slot < maxLines) {
+                    drawChannelLine(slot, currentChIdx, (int)currentChIdx == selectedIdx);
+                }
 
                 // Feed packet into global sniffer/node records
                 LoRaPacket pkt;
@@ -248,14 +372,24 @@ void runLoRaChannelDetector() {
             }
         }
 
-        // Periodically sample current channel RSSI for visual bar
-        float instantRssi = getLoRaInstantRSSI();
-        if (instantRssi > -135.0f && instantRssi <= 0.0f) {
-            channels[currentChIdx].lastRssi = instantRssi;
+        // Periodically sample current channel RSSI for visual bar (rate-limited)
+        if (millis() - lastRssiCheck >= 150) {
+            lastRssiCheck = millis();
+            float instantRssi = getLoRaInstantRSSI();
+            if (instantRssi > -135.0f && instantRssi < 0.0f) {
+                float prevRssi = channels[currentChIdx].lastRssi;
+                if (fabs(instantRssi - prevRssi) >= 3.0f) {
+                    channels[currentChIdx].lastRssi = instantRssi;
+                    int slot = (int)currentChIdx - scrollOffset;
+                    if (slot >= 0 && slot < maxLines) {
+                        drawChannelLine(slot, currentChIdx, (int)currentChIdx == selectedIdx);
+                    }
+                }
+            }
         }
 
         // Dwell on current channel before hopping to next
-        if (!isPaused && !channels.empty() && (millis() - lastHopTime >= 200)) {
+        if (!isPaused && !channels.empty() && (millis() - lastHopTime >= 350)) {
             lastHopTime = millis();
             currentChIdx = (currentChIdx + 1) % channels.size();
             auto &ch = channels[currentChIdx];
@@ -263,83 +397,7 @@ void runLoRaChannelDetector() {
             setLoRaSpreadingFactor(ch.sf);
             setLoRaBandwidth(ch.bwKHz);
             startLoRaReceive();
-        }
-
-        // Render UI
-        if (needsRedraw || ((millis() - lastUiUpdate > 250) && statsChanged)) {
-            lastUiUpdate = millis();
-            needsRedraw = false;
-            statsChanged = false;
-
-            int lineH = FP * LH + 1;
-            int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
-            if (maxLines < 1) maxLines = 1;
-            int startY = BORDER_PAD_Y + lineH;
-
-            // Status bar
-            tft.setTextSize(FP);
-            tft.fillRect(7, BORDER_PAD_Y, tftWidth - 14, lineH, bruceConfig.bgColor);
-            String status = "Detector: " + String(channels.size()) + " Ch";
-            if (isPaused) {
-                status += " [PAUSED]";
-            } else {
-                status += " [Scan: " + String(channels[currentChIdx].freqMHz, 2) + "M]";
-            }
-            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            tft.drawString(status, 10, BORDER_PAD_Y);
-
-            if (selectedIdx < scrollOffset) scrollOffset = selectedIdx;
-            if (selectedIdx >= scrollOffset + maxLines) {
-                scrollOffset = selectedIdx - maxLines + 1;
-            }
-
-            for (int i = 0; i < maxLines; i++) {
-                int chIdx = scrollOffset + i;
-                int currentY = startY + i * lineH;
-                tft.fillRect(7, currentY, tftWidth - 14, lineH, bruceConfig.bgColor);
-
-                if (chIdx < (int)channels.size()) {
-                    const auto &ch = channels[chIdx];
-                    bool isSel = (chIdx == selectedIdx);
-
-                    if (isSel) {
-                        tft.fillRect(7, currentY, tftWidth - 14, lineH, bruceConfig.priColor);
-                        tft.setTextColor(bruceConfig.bgColor, bruceConfig.priColor);
-                    } else {
-                        tft.setTextColor(
-                            (ch.hits > 0 && millis() - ch.lastSeenMs < 3000) ? 0x07E0 : TFT_WHITE,
-                            bruceConfig.bgColor
-                        );
-                    }
-
-                    String line = ch.label;
-                    if (line.length() > 14) line = line.substring(0, 14);
-                    while (line.length() < 14) line += " ";
-
-                    line += " H:" + String(ch.hits);
-                    if (ch.peakRssi > -130.0f) {
-                        line += " " + String((int)ch.peakRssi) + "dB";
-                    }
-
-                    tft.drawString(line, 10, currentY);
-
-                    // Activity mini-bar on right
-                    int barX = tftWidth - 40;
-                    int barW = 30;
-                    int barH = lineH - 2;
-                    int fillW = map(constrain((int)ch.lastRssi, -130, -50), -130, -50, 0, barW);
-
-                    if (!isSel) {
-                        tft.drawRect(barX, currentY + 1, barW, barH, TFT_DARKGREY);
-                        if (fillW > 0) {
-                            tft.fillRect(barX + 1, currentY + 2, fillW - 2, barH - 2,
-                                         (ch.lastRssi > -90) ? TFT_GREEN : TFT_ORANGE);
-                        }
-                    }
-                }
-            }
-
-            printCenterFootnote("[UP/DN]Pick [SEL]Lock&Action [ESC]Exit");
+            drawStatus();
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));

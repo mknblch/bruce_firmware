@@ -148,7 +148,7 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
         if (state == RADIOLIB_ERR_NONE) state = gLora1276->setCRC(true);
         if (state == RADIOLIB_ERR_NONE) state = gLora1276->explicitHeader();
         if (state == RADIOLIB_ERR_NONE && rxMode) {
-            gLora1276->setDio0Action(onLoraPacketInterrupt, CHANGE);
+            gLora1276->setDio0Action(onLoraPacketInterrupt, RISING);
             state = gLora1276->startReceive();
         }
     } else {
@@ -189,6 +189,8 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
 bool setLoRaFrequency(float freqMHz) {
     if (!gLoraInitialized) return false;
     if (fabs(gCurFreq - freqMHz) < 0.0001f) return true;
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setFrequency(freqMHz);
@@ -196,12 +198,16 @@ bool setLoRaFrequency(float freqMHz) {
         state = gLora1262->setFrequency(freqMHz);
     }
     if (state == RADIOLIB_ERR_NONE) gCurFreq = freqMHz;
+    gLoraPacketReceived = false;
+    gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool setLoRaBandwidth(float bwKHz) {
     if (!gLoraInitialized) return false;
     if (fabs(gCurBw - bwKHz) < 0.01f) return true;
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setBandwidth(bwKHz);
@@ -209,12 +215,16 @@ bool setLoRaBandwidth(float bwKHz) {
         state = gLora1262->setBandwidth(bwKHz);
     }
     if (state == RADIOLIB_ERR_NONE) gCurBw = bwKHz;
+    gLoraPacketReceived = false;
+    gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool setLoRaSpreadingFactor(uint8_t sf) {
     if (!gLoraInitialized) return false;
     if (gCurSf == sf) return true;
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setSpreadingFactor(sf);
@@ -222,51 +232,59 @@ bool setLoRaSpreadingFactor(uint8_t sf) {
         state = gLora1262->setSpreadingFactor(sf);
     }
     if (state == RADIOLIB_ERR_NONE) gCurSf = sf;
+    gLoraPacketReceived = false;
+    gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool setLoRaSyncWord(uint8_t syncWord) {
     if (!gLoraInitialized) return false;
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setSyncWord(syncWord);
     } else if (gLora1262) {
         state = gLora1262->setSyncWord(syncWord);
     }
+    gLoraPacketReceived = false;
+    gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool setLoRaCodingRate(uint8_t cr) {
     if (!gLoraInitialized) return false;
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setCodingRate(cr);
     } else if (gLora1262) {
         state = gLora1262->setCodingRate(cr);
     }
+    gLoraPacketReceived = false;
+    gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool startLoRaReceive() {
     if (!gLoraInitialized) return false;
-    gLoraInterruptEnabled = true;
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->startReceive();
     } else if (gLora1262) {
         state = gLora1262->startReceive();
     }
+    gLoraPacketReceived = false;
+    gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
 }
 
 bool checkLoRaPacketAvailable() {
     if (!gLoraInitialized) return false;
-    if (gLoraPacketReceived) return true;
-    int irqPin = getLoraIrqPin();
-    if (irqPin != GPIO_NUM_NC && digitalRead(irqPin) == HIGH) {
-        return true;
-    }
-    return false;
+    return gLoraPacketReceived;
 }
 
 int readLoRaRawData(
@@ -292,6 +310,7 @@ int readLoRaRawData(
         } else if (gLora1262) {
             gLora1262->startReceive();
         }
+        gLoraPacketReceived = false;
         gLoraInterruptEnabled = true;
         return -1;
     }
@@ -321,6 +340,7 @@ int readLoRaRawData(
         gLora1262->startReceive();
     }
 
+    gLoraPacketReceived = false;
     gLoraInterruptEnabled = true;
     return state;
 }
@@ -360,9 +380,9 @@ int scanLoRaCAD() {
 float getLoRaInstantRSSI() {
     if (!gLoraInitialized) return -140.0f;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
-        return gLora1276->getRSSI();
+        return gLora1276->getRSSI(false);
     } else if (gLora1262) {
-        return gLora1262->getRSSI();
+        return gLora1262->getRSSI(false);
     }
     return -140.0f;
 }

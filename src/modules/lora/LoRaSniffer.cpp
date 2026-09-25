@@ -201,13 +201,14 @@ void showLoRaPacketInspector(const LoRaPacket &pkt) {
     }
     keyStroke k = _getKeyPress();
     if (k.pressed || !k.word.empty()) {
-        if (k.del || k.exit_key) {
+        if (k.del) {
             loop = false;
             break;
         }
         for (auto ch : k.word) {
-            char lowerKey = tolower(ch);
-            if (lowerKey == '`') {
+            char lowerKey = tolower((char)ch);
+            uint8_t uKey = (uint8_t)ch;
+            if (lowerKey == '`' || lowerKey == 'q' || uKey == 0x1B) {
                 loop = false;
                 break;
             } else if (lowerKey == 't') {
@@ -248,33 +249,24 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
         else if (encSteps < 0) up = true;
 #endif
 
-        if (esc) {
-            break;
-        }
-
-        if (up) {
-            if (selectedPktIdx > 0) {
-                selectedPktIdx--;
-                needsRedraw = true;
-            }
-        }
-        if (down) {
-            if (selectedPktIdx + 1 < (int)node.packets.size()) {
-                selectedPktIdx++;
-                needsRedraw = true;
-            }
-        }
-
         keyStroke k = _getKeyPress();
         if (k.pressed || !k.word.empty()) {
-            if (k.del || k.exit_key) {
+            if (k.enter) sel = true;
+            if (k.del) {
                 break;
             }
             for (auto ch : k.word) {
-                char lowerKey = tolower(ch);
-                if (lowerKey == '`') {
+                char lowerKey = tolower((char)ch);
+                uint8_t uKey = (uint8_t)ch;
+                if (lowerKey == '`' || lowerKey == 'q' || uKey == 0x1B) {
                     loop = false;
                     break;
+                } else if (ch == ';' || uKey == 0xDA || lowerKey == 'w' || lowerKey == 'k' || ch == '+' || ch == '=') {
+                    up = true;
+                } else if (ch == '.' || uKey == 0xD9 || lowerKey == 's' || lowerKey == 'j' || ch == '-' || ch == '_') {
+                    down = true;
+                } else if (ch == '\n' || ch == '\r' || uKey == 13) {
+                    sel = true;
                 } else if (lowerKey == 't') {
                     trackLoRaTarget(node.address, node.displayName);
                     drawMainBorder(true);
@@ -289,7 +281,24 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
                 }
             }
         }
-        if (!loop) break;
+        if (!loop || esc) break;
+
+        if (up && !node.packets.empty()) {
+            if (selectedPktIdx > 0) {
+                selectedPktIdx--;
+            } else {
+                selectedPktIdx = (int)node.packets.size() - 1;
+            }
+            needsRedraw = true;
+        }
+        if (down && !node.packets.empty()) {
+            if (selectedPktIdx + 1 < (int)node.packets.size()) {
+                selectedPktIdx++;
+            } else {
+                selectedPktIdx = 0;
+            }
+            needsRedraw = true;
+        }
 
         if (sel) {
             if (!node.packets.empty() && selectedPktIdx >= 0 && selectedPktIdx < (int)node.packets.size()) {
@@ -448,33 +457,24 @@ void runLoRaSniffer() {
         else if (encSteps < 0) up = true;
 #endif
 
-        if (esc) {
-            break;
-        }
-
-        if (up) {
-            if (selectedIdx > 0) {
-                selectedIdx--;
-                needsRedraw = true;
-            }
-        }
-        if (down) {
-            if (selectedIdx + 1 < (int)gLoRaNodes.size()) {
-                selectedIdx++;
-                needsRedraw = true;
-            }
-        }
-
         keyStroke k = _getKeyPress();
         if (k.pressed || !k.word.empty()) {
-            if (k.del || k.exit_key) {
+            if (k.enter) sel = true;
+            if (k.del) {
                 break;
             }
             for (auto ch : k.word) {
-                char lowerKey = tolower(ch);
-                if (lowerKey == '`') {
+                char lowerKey = tolower((char)ch);
+                uint8_t uKey = (uint8_t)ch;
+                if (lowerKey == '`' || lowerKey == 'q' || uKey == 0x1B) {
                     goto exit_sniffer;
-                } else if (lowerKey == 'p') {
+                } else if (ch == ';' || uKey == 0xDA || lowerKey == 'w' || lowerKey == 'k' || ch == '+' || ch == '=') {
+                    up = true;
+                } else if (ch == '.' || uKey == 0xD9 || lowerKey == 's' || lowerKey == 'j' || ch == '-' || ch == '_') {
+                    down = true;
+                } else if (ch == '\n' || ch == '\r' || uKey == 13 || lowerKey == 'e') {
+                    sel = true;
+                } else if (lowerKey == 'p' || ch == ' ') {
                     isPaused = !isPaused;
                     needsRedraw = true;
                 } else if (lowerKey == 'c') {
@@ -500,6 +500,27 @@ void runLoRaSniffer() {
                     }
                 }
             }
+        }
+
+        if (esc) {
+            break;
+        }
+
+        if (up && !gLoRaNodes.empty()) {
+            if (selectedIdx > 0) {
+                selectedIdx--;
+            } else {
+                selectedIdx = (int)gLoRaNodes.size() - 1;
+            }
+            needsRedraw = true;
+        }
+        if (down && !gLoRaNodes.empty()) {
+            if (selectedIdx + 1 < (int)gLoRaNodes.size()) {
+                selectedIdx++;
+            } else {
+                selectedIdx = 0;
+            }
+            needsRedraw = true;
         }
 
         if (sel) {

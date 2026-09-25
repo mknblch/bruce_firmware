@@ -259,12 +259,13 @@ void trackLoRaTarget(const String &targetMacOrId, const String &label) {
 
         keyStroke k = _getKeyPress();
         if (k.pressed || !k.word.empty()) {
-            if (k.del || k.exit_key) {
+            if (k.del) {
                 break;
             }
             for (auto ch : k.word) {
-                char lowerKey = tolower(ch);
-                if (lowerKey == '`') {
+                char lowerKey = tolower((char)ch);
+                uint8_t uKey = (uint8_t)ch;
+                if (lowerKey == '`' || lowerKey == 'q' || uKey == 0x1B) {
                     goto exit_tracker;
                 } else if (lowerKey == 'c') {
                     packetCount = 0;
