@@ -1,6 +1,9 @@
 #include "core/bus_HAL.h"
 #include "core/powerSave.h"
 #include "core/utils.h"
+#if !defined(LITE_VERSION)
+#include "modules/lora/LoRaConfig.h"
+#endif
 #include <Adafruit_TCA8418.h>
 #include <Keyboard.h>
 #include <Wire.h>
@@ -320,6 +323,13 @@ void _post_setup_gpio() {
                 bruceConfigPins.LoRa_bus.io1 = (gpio_num_t)6;
             }
         }
+
+#if !defined(LITE_VERSION)
+        loadLoRaConfig();
+        loraConfig.radioType = LoRaRadioType::SX1262;
+        saveLoRaConfig();
+        Serial.println("CAP LoRa-1262 forced SX1262 radio type");
+#endif
     } else if (UseTCA8418) {
         if (bruceConfigPins.gps_bus.rx == GPIO_NUM_NC)
             bruceConfigPins.gps_bus.rx = (gpio_num_t)GPS_SERIAL_RX;

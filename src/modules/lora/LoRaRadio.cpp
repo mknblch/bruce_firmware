@@ -367,7 +367,15 @@ bool startLoRaReceive() {
 
 bool checkLoRaPacketAvailable() {
     if (!gLoraInitialized) return false;
-    return gLoraPacketReceived;
+    if (gLoraPacketReceived) return true;
+    if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
+        uint32_t flags = gLora1262->getIrqFlags();
+        if (flags & (RADIOLIB_SX126X_IRQ_RX_DONE | RADIOLIB_SX126X_IRQ_HEADER_ERR | RADIOLIB_SX126X_IRQ_CRC_ERR)) {
+            gLoraPacketReceived = true;
+            return true;
+        }
+    }
+    return false;
 }
 
 int readLoRaRawData(
