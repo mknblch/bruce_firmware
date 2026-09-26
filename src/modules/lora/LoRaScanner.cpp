@@ -68,8 +68,9 @@ void runLoRaChannelDetector() {
             scanSyncWord = 0x12;
             scanPreambleLen = 8;
         }},
-        {"Bruce 868.1 Test (SF9/BW31)", [&]() {
+        {"Bruce 868 Test (SF9/BW31)", [&]() {
             channels = {
+                {"Bruce 868.0", 868.000f, 9, 31.25f, 0, -140.0f, -140.0f, 0},
                 {"Bruce 868.1", 868.100f, 9, 31.25f, 0, -140.0f, -140.0f, 0},
             };
             scanCr = 8;

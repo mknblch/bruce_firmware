@@ -170,13 +170,21 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
         }
     } else {
         gLora1262 = new SX1262(gLoraModule);
-        state = gLora1262->begin(cfg.freqMHz);
-        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setSpreadingFactor(cfg.sf);
-        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setBandwidth(cfg.bwKHz);
-        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setCodingRate(cfg.cr);
-        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setSyncWord(cfg.syncWord);
-        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setPreambleLength(cfg.preambleLen);
-        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setOutputPower(cfg.powerDbm);
+        state = gLora1262->begin(
+            cfg.freqMHz, cfg.bwKHz, cfg.sf, cfg.cr, cfg.syncWord, cfg.powerDbm, cfg.preambleLen, 3.0f, true
+        );
+        if (state != RADIOLIB_ERR_NONE) {
+            Serial.printf("[LoRa] SX1262 begin with 3.0V TCXO/LDO failed (%d), falling back to default begin\n", state);
+            state = gLora1262->begin(cfg.freqMHz);
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setSpreadingFactor(cfg.sf);
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setBandwidth(cfg.bwKHz);
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setCodingRate(cfg.cr);
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setSyncWord(cfg.syncWord);
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setPreambleLength(cfg.preambleLen);
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setOutputPower(cfg.powerDbm);
+        }
+        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setDio2AsRfSwitch(true);
+        if (state == RADIOLIB_ERR_NONE) gLora1262->setRxBoostedGainMode(true);
         if (state == RADIOLIB_ERR_NONE) state = gLora1262->setCRC(true);
         if (state == RADIOLIB_ERR_NONE) state = gLora1262->explicitHeader();
         if (state == RADIOLIB_ERR_NONE && rxMode) {

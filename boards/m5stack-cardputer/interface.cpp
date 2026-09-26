@@ -149,6 +149,30 @@ static bool updateI2CRegisterBit(
     return updatedValue == value || writeI2CRegister8(wire, address, reg, updatedValue);
 }
 
+bool prepareCardputerLoRaFrontend() {
+    TwoWire *wire = getSysI2CBus();
+    if (wire == nullptr) {
+        wire = &Wire1;
+    }
+    lockSysI2CBus();
+    uint8_t capExpanderId = 0;
+    if (!readI2CRegister8(*wire, 0x43, 0x01, capExpanderId) || capExpanderId == 0) {
+        unlockSysI2CBus();
+        return true;
+    }
+    writeI2CRegister8(*wire, 0x43, 0x01, 0x01);
+    bool ok = updateI2CRegisterBit(*wire, 0x43, 0x03, 0x01, true) &&
+              updateI2CRegisterBit(*wire, 0x43, 0x07, 0x01, false) &&
+              updateI2CRegisterBit(*wire, 0x43, 0x05, 0x01, true);
+    unlockSysI2CBus();
+    Serial.printf("CAP LoRa-1262 frontend RF switch %s\n", ok ? "enabled" : "failed");
+    return ok;
+}
+
+bool prepareBoardLoRaRadio() {
+    return prepareCardputerLoRaFrontend();
+}
+
 void _post_setup_gpio() {
     // Initialize TCA8418 I2C keyboard controller
     Serial.println("DEBUG: Cardputer ADV - Initializing TCA8418 keyboard");
@@ -214,17 +238,27 @@ void _post_setup_gpio() {
         bruceConfigPins.gps_bus.rx = (gpio_num_t)GPS_SERIAL_RX;
         bruceConfigPins.gps_bus.tx = (gpio_num_t)GPS_SERIAL_TX;
 
-        bruceConfigPins.CC1101_bus.sck = (gpio_num_t)40;
-        bruceConfigPins.CC1101_bus.miso = (gpio_num_t)39;
-        bruceConfigPins.CC1101_bus.mosi = (gpio_num_t)14;
-        bruceConfigPins.CC1101_bus.cs = (gpio_num_t)13;
-        bruceConfigPins.CC1101_bus.io0 = (gpio_num_t)5;
+        if (!capLoRa1262Detected) {
+            bruceConfigPins.CC1101_bus.sck = (gpio_num_t)40;
+            bruceConfigPins.CC1101_bus.miso = (gpio_num_t)39;
+            bruceConfigPins.CC1101_bus.mosi = (gpio_num_t)14;
+            bruceConfigPins.CC1101_bus.cs = (gpio_num_t)13;
+            bruceConfigPins.CC1101_bus.io0 = (gpio_num_t)5;
 
-        bruceConfigPins.NRF24_bus.sck = (gpio_num_t)40;
-        bruceConfigPins.NRF24_bus.miso = (gpio_num_t)39;
-        bruceConfigPins.NRF24_bus.mosi = (gpio_num_t)14;
-        bruceConfigPins.NRF24_bus.cs = (gpio_num_t)6;
-        bruceConfigPins.NRF24_bus.io0 = (gpio_num_t)4;
+            bruceConfigPins.NRF24_bus.sck = (gpio_num_t)40;
+            bruceConfigPins.NRF24_bus.miso = (gpio_num_t)39;
+            bruceConfigPins.NRF24_bus.mosi = (gpio_num_t)14;
+            bruceConfigPins.NRF24_bus.cs = (gpio_num_t)6;
+            bruceConfigPins.NRF24_bus.io0 = (gpio_num_t)4;
+        } else {
+            bruceConfigPins.LoRa_bus.sck = (gpio_num_t)40;
+            bruceConfigPins.LoRa_bus.miso = (gpio_num_t)39;
+            bruceConfigPins.LoRa_bus.mosi = (gpio_num_t)14;
+            bruceConfigPins.LoRa_bus.cs = (gpio_num_t)5;
+            bruceConfigPins.LoRa_bus.io0 = (gpio_num_t)3; // RST
+            bruceConfigPins.LoRa_bus.io1 = (gpio_num_t)6; // BUSY
+            bruceConfigPins.LoRa_bus.io2 = (gpio_num_t)4; // IRQ
+        }
 
         tca.matrix(7, 8);
         tca.flush();
@@ -249,6 +283,43 @@ void _post_setup_gpio() {
             "CAP GPS UART RX=%d TX=%d baud=%d\n", bruceConfigPins.gps_bus.rx, bruceConfigPins.gps_bus.tx,
             bruceConfigPins.gpsBaudrate
         );
+
+        // Cap LoRa-1262 occupies SPI (40, 39, 14), CS=5, RST=3, BUSY=6, IRQ=4.
+        // Clear conflicting CC1101, NRF24 and IR pin assignments so they do not fight the SX1262 pins
+        if (bruceConfigPins.NRF24_bus.cs == 6 || bruceConfigPins.NRF24_bus.cs == 4) {
+            bruceConfigPins.NRF24_bus.cs = GPIO_NUM_NC;
+        }
+        if (bruceConfigPins.NRF24_bus.io0 == 4 || bruceConfigPins.NRF24_bus.io0 == 3) {
+            bruceConfigPins.NRF24_bus.io0 = GPIO_NUM_NC;
+        }
+        if (bruceConfigPins.CC1101_bus.cs == 13 || bruceConfigPins.CC1101_bus.cs == 15 || bruceConfigPins.CC1101_bus.cs == 5) {
+            bruceConfigPins.CC1101_bus.cs = GPIO_NUM_NC;
+        }
+        if (bruceConfigPins.CC1101_bus.io0 == 5 || bruceConfigPins.CC1101_bus.io0 == 13 || bruceConfigPins.CC1101_bus.io0 == 15) {
+            bruceConfigPins.CC1101_bus.io0 = GPIO_NUM_NC;
+        }
+        if (bruceConfigPins.irTx == 5 || bruceConfigPins.irTx == 6 || bruceConfigPins.irTx == 3 || bruceConfigPins.irTx == 4) {
+            bruceConfigPins.irTx = 44;
+        }
+        if (bruceConfigPins.irRx == 5 || bruceConfigPins.irRx == 6 || bruceConfigPins.irRx == 3 || bruceConfigPins.irRx == 4) {
+            bruceConfigPins.irRx = -1;
+        }
+
+        // Populate LoRa pins if unconfigured (-1) or ensure correct Cap LoRa-1262 pins
+        if (bruceConfigPins.LoRa_bus.sck == GPIO_NUM_NC || bruceConfigPins.LoRa_bus.cs == GPIO_NUM_NC) {
+            bruceConfigPins.LoRa_bus.sck = (gpio_num_t)40;
+            bruceConfigPins.LoRa_bus.miso = (gpio_num_t)39;
+            bruceConfigPins.LoRa_bus.mosi = (gpio_num_t)14;
+            bruceConfigPins.LoRa_bus.cs = (gpio_num_t)5;
+            bruceConfigPins.LoRa_bus.io0 = (gpio_num_t)3; // RST
+            bruceConfigPins.LoRa_bus.io1 = (gpio_num_t)6; // BUSY
+            bruceConfigPins.LoRa_bus.io2 = (gpio_num_t)4; // IRQ
+            Serial.println("CAP LoRa-1262 default pins assigned");
+        } else {
+            if (bruceConfigPins.LoRa_bus.io1 == GPIO_NUM_NC) {
+                bruceConfigPins.LoRa_bus.io1 = (gpio_num_t)6;
+            }
+        }
     } else if (UseTCA8418) {
         if (bruceConfigPins.gps_bus.rx == GPIO_NUM_NC)
             bruceConfigPins.gps_bus.rx = (gpio_num_t)GPS_SERIAL_RX;

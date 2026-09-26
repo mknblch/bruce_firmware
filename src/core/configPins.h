@@ -200,6 +200,17 @@ public:
 #endif
 
 #ifdef LORA_SCK
+#ifdef LORA_BUSY
+    SPIPins LoRa_bus = {
+        (gpio_num_t)LORA_SCK,
+        (gpio_num_t)LORA_MISO,
+        (gpio_num_t)LORA_MOSI,
+        (gpio_num_t)LORA_CS,
+        (gpio_num_t)LORA_RST,
+        (gpio_num_t)LORA_DIO0,
+        (gpio_num_t)LORA_BUSY
+    };
+#else
     SPIPins LoRa_bus = {
         (gpio_num_t)LORA_SCK,
         (gpio_num_t)LORA_MISO,
@@ -208,6 +219,7 @@ public:
         (gpio_num_t)LORA_RST,
         (gpio_num_t)LORA_DIO0
     };
+#endif
 #else
     SPIPins LoRa_bus;
 #endif
