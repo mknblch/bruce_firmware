@@ -2,6 +2,7 @@
 #include "LoRaConfig.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
+#include "core/sd_functions.h"
 #include "core/utils.h"
 #include <FS.h>
 #include <LittleFS.h>
@@ -9,34 +10,66 @@
 LoRaConfigData loraConfig;
 
 const std::vector<LoRaPreset> kLoRaPresets = {
-    // Meshtastic LongFast (Default public mesh channel)
+    // Common Meshtastic presets
     {"Mesh EU868 LongFast", "Meshtastic", 869.525f, 11, 250.0f, 5, 0x2B, 16},
     {"Mesh US915 LongFast", "Meshtastic", 906.875f, 11, 250.0f, 5, 0x2B, 16},
     {"Mesh 433 LongFast",   "Meshtastic", 433.175f, 11, 250.0f, 5, 0x2B, 16},
     {"Mesh AS923 LongFast", "Meshtastic", 923.000f, 11, 250.0f, 5, 0x2B, 16},
     {"Mesh AU915 LongFast", "Meshtastic", 915.000f, 11, 250.0f, 5, 0x2B, 16},
-
-    // Meshtastic MediumFast / MediumSlow
-    {"Mesh EU868 MedFast",  "Meshtastic", 869.525f, 9, 250.0f, 5, 0x2B, 16},
-    {"Mesh US915 MedFast",  "Meshtastic", 906.875f, 9, 250.0f, 5, 0x2B, 16},
-    {"Mesh 433 MedFast",    "Meshtastic", 433.175f, 9, 250.0f, 5, 0x2B, 16},
-
-    // LoRaWAN Public Channels (Sync 0x34)
     {"LoRaWAN EU868 Ch1",   "LoRaWAN",    868.100f, 7, 125.0f, 5, 0x34, 8},
-    {"LoRaWAN EU868 Ch2",   "LoRaWAN",    868.300f, 7, 125.0f, 5, 0x34, 8},
-    {"LoRaWAN EU868 Ch3",   "LoRaWAN",    868.500f, 7, 125.0f, 5, 0x34, 8},
-    {"LoRaWAN US915 Ch1",   "LoRaWAN",    902.300f, 7, 125.0f, 5, 0x34, 8},
-    {"LoRaWAN US915 Ch2",   "LoRaWAN",    902.500f, 7, 125.0f, 5, 0x34, 8},
-    {"LoRaWAN 433 Ch1",     "LoRaWAN",    433.175f, 7, 125.0f, 5, 0x34, 8},
-
-    // Bruce Chat / Private Channels (Sync 0x12)
-    {"Bruce Chat 434.5",    "Bruce",      434.500f, 9, 31.25f, 8, 0x12, 8},
     {"Bruce Chat 868.0",    "Bruce",      868.000f, 9, 31.25f, 8, 0x12, 8},
-    {"Bruce Chat 915.0",    "Bruce",      915.000f, 9, 31.25f, 8, 0x12, 8},
-    {"LoRa Flipper 433.92", "Generic",    433.920f, 7, 125.0f, 5, 0x12, 8},
-    {"LoRa Flipper 868.35", "Generic",    868.350f, 7, 125.0f, 5, 0x12, 8},
-    {"LoRa Flipper 915.00", "Generic",    915.000f, 7, 125.0f, 5, 0x12, 8},
 };
+
+std::vector<LoRaPreset> loadLoRaPresetsFromStorage() {
+    std::vector<LoRaPreset> presets;
+    static const char *presetFilePath = "/BruceLoRa/presets.json";
+    if (!setupSdCard() || !SD.exists(presetFilePath)) return presets;
+
+    File file = SD.open(presetFilePath, FILE_READ);
+    if (!file) return presets;
+    if (file.size() == 0 || file.size() > 32768) {
+        file.close();
+        Serial.println("[LoRa] Presets file has an invalid size");
+        return presets;
+    }
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+    if (error || !doc["presets"].is<JsonArrayConst>()) {
+        Serial.println("[LoRa] Failed to read /BruceLoRa/presets.json");
+        return presets;
+    }
+
+    JsonArrayConst entries = doc["presets"].as<JsonArrayConst>();
+    for (JsonVariantConst entry : entries) {
+        if (presets.size() >= 128) break;
+        if (!entry["name"].is<const char *>() || !entry["category"].is<const char *>() ||
+            !entry["freqMHz"].is<float>() || !entry["sf"].is<uint8_t>() ||
+            !entry["bwKHz"].is<float>() || !entry["cr"].is<uint8_t>() ||
+            !entry["syncWord"].is<uint8_t>() || !entry["preambleLen"].is<uint16_t>()) {
+            continue;
+        }
+
+        String name = entry["name"].as<String>();
+        String category = entry["category"].as<String>();
+        const float freqMHz = entry["freqMHz"].as<float>();
+        const uint8_t sf = entry["sf"].as<uint8_t>();
+        const float bwKHz = entry["bwKHz"].as<float>();
+        const uint8_t cr = entry["cr"].as<uint8_t>();
+        const uint8_t syncWord = entry["syncWord"].as<uint8_t>();
+        const uint16_t preambleLen = entry["preambleLen"].as<uint16_t>();
+
+        if (name.isEmpty() || name.length() > 40 || category.isEmpty() || category.length() > 24 ||
+            freqMHz < 100.0f || freqMHz > 1000.0f || sf < 5 || sf > 12 || bwKHz < 7.8f ||
+            bwKHz > 500.0f || cr < 5 || cr > 8 || preambleLen == 0) {
+            continue;
+        }
+
+        presets.push_back({name, category, freqMHz, sf, bwKHz, cr, syncWord, preambleLen});
+    }
+    return presets;
+}
 
 void loadLoRaConfig() {
     if (!LittleFS.exists("/lora_settings.json")) {
@@ -118,15 +151,18 @@ void saveLoRaConfig() {
 bool selectLoRaPresetMenu() {
     loadLoRaConfig();
     bool presetSelected = false;
+    std::vector<LoRaPreset> presetProfiles(kLoRaPresets.begin(), kLoRaPresets.end());
+    std::vector<LoRaPreset> storedPresets = loadLoRaPresetsFromStorage();
+    presetProfiles.insert(presetProfiles.end(), storedPresets.begin(), storedPresets.end());
     std::vector<Option> presetOptions = {
         {"Use Current Settings", [&presetSelected]() { presetSelected = true; }}
     };
-    for (const auto &preset : kLoRaPresets) {
+    for (const auto &preset : presetProfiles) {
         const LoRaPreset *profile = &preset;
         String family = "G";
-        if (String(preset.category) == "Meshtastic") family = "M";
-        else if (String(preset.category) == "LoRaWAN") family = "W";
-        else if (String(preset.category) == "Bruce") family = "B";
+        if (preset.category.startsWith("Meshtastic")) family = "M";
+        else if (preset.category.startsWith("LoRaWAN")) family = "W";
+        else if (preset.category.startsWith("Bruce")) family = "B";
 
         String bandwidth = String(preset.bwKHz, 2);
         while (bandwidth.endsWith("0")) bandwidth.remove(bandwidth.length() - 1);

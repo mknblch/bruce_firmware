@@ -19,6 +19,7 @@ bool setLoRaBandwidth(float bwKHz);
 bool setLoRaSpreadingFactor(uint8_t sf);
 bool setLoRaSyncWord(uint8_t syncWord);
 bool setLoRaCodingRate(uint8_t cr);
+bool setLoRaPreambleLength(uint16_t preambleLen);
 bool startLoRaReceive();
 
 bool checkLoRaPacketAvailable();

@@ -292,6 +292,21 @@ bool setLoRaCodingRate(uint8_t cr) {
     return (state == RADIOLIB_ERR_NONE);
 }
 
+bool setLoRaPreambleLength(uint16_t preambleLen) {
+    if (!gLoraInitialized) return false;
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
+    int state = RADIOLIB_ERR_NONE;
+    if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
+        state = gLora1276->setPreambleLength(preambleLen);
+    } else if (gLora1262) {
+        state = gLora1262->setPreambleLength(preambleLen);
+    }
+    gLoraPacketReceived = false;
+    gLoraInterruptEnabled = true;
+    return (state == RADIOLIB_ERR_NONE);
+}
+
 bool startLoRaReceive() {
     if (!gLoraInitialized) return false;
     gLoraInterruptEnabled = false;

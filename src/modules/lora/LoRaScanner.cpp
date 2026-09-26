@@ -8,6 +8,7 @@
 #include "core/mykeyboard.h"
 #include "core/utils.h"
 #include <Arduino.h>
+#include <algorithm>
 
 struct ScanChannelEntry {
     String label;
@@ -20,6 +21,9 @@ struct ScanChannelEntry {
     uint32_t lastSeenMs;
     uint8_t syncWord = 0;
     bool hasSyncWord = false;
+    uint8_t cr = 5;
+    uint16_t preambleLen = 8;
+    bool hasRadioParams = false;
 };
 
 static String formatSyncWord(uint8_t syncWord) {
@@ -52,6 +56,7 @@ void runLoRaChannelDetector() {
     displayTextLine("Init Channel Detector...");
 
     std::vector<ScanChannelEntry> channels;
+    std::vector<LoRaPreset> storedPresets = loadLoRaPresetsFromStorage();
     uint8_t scanCr = loraConfig.cr;
     uint8_t scanSyncWord = loraConfig.syncWord;
     uint16_t scanPreambleLen = loraConfig.preambleLen;
@@ -75,19 +80,35 @@ void runLoRaChannelDetector() {
             scanSyncWord = 0x12;
             scanPreambleLen = 8;
         }},
-        {"Meshtastic Presets", [&]() {
+        {"Meshtastic EU868", [&]() {
+            channels = { {"EU868 LongFast", 869.525f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
             scanCr = 5;
             scanSyncWord = 0x2B;
             scanPreambleLen = 16;
-            channels = {
-                {"EU868 LongFast", 869.525f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
-                {"EU868 MedFast",  869.525f, 9,  250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
-                {"US915 LongFast", 906.875f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
-                {"US915 MedFast",  906.875f, 9,  250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
-                {"433 LongFast",   433.175f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
-                {"AS923 LongFast", 923.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
-                {"AU915 LongFast", 915.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
-            };
+        }},
+        {"Meshtastic US915", [&]() {
+            channels = { {"US915 LongFast", 906.875f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
+            scanCr = 5;
+            scanSyncWord = 0x2B;
+            scanPreambleLen = 16;
+        }},
+        {"Meshtastic 433 MHz", [&]() {
+            channels = { {"433 LongFast", 433.175f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
+            scanCr = 5;
+            scanSyncWord = 0x2B;
+            scanPreambleLen = 16;
+        }},
+        {"Meshtastic AS923", [&]() {
+            channels = { {"AS923 LongFast", 923.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
+            scanCr = 5;
+            scanSyncWord = 0x2B;
+            scanPreambleLen = 16;
+        }},
+        {"Meshtastic AU915", [&]() {
+            channels = { {"AU915 LongFast", 915.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
+            scanCr = 5;
+            scanSyncWord = 0x2B;
+            scanPreambleLen = 16;
         }},
         {"LoRaWAN EU868 Band", [&]() {
             scanCr = 5;
@@ -144,6 +165,24 @@ void runLoRaChannelDetector() {
         }}
     };
 
+    std::vector<String> presetCategories;
+    for (const auto &preset : storedPresets) {
+        if (std::find(presetCategories.begin(), presetCategories.end(), preset.category) == presetCategories.end()) {
+            presetCategories.push_back(preset.category);
+        }
+    }
+    for (const auto &category : presetCategories) {
+        scanModes.push_back({category + " Presets", [&, category]() {
+            channels.clear();
+            for (const auto &preset : storedPresets) {
+                if (preset.category == category) {
+                    channels.push_back({preset.name, preset.freqMHz, preset.sf, preset.bwKHz, 0, -140.0f,
+                                        -140.0f, 0, preset.syncWord, true, preset.cr, preset.preambleLen, true});
+                }
+            }
+        }});
+    }
+
     int chosen = loopOptions(scanModes, MENU_TYPE_SUBMENU, "Select Scan Band", 0, false, false, 0, true, FP);
     if (chosen < 0 || channels.empty()) return;
 
@@ -159,9 +198,9 @@ void runLoRaChannelDetector() {
     scanCfg.freqMHz = channels[0].freqMHz;
     scanCfg.sf = channels[0].sf;
     scanCfg.bwKHz = channels[0].bwKHz;
-    scanCfg.cr = scanCr;
+    scanCfg.cr = channels[0].hasRadioParams ? channels[0].cr : scanCr;
     scanCfg.syncWord = channels[0].syncWord;
-    scanCfg.preambleLen = scanPreambleLen;
+    scanCfg.preambleLen = channels[0].hasRadioParams ? channels[0].preambleLen : scanPreambleLen;
 
     if (!initLoRaRadio(scanCfg, true)) {
         displayError("LoRa Radio Init Failed", true);
@@ -372,9 +411,9 @@ void runLoRaChannelDetector() {
                 loraConfig.freqMHz = selCh.freqMHz;
                 loraConfig.sf = selCh.sf;
                 loraConfig.bwKHz = selCh.bwKHz;
-                loraConfig.cr = scanCr;
+                loraConfig.cr = selCh.hasRadioParams ? selCh.cr : scanCr;
                 loraConfig.syncWord = selCh.syncWord;
-                loraConfig.preambleLen = scanPreambleLen;
+                loraConfig.preambleLen = selCh.hasRadioParams ? selCh.preambleLen : scanPreambleLen;
                 saveLoRaConfig();
                 stopLoRaRadio();
 
@@ -396,7 +435,10 @@ void runLoRaChannelDetector() {
                 scanCfg.freqMHz = channels[currentChIdx].freqMHz;
                 scanCfg.sf = channels[currentChIdx].sf;
                 scanCfg.bwKHz = channels[currentChIdx].bwKHz;
+                scanCfg.cr = channels[currentChIdx].hasRadioParams ? channels[currentChIdx].cr : scanCr;
                 scanCfg.syncWord = channels[currentChIdx].syncWord;
+                scanCfg.preambleLen = channels[currentChIdx].hasRadioParams ? channels[currentChIdx].preambleLen
+                                                                            : scanPreambleLen;
                 initLoRaRadio(scanCfg, true);
                 drawMainBorder(true);
                 drawFullUI();
@@ -434,7 +476,7 @@ void runLoRaChannelDetector() {
                 pkt.freqMHz = ch.freqMHz;
                 pkt.sf = ch.sf;
                 pkt.bwKHz = ch.bwKHz;
-                pkt.cr = scanCfg.cr;
+                pkt.cr = ch.hasRadioParams ? ch.cr : scanCr;
                 pkt.syncWord = ch.syncWord;
                 pkt.rssi = rssi;
                 pkt.snr = snr;
@@ -489,6 +531,8 @@ void runLoRaChannelDetector() {
             setLoRaSpreadingFactor(ch.sf);
             setLoRaBandwidth(ch.bwKHz);
             setLoRaSyncWord(ch.syncWord);
+            setLoRaCodingRate(ch.hasRadioParams ? ch.cr : scanCr);
+            setLoRaPreambleLength(ch.hasRadioParams ? ch.preambleLen : scanPreambleLen);
             startLoRaReceive();
             drawStatus();
         }

@@ -12,8 +12,8 @@ enum class LoRaRadioType : uint8_t {
 };
 
 struct LoRaPreset {
-    const char *name;
-    const char *category;
+    String name;
+    String category;
     float freqMHz;
     uint8_t sf;
     float bwKHz;
@@ -41,6 +41,7 @@ struct LoRaConfigData {
 extern LoRaConfigData loraConfig;
 extern const std::vector<LoRaPreset> kLoRaPresets;
 
+std::vector<LoRaPreset> loadLoRaPresetsFromStorage();
 void loadLoRaConfig();
 void saveLoRaConfig();
 bool selectLoRaPresetMenu();
