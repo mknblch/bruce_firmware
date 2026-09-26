@@ -44,9 +44,25 @@ void runLoRaChannelDetector() {
     displayTextLine("Init Channel Detector...");
 
     std::vector<ScanChannelEntry> channels;
+    uint8_t scanCr = loraConfig.cr;
+    uint8_t scanSyncWord = loraConfig.syncWord;
+    uint16_t scanPreambleLen = loraConfig.preambleLen;
 
     // Pick scan mode
     std::vector<Option> scanModes = {
+        {"Waveshare HF-B 868.0 (SF7/BW125)", [&]() {
+            channels = {
+                {"Waveshare 868.0", 868.000f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
+            };
+            scanCr = 5;
+            scanSyncWord = 0x12;
+            scanPreambleLen = 8;
+        }},
+        {"Bruce 868.1 Test (SF9/BW31)", [&]() {
+            channels = {
+                {"Bruce 868.1", 868.100f, 9, 31.25f, 0, -140.0f, -140.0f, 0},
+            };
+        }},
         {"Meshtastic Presets", [&]() {
             channels = {
                 {"EU868 LongFast", 869.525f, 11, 250.0f, 0, -140.0f, -140.0f, 0},
@@ -108,11 +124,18 @@ void runLoRaChannelDetector() {
     scanCfg.freqMHz = channels[0].freqMHz;
     scanCfg.sf = channels[0].sf;
     scanCfg.bwKHz = channels[0].bwKHz;
+    scanCfg.cr = scanCr;
+    scanCfg.syncWord = scanSyncWord;
+    scanCfg.preambleLen = scanPreambleLen;
 
     if (!initLoRaRadio(scanCfg, true)) {
         displayError("LoRa Radio Init Failed", true);
         return;
     }
+    Serial.printf(
+        "[LoRaDetector] RX started: %u channels, %.3fMHz SF%d BW%.2fkHz CR4/%d Sync 0x%02X\n",
+        (unsigned)channels.size(), scanCfg.freqMHz, scanCfg.sf, scanCfg.bwKHz, scanCfg.cr, scanCfg.syncWord
+    );
 
     int selectedIdx = 0;
     int scrollOffset = 0;
@@ -244,8 +267,11 @@ void runLoRaChannelDetector() {
         else if (encSteps < 0) up = true;
 #endif
 
-        keyStroke k = _getKeyPress();
-        if (k.pressed || !k.word.empty()) {
+        if (up || down || sel || esc) {
+            KeyStroke.Clear();
+        } else if (KeyStroke.pressed || !KeyStroke.word.empty()) {
+            keyStroke k = _getKeyPress();
+            AnyKeyPress = false;
             if (k.enter) sel = true;
             if (k.del) esc = true;
             for (auto ch : k.word) {
@@ -272,6 +298,8 @@ void runLoRaChannelDetector() {
                     drawFullUI();
                 }
             }
+        } else {
+            AnyKeyPress = false;
         }
 
         if (esc) break;
@@ -339,8 +367,14 @@ void runLoRaChannelDetector() {
             size_t pktLen = 0;
             int state = readLoRaRawData(rxBuffer, sizeof(rxBuffer), rssi, snr, freqErr, pktLen);
 
-            if (state == RADIOLIB_ERR_NONE && pktLen > 0) {
+            if ((state == RADIOLIB_ERR_NONE || state == RADIOLIB_ERR_CRC_MISMATCH) && pktLen > 0) {
                 auto &ch = channels[currentChIdx];
+                const bool crcOk = state == RADIOLIB_ERR_NONE;
+                Serial.printf(
+                    "[LoRaDetector] RX channel=%u freq=%.3fMHz SF%d BW%.2fkHz crc=%s len=%u RSSI=%.1f SNR=%.1f\n",
+                    (unsigned)currentChIdx, ch.freqMHz, ch.sf, ch.bwKHz, crcOk ? "OK" : "FAIL",
+                    (unsigned)pktLen, rssi, snr
+                );
                 ch.hits++;
                 ch.lastSeenMs = millis();
                 ch.lastRssi = rssi;
@@ -358,22 +392,38 @@ void runLoRaChannelDetector() {
                 pkt.freqMHz = ch.freqMHz;
                 pkt.sf = ch.sf;
                 pkt.bwKHz = ch.bwKHz;
-                pkt.cr = loraConfig.cr;
-                pkt.syncWord = loraConfig.syncWord;
+                pkt.cr = scanCfg.cr;
+                pkt.syncWord = scanCfg.syncWord;
                 pkt.rssi = rssi;
                 pkt.snr = snr;
                 pkt.freqErrorHz = freqErr;
                 pkt.timeOnAirMs = getLoRaTimeOnAir(pktLen);
-                pkt.crcOk = true;
+                pkt.crcOk = crcOk;
                 pkt.raw.assign(rxBuffer, rxBuffer + pktLen);
 
                 parseLoRaPacket(pkt);
                 addPacketToSniffer(pkt);
+            } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+                auto &ch = channels[currentChIdx];
+                ch.hits++;
+                ch.lastSeenMs = millis();
+                ch.lastRssi = getLoRaInstantRSSI();
+                if (ch.lastRssi > ch.peakRssi) ch.peakRssi = ch.lastRssi;
+                const int slot = (int)currentChIdx - scrollOffset;
+                if (slot >= 0 && slot < maxLines) {
+                    drawChannelLine(slot, currentChIdx, (int)currentChIdx == selectedIdx);
+                }
+                Serial.printf(
+                    "[LoRaDetector] RX header/CRC error channel=%u freq=%.3fMHz RSSI=%.1f\n",
+                    (unsigned)currentChIdx, ch.freqMHz, ch.lastRssi
+                );
+            } else if (state != -1) {
+                Serial.printf("[LoRaDetector] RX read error=%d len=%u\n", state, (unsigned)pktLen);
             }
         }
 
-        // Periodically sample current channel RSSI for visual bar (rate-limited)
-        if (millis() - lastRssiCheck >= 150) {
+        // Sample current channel RSSI when paused
+        if (isPaused && (millis() - lastRssiCheck >= 300)) {
             lastRssiCheck = millis();
             float instantRssi = getLoRaInstantRSSI();
             if (instantRssi > -135.0f && instantRssi < 0.0f) {
@@ -389,7 +439,7 @@ void runLoRaChannelDetector() {
         }
 
         // Dwell on current channel before hopping to next
-        if (!isPaused && !channels.empty() && (millis() - lastHopTime >= 350)) {
+        if (!isPaused && channels.size() > 1 && (millis() - lastHopTime >= 500)) {
             lastHopTime = millis();
             currentChIdx = (currentChIdx + 1) % channels.size();
             auto &ch = channels[currentChIdx];

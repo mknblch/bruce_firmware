@@ -541,7 +541,13 @@ void runLoRaSniffer() {
             size_t pktLen = 0;
             int state = readLoRaRawData(rxBuffer, sizeof(rxBuffer), rssi, snr, freqErr, pktLen);
 
-            if (state == RADIOLIB_ERR_NONE && pktLen > 0) {
+            if ((state == RADIOLIB_ERR_NONE || state == RADIOLIB_ERR_CRC_MISMATCH) && pktLen > 0) {
+                const bool crcOk = state == RADIOLIB_ERR_NONE;
+                Serial.printf(
+                    "[LoRaSniffer] RX crc=%s freq=%.3fMHz SF%d BW%.2fkHz len=%u RSSI=%.1f SNR=%.1f\n",
+                    crcOk ? "OK" : "FAIL", loraConfig.freqMHz, loraConfig.sf, loraConfig.bwKHz,
+                    (unsigned)pktLen, rssi, snr
+                );
                 LoRaPacket pkt;
                 pkt.timestampMs = millis();
                 pkt.freqMHz = loraConfig.freqMHz;
@@ -553,7 +559,7 @@ void runLoRaSniffer() {
                 pkt.snr = snr;
                 pkt.freqErrorHz = freqErr;
                 pkt.timeOnAirMs = getLoRaTimeOnAir(pktLen);
-                pkt.crcOk = true;
+                pkt.crcOk = crcOk;
                 pkt.raw.assign(rxBuffer, rxBuffer + pktLen);
 
                 parseLoRaPacket(pkt);
@@ -565,6 +571,10 @@ void runLoRaSniffer() {
                 }
 
                 statsChanged = true;
+            } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+                Serial.printf("[LoRaSniffer] RX header/CRC error len=%u\n", (unsigned)pktLen);
+            } else if (state != -1) {
+                Serial.printf("[LoRaSniffer] RX read error=%d len=%u\n", state, (unsigned)pktLen);
             }
         }
 

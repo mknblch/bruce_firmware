@@ -1511,13 +1511,14 @@ RELOAD:
         {String("CS  =" + String(points.cs)).c_str(), [&]() { opt = 4; }},
         {String("CE/GDO0=" + String(points.io0)).c_str(), [&]() { opt = 5; }},
         {String("NC/GDO2=" + String(points.io2)).c_str(), [&]() { opt = 6; }},
-        {"Save Config", [&]() { opt = 7; }, changed},
+        {String("IO1/BUSY=" + String(points.io1)).c_str(), [&]() { opt = 7; }},
+        {"Save Config", [&]() { opt = 8; }, changed},
         {"Main Menu", [&]() { opt = 0; }},
     };
 
     loopOptions(options);
     if (opt == 0) return;
-    else if (opt == 7) {
+    else if (opt == 8) {
         if (changed) {
             value = points;
             bruceConfigPins.setSpiPins(value);
@@ -1532,6 +1533,7 @@ RELOAD:
         else if (opt == 4) index = points.cs + 1;
         else if (opt == 5) index = points.io0 + 1;
         else if (opt == 6) index = points.io2 + 1;
+        else if (opt == 7) index = points.io1 + 1;
         for (int8_t i = -1; i <= GPIO_NUM_MAX; i++) {
             String tmp = String(i);
             options.push_back({tmp.c_str(), [i, &sel]() { sel = (gpio_num_t)i; }});
@@ -1544,6 +1546,7 @@ RELOAD:
         else if (opt == 4) points.cs = sel;
         else if (opt == 5) points.io0 = sel;
         else if (opt == 6) points.io2 = sel;
+        else if (opt == 7) points.io1 = sel;
         changed = true;
         goto RELOAD;
     }

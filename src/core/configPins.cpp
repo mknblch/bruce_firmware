@@ -273,7 +273,7 @@ void BruceConfigPins::toJson(JsonObject obj) const {
     JsonObject _ST25R = root["ST25R_Pins"].to<JsonObject>();
     ST25R_bus.toJson(_ST25R);
 #endif
-    JsonObject _si2c = root["sys_i2c"].as<JsonObject>();
+    JsonObject _si2c = root["sys_i2c"].to<JsonObject>();
     sys_i2c.toJson(_si2c);
     JsonObject _di2c = root["i2c_bus"].to<JsonObject>();
     i2c_bus.toJson(_di2c);

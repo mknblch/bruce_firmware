@@ -23,14 +23,14 @@ struct LoRaPreset {
 };
 
 struct LoRaConfigData {
-    float freqMHz = 434.500f;
+    float freqMHz = 868.100f;
     uint8_t sf = 9;
     float bwKHz = 31.25f;
     uint8_t cr = 8;             // 4/8
     uint8_t syncWord = 0x12;    // 0x12: Private/Bruce, 0x2B: Meshtastic, 0x34: LoRaWAN
     uint16_t preambleLen = 8;
     int8_t powerDbm = 17;
-    LoRaRadioType radioType = LoRaRadioType::SX1276;
+    LoRaRadioType radioType = LoRaRadioType::SX1262;
     String username = "BruceNode";
     bool promiscuous = true;
     bool enablePcap = false;

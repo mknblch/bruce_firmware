@@ -11,6 +11,7 @@ Keyboard_Class Keyboard;
 // TCA8418 keyboard controller for ADV variant
 Adafruit_TCA8418 tca;
 bool UseTCA8418 = false; // Set to true to use TCA8418 (Cardputer ADV)
+static bool capLoRa1262Detected = false;
 
 // Keyboard state variables
 bool fn_key_pressed = false;
@@ -122,6 +123,32 @@ static void recoverI2CPins(int sda, int scl) {
     delayMicroseconds(10);
 }
 
+static bool readI2CRegister8(TwoWire &wire, uint8_t address, uint8_t reg, uint8_t &value) {
+    wire.beginTransmission(address);
+    wire.write(reg);
+    if (wire.endTransmission(false) != 0) return false;
+    if (wire.requestFrom(address, (uint8_t)1) != 1) return false;
+    value = wire.read();
+    return true;
+}
+
+static bool writeI2CRegister8(TwoWire &wire, uint8_t address, uint8_t reg, uint8_t value) {
+    wire.beginTransmission(address);
+    wire.write(reg);
+    wire.write(value);
+    return wire.endTransmission() == 0;
+}
+
+static bool updateI2CRegisterBit(
+    TwoWire &wire, uint8_t address, uint8_t reg, uint8_t mask, bool enabled
+) {
+    uint8_t value;
+    if (!readI2CRegister8(wire, address, reg, value)) return false;
+
+    uint8_t updatedValue = enabled ? (value | mask) : (value & ~mask);
+    return updatedValue == value || writeI2CRegister8(wire, address, reg, updatedValue);
+}
+
 void _post_setup_gpio() {
     // Initialize TCA8418 I2C keyboard controller
     Serial.println("DEBUG: Cardputer ADV - Initializing TCA8418 keyboard");
@@ -135,6 +162,17 @@ void _post_setup_gpio() {
     Wire1.begin(TCA8418_SDA_PIN, TCA8418_SCL_PIN);
     Wire1.setClock(100000);
     delay(50);
+
+    uint8_t capExpanderId = 0;
+    capLoRa1262Detected = readI2CRegister8(Wire1, 0x43, 0x01, capExpanderId) && capExpanderId != 0;
+    if (capLoRa1262Detected) {
+        bool capPowerEnabled = updateI2CRegisterBit(Wire1, 0x43, 0x03, 0x01, true) &&
+                               updateI2CRegisterBit(Wire1, 0x43, 0x07, 0x01, false) &&
+                               updateI2CRegisterBit(Wire1, 0x43, 0x05, 0x01, true);
+        Serial.printf("CAP LoRa-1262 expander output 0 %s\n", capPowerEnabled ? "enabled" : "failed");
+    } else {
+        Serial.println("CAP LoRa-1262 expander not detected at 0x43");
+    }
 
     // Scan I2C bus to see what's available
     Serial.println("DEBUG: Scanning I2C bus...");
@@ -173,9 +211,8 @@ void _post_setup_gpio() {
         // must be overridden to point at Wire1 instead (see setSysI2CBus()'s doc comment).
         setSysI2CBus(&Wire1);
 
-        bruceConfigPins.gps_bus.rx = (gpio_num_t)15;
-        bruceConfigPins.gps_bus.tx = (gpio_num_t)13;
-        bruceConfigPins.gpsBaudrate = 115200;
+        bruceConfigPins.gps_bus.rx = (gpio_num_t)GPS_SERIAL_RX;
+        bruceConfigPins.gps_bus.tx = (gpio_num_t)GPS_SERIAL_TX;
 
         bruceConfigPins.CC1101_bus.sck = (gpio_num_t)40;
         bruceConfigPins.CC1101_bus.miso = (gpio_num_t)39;
@@ -203,6 +240,21 @@ void _post_setup_gpio() {
 
     // Reload persisted config file if present to let user custom pin settings override defaults
     bruceConfigPins.fromFile(sdcardMounted);
+
+    if (capLoRa1262Detected) {
+        bruceConfigPins.gps_bus.rx = (gpio_num_t)15;
+        bruceConfigPins.gps_bus.tx = (gpio_num_t)13;
+        bruceConfigPins.gpsBaudrate = 115200;
+        Serial.printf(
+            "CAP GPS UART RX=%d TX=%d baud=%d\n", bruceConfigPins.gps_bus.rx, bruceConfigPins.gps_bus.tx,
+            bruceConfigPins.gpsBaudrate
+        );
+    } else if (UseTCA8418) {
+        if (bruceConfigPins.gps_bus.rx == GPIO_NUM_NC)
+            bruceConfigPins.gps_bus.rx = (gpio_num_t)GPS_SERIAL_RX;
+        if (bruceConfigPins.gps_bus.tx == GPIO_NUM_NC)
+            bruceConfigPins.gps_bus.tx = (gpio_num_t)GPS_SERIAL_TX;
+    }
 
     if (bruceConfigPins.NRF24_bus.cs >= 0 && bruceConfigPins.NRF24_bus.cs < GPIO_NUM_MAX) {
         pinMode(bruceConfigPins.NRF24_bus.cs, OUTPUT);

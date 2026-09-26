@@ -34,7 +34,7 @@ int getLoraBusyPin() {
 #ifdef LORA_BUSY
     return LORA_BUSY;
 #else
-    return GPIO_NUM_NC;
+    return bruceConfigPins.LoRa_bus.io1;
 #endif
 }
 
@@ -44,6 +44,20 @@ int getLoraCsPin() { return bruceConfigPins.LoRa_bus.cs; }
 static void IRAM_ATTR onLoraPacketInterrupt() {
     if (!gLoraInterruptEnabled) return;
     gLoraPacketReceived = true;
+}
+
+static int startLoRaReceiveOnActiveRadio() {
+    if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
+        const uint32_t irqFlags = RADIOLIB_SX126X_IRQ_RX_DONE | RADIOLIB_SX126X_IRQ_TIMEOUT |
+                                  RADIOLIB_SX126X_IRQ_CRC_ERR | RADIOLIB_SX126X_IRQ_HEADER_ERR |
+                                  RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED | RADIOLIB_SX126X_IRQ_SYNC_WORD_VALID |
+                                  RADIOLIB_SX126X_IRQ_HEADER_VALID;
+        const uint32_t irqMask = RADIOLIB_SX126X_IRQ_RX_DONE | RADIOLIB_SX126X_IRQ_TIMEOUT |
+                                 RADIOLIB_SX126X_IRQ_CRC_ERR | RADIOLIB_SX126X_IRQ_HEADER_ERR;
+        return gLora1262->startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF, irqFlags, irqMask, 0);
+    }
+    if (gLora1276) return gLora1276->startReceive();
+    return -1;
 }
 
 static SPIClass *selectLoraSPI() {
@@ -133,6 +147,9 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
 
     const int irqPin = getLoraIrqPin();
     const int busyPin = (gActiveRadioType == LoRaRadioType::SX1262) ? getLoraBusyPin() : GPIO_NUM_NC;
+    if (gActiveRadioType == LoRaRadioType::SX1262 && busyPin == GPIO_NUM_NC) {
+        Serial.println("[LoRa] SX1262 BUSY pin unset; RadioLib will use its 50 ms fallback");
+    }
     gLoraModule = new Module(getLoraCsPin(), irqPin, getLoraResetPin(), busyPin, *gLoraSpi);
 
     int state = RADIOLIB_ERR_NONE;
@@ -164,7 +181,7 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
         if (state == RADIOLIB_ERR_NONE) state = gLora1262->explicitHeader();
         if (state == RADIOLIB_ERR_NONE && rxMode) {
             gLora1262->setDio1Action(onLoraPacketInterrupt);
-            state = gLora1262->startReceive();
+            state = startLoRaReceiveOnActiveRadio();
         }
     }
 
@@ -195,7 +212,7 @@ bool setLoRaFrequency(float freqMHz) {
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setFrequency(freqMHz);
     } else if (gLora1262) {
-        state = gLora1262->setFrequency(freqMHz);
+        state = gLora1262->setFrequency(freqMHz, true);
     }
     if (state == RADIOLIB_ERR_NONE) gCurFreq = freqMHz;
     gLoraPacketReceived = false;
@@ -274,8 +291,8 @@ bool startLoRaReceive() {
     int state = RADIOLIB_ERR_NONE;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->startReceive();
-    } else if (gLora1262) {
-        state = gLora1262->startReceive();
+    } else {
+        state = startLoRaReceiveOnActiveRadio();
     }
     gLoraPacketReceived = false;
     gLoraInterruptEnabled = true;
@@ -305,14 +322,14 @@ int readLoRaRawData(
     }
 
     if (len == 0) {
-        if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
-            gLora1276->startReceive();
-        } else if (gLora1262) {
-            gLora1262->startReceive();
+        bool headerError = false;
+        if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
+            headerError = (gLora1262->getIrqFlags() & RADIOLIB_SX126X_IRQ_HEADER_ERR) != 0;
         }
+        startLoRaReceiveOnActiveRadio();
         gLoraPacketReceived = false;
         gLoraInterruptEnabled = true;
-        return -1;
+        return headerError ? RADIOLIB_ERR_CRC_MISMATCH : -1;
     }
 
     if (len > maxLen) len = maxLen;
@@ -334,11 +351,7 @@ int readLoRaRawData(
         }
     }
 
-    if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
-        gLora1276->startReceive();
-    } else if (gLora1262) {
-        gLora1262->startReceive();
-    }
+    startLoRaReceiveOnActiveRadio();
 
     gLoraPacketReceived = false;
     gLoraInterruptEnabled = true;
@@ -353,11 +366,7 @@ bool transmitLoRaRawData(const uint8_t *buffer, size_t len) {
                     ? gLora1262->transmit((uint8_t *)buffer, len)
                     : (gLora1276 ? gLora1276->transmit((uint8_t *)buffer, len) : -1);
 
-    if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
-        gLora1276->startReceive();
-    } else if (gLora1262) {
-        gLora1262->startReceive();
-    }
+    startLoRaReceiveOnActiveRadio();
 
     gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
@@ -375,6 +384,16 @@ int scanLoRaCAD() {
                     : (gLora1276 ? gLora1276->scanChannel() : -1);
     gLoraInterruptEnabled = true;
     return state;
+}
+
+uint32_t getLoRaIrqFlags() {
+    if (!gLoraInitialized) return 0;
+    if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
+        return gLora1262->getIrqFlags();
+    } else if (gLora1276) {
+        return gLora1276->getIrqFlags();
+    }
+    return 0;
 }
 
 float getLoRaInstantRSSI() {

@@ -82,17 +82,19 @@ public:
         gpio_num_t mosi = GPIO_NUM_NC;
         gpio_num_t cs = GPIO_NUM_NC;
         gpio_num_t io0 = GPIO_NUM_NC;
+        gpio_num_t io1 = GPIO_NUM_NC;
         gpio_num_t io2 = GPIO_NUM_NC;
 
         SPIPins()
             : sck(GPIO_NUM_NC), miso(GPIO_NUM_NC), mosi(GPIO_NUM_NC), cs(GPIO_NUM_NC), io0(GPIO_NUM_NC),
-              io2(GPIO_NUM_NC) {}
+              io1(GPIO_NUM_NC), io2(GPIO_NUM_NC) {}
 
         SPIPins(
             gpio_num_t sck_val, gpio_num_t miso_val, gpio_num_t mosi_val, gpio_num_t cs_val,
-            gpio_num_t io0_val = GPIO_NUM_NC, gpio_num_t io2_val = GPIO_NUM_NC
+            gpio_num_t io0_val = GPIO_NUM_NC, gpio_num_t io2_val = GPIO_NUM_NC,
+            gpio_num_t io1_val = GPIO_NUM_NC
         )
-            : sck(sck_val), miso(miso_val), mosi(mosi_val), cs(cs_val), io0(io0_val), io2(io2_val) {}
+            : sck(sck_val), miso(miso_val), mosi(mosi_val), cs(cs_val), io0(io0_val), io1(io1_val), io2(io2_val) {}
 
         void fromJson(JsonObject obj) {
             sck = (gpio_num_t)(obj["sck"] | (int)GPIO_NUM_NC);
@@ -100,6 +102,7 @@ public:
             mosi = (gpio_num_t)(obj["mosi"] | (int)GPIO_NUM_NC);
             cs = (gpio_num_t)(obj["cs"] | (int)GPIO_NUM_NC);
             io0 = (gpio_num_t)(obj["io0"] | (int)GPIO_NUM_NC);
+            io1 = (gpio_num_t)(obj["io1"] | (int)GPIO_NUM_NC);
             io2 = (gpio_num_t)(obj["io2"] | (int)GPIO_NUM_NC);
         }
 
@@ -109,6 +112,7 @@ public:
             obj["mosi"] = mosi;
             obj["cs"] = cs;
             obj["io0"] = io0;
+            obj["io1"] = io1;
             obj["io2"] = io2;
         }
 

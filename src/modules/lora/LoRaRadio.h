@@ -29,6 +29,7 @@ bool transmitLoRaRawData(const uint8_t *buffer, size_t len);
 bool transmitLoRaString(const String &str);
 
 int scanLoRaCAD();
+uint32_t getLoRaIrqFlags();
 float getLoRaInstantRSSI();
 float getLoRaTimeOnAir(size_t len);
 

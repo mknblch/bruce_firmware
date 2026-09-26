@@ -12,6 +12,10 @@
 #include "modules/rf/rf_scan.h"
 #include "modules/rf/rf_send.h"
 #include "modules/rf/rf_utils.h"
+#if !defined(LITE_VERSION)
+#include "modules/lora/LoRaConfig.h"
+#include "modules/lora/LoRaRadio.h"
+#endif
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <globals.h>
@@ -860,6 +864,325 @@ void createRtl433Command(Command *rfCmd) {
     replayCmd.addPosArg("repeats", "5");
 }
 
+#if !defined(LITE_VERSION)
+static void loraPrintPin(const char *label, int pin) {
+    serialDevice->print("  ");
+    serialDevice->print(label);
+    serialDevice->print("=");
+    if (pin == GPIO_NUM_NC) {
+        serialDevice->println("NC");
+    } else {
+        serialDevice->println(pin);
+    }
+}
+
+uint32_t loraStatusCallback(cmd *c) {
+    (void)c;
+    loadLoRaConfig();
+
+    serialDevice->println("[LoRaDiag] status");
+    loraPrintPin("SCK", bruceConfigPins.LoRa_bus.sck);
+    loraPrintPin("MISO", bruceConfigPins.LoRa_bus.miso);
+    loraPrintPin("MOSI", bruceConfigPins.LoRa_bus.mosi);
+    loraPrintPin("CS", getLoraCsPin());
+    loraPrintPin("RESET", getLoraResetPin());
+    loraPrintPin("IRQ", getLoraIrqPin());
+    loraPrintPin("configured IO1/BUSY", bruceConfigPins.LoRa_bus.io1);
+    loraPrintPin("effective BUSY", getLoraBusyPin());
+    serialDevice->print("  hardware configured=");
+    serialDevice->println(isLoraHardwareConfigured() ? "yes" : "no");
+    serialDevice->print("  radio=");
+    serialDevice->println(loraConfig.radioType == LoRaRadioType::SX1262 ? "SX1262" : "SX1276");
+    serialDevice->print("  frequency MHz=");
+    serialDevice->println(String(loraConfig.freqMHz, 3));
+    serialDevice->print("  SF/BW/CR/sync=");
+    serialDevice->print(loraConfig.sf);
+    serialDevice->print("/");
+    serialDevice->print(String(loraConfig.bwKHz, 2));
+    serialDevice->print("/");
+    serialDevice->print(loraConfig.cr);
+    serialDevice->print("/0x");
+    serialDevice->println(loraConfig.syncWord, HEX);
+    return true;
+}
+
+uint32_t loraBusyCallback(cmd *c) {
+    Command cmd(c);
+    const String pinText = cmd.getArgument("gpio").getValue();
+    if (pinText.length() == 0) {
+        serialDevice->println("Usage: lora busy <gpio|-1>");
+        return false;
+    }
+
+    const long pin = pinText.toInt();
+    if (String(pin) != pinText || pin < GPIO_NUM_NC || pin > GPIO_NUM_MAX) {
+        serialDevice->println("[LoRaDiag] invalid GPIO; use -1 or a valid GPIO number");
+        return false;
+    }
+
+#if defined(LORA_BUSY)
+    serialDevice->println("[LoRaDiag] ignored: compile-time LORA_BUSY overrides the pin configuration");
+    return false;
+#else
+    bruceConfigPins.LoRa_bus.io1 = (gpio_num_t)pin;
+    bruceConfigPins.setLoRaPins(bruceConfigPins.LoRa_bus);
+    serialDevice->print("[LoRaDiag] saved IO1/BUSY=");
+    loraPrintPin("effective BUSY", getLoraBusyPin());
+    return true;
+#endif
+}
+
+uint32_t loraBenchCallback(cmd *c) {
+    (void)c;
+    loadLoRaConfig();
+    serialDevice->println("[LoRaDiag] receive-only timing test; no TX");
+    if (!isLoraHardwareConfigured()) {
+        serialDevice->println("[LoRaDiag] FAIL: LoRa SPI/CS/IRQ pins are not configured");
+        return false;
+    }
+
+    const uint32_t initStart = micros();
+    const bool initialized = initLoRaRadio(loraConfig, true);
+    const uint32_t initUs = micros() - initStart;
+    serialDevice->print("[LoRaDiag] init_rx_us=");
+    serialDevice->println(initUs);
+    if (!initialized) {
+        serialDevice->println("[LoRaDiag] FAIL: radio initialization / RX start");
+        stopLoRaRadio();
+        return false;
+    }
+
+    uint32_t rssiTotalUs = 0;
+    uint32_t rssiMaxUs = 0;
+    float rssi = -140.0f;
+    for (uint8_t i = 0; i < 5; i++) {
+        const uint32_t start = micros();
+        rssi = getLoRaInstantRSSI();
+        const uint32_t elapsed = micros() - start;
+        rssiTotalUs += elapsed;
+        if (elapsed > rssiMaxUs) rssiMaxUs = elapsed;
+    }
+    serialDevice->print("[LoRaDiag] rssi_us_avg/max=");
+    serialDevice->print(rssiTotalUs / 5);
+    serialDevice->print("/");
+    serialDevice->print(rssiMaxUs);
+    serialDevice->print(" last_rssi_dbm=");
+    serialDevice->println(String(rssi, 1));
+
+    const float baseFreq = loraConfig.freqMHz;
+    const float testFreq = (baseFreq <= 959.8f) ? baseFreq + 0.2f : baseFreq - 0.2f;
+    if (baseFreq >= 150.2f && baseFreq <= 959.8f) {
+        uint32_t tuneMaxUs = 0;
+        bool tuneOk = true;
+        for (uint8_t i = 0; i < 4; i++) {
+            const float target = (i % 2 == 0) ? testFreq : baseFreq;
+            const uint32_t start = micros();
+            const bool ok = setLoRaFrequency(target);
+            const uint32_t elapsed = micros() - start;
+            if (elapsed > tuneMaxUs) tuneMaxUs = elapsed;
+            tuneOk = tuneOk && ok;
+        }
+        serialDevice->print("[LoRaDiag] retune_ok=");
+        serialDevice->print(tuneOk ? "yes" : "no");
+        serialDevice->print(" max_us=");
+        serialDevice->println(tuneMaxUs);
+    } else {
+        serialDevice->println("[LoRaDiag] retune skipped: configured frequency outside safe test range");
+    }
+
+    const uint32_t rxStart = micros();
+    const bool rxOk = startLoRaReceive();
+    const uint32_t rxUs = micros() - rxStart;
+    serialDevice->print("[LoRaDiag] start_rx_ok=");
+    serialDevice->print(rxOk ? "yes" : "no");
+    serialDevice->print(" us=");
+    serialDevice->println(rxUs);
+    stopLoRaRadio();
+    serialDevice->println("[LoRaDiag] stopped");
+    return rxOk;
+}
+
+uint32_t loraReceiveCallback(cmd *c) {
+    Command cmd(c);
+    const long seconds = cmd.getArgument("seconds").getValue().toInt();
+    const String sfText = cmd.getArgument("sf").getValue();
+    const String bwText = cmd.getArgument("bw_khz").getValue();
+    const String preambleText = cmd.getArgument("preamble").getValue();
+    if (seconds < 1 || seconds > 60) {
+        serialDevice->println("Usage: lora rx <seconds 1-60> [sf 7-12] [bw_khz] [preamble]");
+        return false;
+    }
+    if (sfText.length() > 0 && sfText.toInt() != 0 && (sfText.toInt() < 7 || sfText.toInt() > 12)) {
+        serialDevice->println("Usage: lora rx <seconds 1-60> [sf 7-12] [bw_khz] [preamble]");
+        return false;
+    }
+    if (bwText.length() > 0 && bwText.toFloat() < 0.0f) {
+        serialDevice->println("Usage: lora rx <seconds 1-60> [sf 7-12] [bw_khz] [preamble]");
+        return false;
+    }
+    if (preambleText.length() > 0 && preambleText.toInt() != 0 &&
+        (preambleText.toInt() < 1 || preambleText.toInt() > UINT16_MAX)) {
+        serialDevice->println("Usage: lora rx <seconds 1-60> [sf 7-12] [bw_khz] [preamble]");
+        return false;
+    }
+
+    loadLoRaConfig();
+    LoRaConfigData rxConfig = loraConfig;
+    if (sfText.length() > 0 && sfText.toInt() != 0) rxConfig.sf = (uint8_t)sfText.toInt();
+    if (bwText.length() > 0 && bwText.toFloat() > 0.0f) rxConfig.bwKHz = bwText.toFloat();
+    if (preambleText.length() > 0 && preambleText.toInt() != 0) {
+        rxConfig.preambleLen = (uint16_t)preambleText.toInt();
+    }
+    serialDevice->println("[LoRaDiag] receive-only packet test; no TX");
+    if (!isLoraHardwareConfigured()) {
+        serialDevice->println("[LoRaDiag] FAIL: LoRa SPI/CS/IRQ pins are not configured");
+        return false;
+    }
+    if (!initLoRaRadio(rxConfig, true)) {
+        serialDevice->println("[LoRaDiag] FAIL: radio initialization / RX start");
+        stopLoRaRadio();
+        return false;
+    }
+
+    Serial.printf(
+        "[LoRaDiag] listening %.3f MHz SF%d BW%.2fkHz CR4/%d Sync 0x%02X preamble=%u for %ld s\n",
+        rxConfig.freqMHz, rxConfig.sf, rxConfig.bwKHz, rxConfig.cr, rxConfig.syncWord,
+        (unsigned)rxConfig.preambleLen, seconds
+    );
+
+    uint8_t rxBuffer[256];
+    uint32_t packets = 0;
+    uint32_t crcFailures = 0;
+    const uint32_t start = millis();
+    uint32_t lastRssiSample = start;
+    float peakRssi = getLoRaInstantRSSI();
+    while ((uint32_t)(millis() - start) < (uint32_t)seconds * 1000UL) {
+        if (millis() - lastRssiSample >= 20) {
+            lastRssiSample = millis();
+            const float instantRssi = getLoRaInstantRSSI();
+            if (instantRssi > peakRssi) peakRssi = instantRssi;
+        }
+        if (checkLoRaPacketAvailable()) {
+            const uint32_t eventIrqFlags = getLoRaIrqFlags();
+            Serial.printf(
+                "[LoRaDiag] event irq=0x%04X preamble=%u sync_valid=%u header_valid=%u header_err=%u crc_err=%u rx_done=%u\n",
+                (unsigned)eventIrqFlags,
+                (eventIrqFlags & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED) ? 1U : 0U,
+                (eventIrqFlags & RADIOLIB_SX126X_IRQ_SYNC_WORD_VALID) ? 1U : 0U,
+                (eventIrqFlags & RADIOLIB_SX126X_IRQ_HEADER_VALID) ? 1U : 0U,
+                (eventIrqFlags & RADIOLIB_SX126X_IRQ_HEADER_ERR) ? 1U : 0U,
+                (eventIrqFlags & RADIOLIB_SX126X_IRQ_CRC_ERR) ? 1U : 0U,
+                (eventIrqFlags & RADIOLIB_SX126X_IRQ_RX_DONE) ? 1U : 0U
+            );
+            float rssi = 0.0f, snr = 0.0f, freqErr = 0.0f;
+            size_t pktLen = 0;
+            const int state = readLoRaRawData(rxBuffer, sizeof(rxBuffer), rssi, snr, freqErr, pktLen);
+            if (pktLen > 0 && (state == RADIOLIB_ERR_NONE || state == RADIOLIB_ERR_CRC_MISMATCH)) {
+                const bool crcOk = state == RADIOLIB_ERR_NONE;
+                if (crcOk) packets++;
+                else crcFailures++;
+                Serial.printf(
+                    "[LoRaDiag] RX crc=%s len=%u RSSI=%.1f SNR=%.1f freqErr=%.0fHz data=",
+                    crcOk ? "OK" : "FAIL", (unsigned)pktLen, rssi, snr, freqErr
+                );
+                for (size_t i = 0; i < pktLen; i++) Serial.printf("%02X", rxBuffer[i]);
+                Serial.println();
+            } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+                crcFailures++;
+                Serial.printf("[LoRaDiag] RX header/CRC error len=%u\n", (unsigned)pktLen);
+            } else if (state != -1) {
+                Serial.printf("[LoRaDiag] RX read error=%d len=%u\n", state, (unsigned)pktLen);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    const uint32_t irqFlags = getLoRaIrqFlags();
+    Serial.printf(
+        "[LoRaDiag] irq=0x%04X rx_done=%u preamble=%u sync=%u header_valid=%u header_err=%u crc_err=%u dio1=%d software_irq=%u\n",
+        (unsigned)irqFlags,
+        (irqFlags & RADIOLIB_SX126X_IRQ_RX_DONE) ? 1U : 0U,
+        (irqFlags & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED) ? 1U : 0U,
+        (irqFlags & RADIOLIB_SX126X_IRQ_SYNC_WORD_VALID) ? 1U : 0U,
+        (irqFlags & RADIOLIB_SX126X_IRQ_HEADER_VALID) ? 1U : 0U,
+        (irqFlags & RADIOLIB_SX126X_IRQ_HEADER_ERR) ? 1U : 0U,
+        (irqFlags & RADIOLIB_SX126X_IRQ_CRC_ERR) ? 1U : 0U,
+        digitalRead(getLoraIrqPin()), (unsigned)gLoraPacketReceived
+    );
+    stopLoRaRadio();
+    Serial.printf(
+        "[LoRaDiag] done packets=%u crc_failures=%u peak_rssi=%.1fdBm\n",
+        (unsigned)packets, (unsigned)crcFailures, peakRssi
+    );
+    return true;
+}
+
+uint32_t loraCadCallback(cmd *c) {
+    Command cmd(c);
+    const long seconds = cmd.getArgument("seconds").getValue().toInt();
+    const String sfText = cmd.getArgument("sf").getValue();
+    const String bwText = cmd.getArgument("bw_khz").getValue();
+    if (seconds < 1 || seconds > 60) {
+        serialDevice->println("Usage: lora cad <seconds 1-60> [sf 7-12] [bw_khz]");
+        return false;
+    }
+    if (sfText.length() > 0 && sfText.toInt() != 0 && (sfText.toInt() < 7 || sfText.toInt() > 12)) {
+        serialDevice->println("Usage: lora cad <seconds 1-60> [sf 7-12] [bw_khz]");
+        return false;
+    }
+    if (bwText.length() > 0 && bwText.toFloat() < 0.0f) {
+        serialDevice->println("Usage: lora cad <seconds 1-60> [sf 7-12] [bw_khz]");
+        return false;
+    }
+
+    loadLoRaConfig();
+    LoRaConfigData cadConfig = loraConfig;
+    if (sfText.length() > 0 && sfText.toInt() != 0) cadConfig.sf = (uint8_t)sfText.toInt();
+    if (bwText.length() > 0 && bwText.toFloat() > 0.0f) cadConfig.bwKHz = bwText.toFloat();
+    serialDevice->println("[LoRaDiag] receive-only CAD test; no TX");
+    if (!isLoraHardwareConfigured()) {
+        serialDevice->println("[LoRaDiag] FAIL: LoRa SPI/CS/IRQ pins are not configured");
+        return false;
+    }
+    if (!initLoRaRadio(cadConfig, false)) {
+        serialDevice->println("[LoRaDiag] FAIL: radio initialization");
+        stopLoRaRadio();
+        return false;
+    }
+
+    Serial.printf(
+        "[LoRaDiag] CAD %.3f MHz SF%d BW%.2fkHz for %ld s\n",
+        cadConfig.freqMHz, cadConfig.sf, cadConfig.bwKHz, seconds
+    );
+    uint32_t scans = 0;
+    uint32_t preambles = 0;
+    uint32_t freeScans = 0;
+    uint32_t errors = 0;
+    const uint32_t start = millis();
+    while ((uint32_t)(millis() - start) < (uint32_t)seconds * 1000UL) {
+        const int state = scanLoRaCAD();
+        scans++;
+        if (state == RADIOLIB_PREAMBLE_DETECTED || state == RADIOLIB_LORA_DETECTED) {
+            preambles++;
+            Serial.println("[LoRaDiag] CAD preamble detected");
+        } else if (state == RADIOLIB_CHANNEL_FREE) {
+            freeScans++;
+        } else {
+            errors++;
+            Serial.printf("[LoRaDiag] CAD error=%d\n", state);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    stopLoRaRadio();
+    Serial.printf(
+        "[LoRaDiag] CAD done scans=%u preambles=%u free=%u errors=%u\n",
+        (unsigned)scans, (unsigned)preambles, (unsigned)freeScans, (unsigned)errors
+    );
+    return errors == 0;
+}
+#endif
+
 void createRfCommands(SimpleCLI *cli) {
     Command cmd = cli->addCompositeCmd("rf,subghz");
 
@@ -874,6 +1197,22 @@ void createRfCommands(SimpleCLI *cli) {
     createRfKeeloqTxCommand(&cmd);
     createRfTxPowerCommand(&cmd);
     createRtl433Command(&cmd);
+#if !defined(LITE_VERSION)
+    Command loraCmd = cli->addCompositeCmd("lora");
+    loraCmd.addCommand("status,diag", loraStatusCallback);
+    loraCmd.addCommand("bench,test", loraBenchCallback);
+    Command loraRxCmd = loraCmd.addCommand("rx,listen", loraReceiveCallback);
+    loraRxCmd.addPosArg("seconds", "10");
+    loraRxCmd.addPosArg("sf", "0");
+    loraRxCmd.addPosArg("bw_khz", "0");
+    loraRxCmd.addPosArg("preamble", "0");
+    Command loraCadCmd = loraCmd.addCommand("cad,activity", loraCadCallback);
+    loraCadCmd.addPosArg("seconds", "10");
+    loraCadCmd.addPosArg("sf", "0");
+    loraCadCmd.addPosArg("bw_khz", "0");
+    Command loraBusyCmd = loraCmd.addCommand("busy", loraBusyCallback);
+    loraBusyCmd.addPosArg("gpio", "");
+#endif
 #if RF_DEBUG
     createRfSelftestCommand(&cmd);
     createRfKeeloqTestCommand(&cmd);
