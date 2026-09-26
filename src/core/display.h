@@ -178,7 +178,8 @@ void padprintln(double n, int digits, int16_t padx = 1);
 // loopOptions will now return the last index used in the function
 int loopOptions(
     std::vector<Option> &options, uint8_t menuType, const char *subText, int index = 0,
-    bool interpreter = false, bool letterShortcuts = false, uint16_t pageJumpSize = 0, bool border = true
+    bool interpreter = false, bool letterShortcuts = false, uint16_t pageJumpSize = 0, bool border = true,
+    uint8_t submenuTextSize = 0
 );
 inline int loopOptions(std::vector<Option> &options, int _index) {
     return loopOptions(options, MENU_TYPE_REGULAR, "", _index, false);
@@ -192,7 +193,7 @@ Opt_Coord drawOptions(
     bool firstRender = true, bool border = true
 );
 
-void drawSubmenu(int index, std::vector<Option> &options, const char *title);
+void drawSubmenu(int index, std::vector<Option> &options, const char *title, uint8_t textSize = 0);
 
 void drawStatusBar();
 void drawMainBorder(bool clear = true);

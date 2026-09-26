@@ -104,27 +104,46 @@ void saveLoRaConfig() {
     file.close();
 }
 
-void selectLoRaPresetMenu() {
+bool selectLoRaPresetMenu() {
     loadLoRaConfig();
-    std::vector<Option> options;
-    options.reserve(kLoRaPresets.size() + 1);
+    bool presetSelected = false;
+    std::vector<Option> presetOptions = {
+        {"Use Current Settings", [&presetSelected]() { presetSelected = true; }}
+    };
+    for (const auto &preset : kLoRaPresets) {
+        const LoRaPreset *profile = &preset;
+        String family = "G";
+        if (String(preset.category) == "Meshtastic") family = "M";
+        else if (String(preset.category) == "LoRaWAN") family = "W";
+        else if (String(preset.category) == "Bruce") family = "B";
 
-    for (size_t i = 0; i < kLoRaPresets.size(); i++) {
-        const auto &p = kLoRaPresets[i];
-        String label = String(p.name);
-        options.push_back({label, [&p]() {
-            loraConfig.freqMHz = p.freqMHz;
-            loraConfig.sf = p.sf;
-            loraConfig.bwKHz = p.bwKHz;
-            loraConfig.cr = p.cr;
-            loraConfig.syncWord = p.syncWord;
-            loraConfig.preambleLen = p.preambleLen;
+        String bandwidth = String(preset.bwKHz, 2);
+        while (bandwidth.endsWith("0")) bandwidth.remove(bandwidth.length() - 1);
+        if (bandwidth.endsWith(".")) bandwidth.remove(bandwidth.length() - 1);
+
+        char syncWordLabel[3];
+        snprintf(syncWordLabel, sizeof(syncWordLabel), "%02X", preset.syncWord);
+        String label = family + " " + String(preset.freqMHz, 3) + " SF" + String(preset.sf);
+        label += " BW" + bandwidth + " CR4/" + String(preset.cr);
+        label += " SW";
+        label += syncWordLabel;
+        label += " P" + String(preset.preambleLen);
+
+        presetOptions.push_back({label, [profile, &presetSelected]() {
+            loraConfig.freqMHz = profile->freqMHz;
+            loraConfig.sf = profile->sf;
+            loraConfig.bwKHz = profile->bwKHz;
+            loraConfig.cr = profile->cr;
+            loraConfig.syncWord = profile->syncWord;
+            loraConfig.preambleLen = profile->preambleLen;
             saveLoRaConfig();
-            displaySuccess("Preset Applied: " + String(p.name));
+            presetSelected = true;
+            displaySuccess("Preset Applied: " + String(profile->name));
         }});
     }
 
-    loopOptions(options, MENU_TYPE_SUBMENU, "LoRa Presets");
+    int selected = loopOptions(presetOptions, MENU_TYPE_SUBMENU, "Select Sniffer Profile", 0, false, false, 0, true, FP);
+    return selected >= 0 && presetSelected;
 }
 
 void selectLoRaRadioMenu() {

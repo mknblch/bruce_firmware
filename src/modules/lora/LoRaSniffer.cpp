@@ -417,6 +417,8 @@ void runLoRaSniffer() {
         return;
     }
 
+    if (!selectLoRaPresetMenu()) return;
+
     displayTextLine("Starting LoRa Sniffer...");
     if (!initLoRaRadio(loraConfig, true)) {
         displayError("LoRa Radio Init Failed", true);

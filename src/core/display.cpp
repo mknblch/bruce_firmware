@@ -546,7 +546,7 @@ void padprintln(double n, int digits, int16_t padx) {
 **********************************************************************/
 int loopOptions(
     std::vector<Option> &options, uint8_t menuType, const char *subText, int index, bool interpreter,
-    bool letterShortcuts, uint16_t pageJumpSize, bool border
+    bool letterShortcuts, uint16_t pageJumpSize, bool border, uint8_t submenuTextSize
 ) {
     if (options.empty()) return -1;
 
@@ -651,7 +651,7 @@ int loopOptions(
                 renderedByLambda = options[index].hover(options[index].hoverPointer, true);
 
             if (!renderedByLambda) {
-                if (menuType == MENU_TYPE_SUBMENU) drawSubmenu(index, options, subText);
+                if (menuType == MENU_TYPE_SUBMENU) drawSubmenu(index, options, subText, submenuTextSize);
                 else
                     coord = drawOptions(
                         index,
@@ -1149,7 +1149,7 @@ Opt_Coord drawOptions(
 ** Function name: drawSubmenu
 ** Description:   Função para desenhar e mostrar as opçoes de contexto
 ***************************************************************************************/
-void drawSubmenu(int index, std::vector<Option> &options, const char *title) {
+void drawSubmenu(int index, std::vector<Option> &options, const char *title, uint8_t textSize) {
     drawStatusBar();
     int menuSize = options.size();
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
@@ -1164,12 +1164,13 @@ void drawSubmenu(int index, std::vector<Option> &options, const char *title) {
     );
     tft.drawString(title, BORDER_PAD_X, STATUS_BAR_HEIGHT);
 
-    int selectedTextSize = options[index].label.length() <= tftWidth / (LW * FG) - 1 ? FG : FM;
+    int selectedTextSize = textSize ? textSize : (options[index].label.length() <= tftWidth / (LW * FG) - 1 ? FG : FM);
     int selectedTextH = selectedTextSize * LH;
-    int neighborTextH = FM * LH;
+    int neighborTextSize = textSize ? textSize : FM;
+    int neighborTextH = neighborTextSize * LH;
     int rowGap = FP * (LH / 2);
-    int rowPitch = FG * LH + rowGap;
-    int rowClearH = FG * LH + rowGap;
+    int rowPitch = (textSize ? textSize : FG) * LH + rowGap;
+    int rowClearH = rowPitch;
 
     // Keep the title row intact and center the selected option in the remaining content area.
     int contentTop = STATUS_BAR_HEIGHT + LH * FP + 4;
@@ -1192,7 +1193,7 @@ void drawSubmenu(int index, std::vector<Option> &options, const char *title) {
     int neighbors = maxNeighbors < maxByList ? maxNeighbors : maxByList;
     if (neighbors < 0) neighbors = 0;
 
-    tft.setTextSize(FM);
+    tft.setTextSize(neighborTextSize);
     for (int k = neighbors; k >= 1; k--) {
         int idx = ((index - k) % menuSize + menuSize) % menuSize;
         int itemCenterY = middle - k * rowPitch;
@@ -1226,7 +1227,7 @@ void drawSubmenu(int index, std::vector<Option> &options, const char *title) {
         bruceConfig.priColor
     );
 
-    tft.setTextSize(FM);
+    tft.setTextSize(neighborTextSize);
     for (int k = 1; k <= neighbors; k++) {
         int idx = (index + k) % menuSize;
         int itemCenterY = middle + k * rowPitch;

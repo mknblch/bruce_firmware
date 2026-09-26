@@ -43,10 +43,6 @@ void LoRaMenu::optionsMenu() {
         if (verifyLoRaModuleGuard()) lorachat();
     }});
 
-    options.push_back({"Presets", []() {
-        selectLoRaPresetMenu();
-    }});
-
     options.push_back({"Packet Viewer", []() {
         viewLoRaCapturedPackets();
     }});

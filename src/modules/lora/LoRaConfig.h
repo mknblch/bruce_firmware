@@ -41,7 +41,7 @@ extern const std::vector<LoRaPreset> kLoRaPresets;
 
 void loadLoRaConfig();
 void saveLoRaConfig();
-void selectLoRaPresetMenu();
+bool selectLoRaPresetMenu();
 void customLoRaConfigMenu();
 void changeLoRaUsername();
 void changeLoRaFrequency();

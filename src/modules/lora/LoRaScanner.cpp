@@ -18,7 +18,17 @@ struct ScanChannelEntry {
     float peakRssi;
     float lastRssi;
     uint32_t lastSeenMs;
+    uint8_t syncWord = 0;
+    bool hasSyncWord = false;
 };
+
+static constexpr uint32_t LORA_SCAN_DWELL_MS = 1500;
+
+static String formatSyncWord(uint8_t syncWord) {
+    char buffer[3];
+    snprintf(buffer, sizeof(buffer), "%02X", syncWord);
+    return String(buffer);
+}
 
 static void drainKeyboardInput() {
     vTaskDelay(pdMS_TO_TICKS(150));
@@ -62,40 +72,52 @@ void runLoRaChannelDetector() {
             channels = {
                 {"Bruce 868.1", 868.100f, 9, 31.25f, 0, -140.0f, -140.0f, 0},
             };
+            scanCr = 8;
+            scanSyncWord = 0x12;
+            scanPreambleLen = 8;
         }},
         {"Meshtastic Presets", [&]() {
+            scanCr = 5;
+            scanSyncWord = 0x2B;
+            scanPreambleLen = 16;
             channels = {
-                {"EU868 LongFast", 869.525f, 11, 250.0f, 0, -140.0f, -140.0f, 0},
-                {"EU868 MedFast",  869.525f, 9,  250.0f, 0, -140.0f, -140.0f, 0},
-                {"US915 LongFast", 906.875f, 11, 250.0f, 0, -140.0f, -140.0f, 0},
-                {"US915 MedFast",  906.875f, 9,  250.0f, 0, -140.0f, -140.0f, 0},
-                {"433 LongFast",   433.175f, 11, 250.0f, 0, -140.0f, -140.0f, 0},
-                {"AS923 LongFast", 923.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0},
-                {"AU915 LongFast", 915.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0},
+                {"EU868 LongFast", 869.525f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
+                {"EU868 MedFast",  869.525f, 9,  250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
+                {"US915 LongFast", 906.875f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
+                {"US915 MedFast",  906.875f, 9,  250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
+                {"433 LongFast",   433.175f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
+                {"AS923 LongFast", 923.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
+                {"AU915 LongFast", 915.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true},
             };
         }},
         {"LoRaWAN EU868 Band", [&]() {
+            scanCr = 5;
+            scanSyncWord = 0x34;
+            scanPreambleLen = 8;
             channels = {
-                {"EU868.1 Ch1", 868.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"EU868.3 Ch2", 868.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"EU868.5 Ch3", 868.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"EU867.1 Ch4", 867.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"EU867.3 Ch5", 867.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"EU867.5 Ch6", 867.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"EU867.7 Ch7", 867.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"EU867.9 Ch8", 867.900f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
+                {"EU868.1 Ch1", 868.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"EU868.3 Ch2", 868.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"EU868.5 Ch3", 868.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"EU867.1 Ch4", 867.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"EU867.3 Ch5", 867.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"EU867.5 Ch6", 867.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"EU867.7 Ch7", 867.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"EU867.9 Ch8", 867.900f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
             };
         }},
         {"LoRaWAN US915 Band", [&]() {
+            scanCr = 5;
+            scanSyncWord = 0x34;
+            scanPreambleLen = 8;
             channels = {
-                {"US902.3 Ch1", 902.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"US902.5 Ch2", 902.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"US902.7 Ch3", 902.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"US902.9 Ch4", 902.900f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"US903.1 Ch5", 903.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"US903.3 Ch6", 903.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"US903.5 Ch7", 903.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-                {"US903.7 Ch8", 903.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
+                {"US902.3 Ch1", 902.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"US902.5 Ch2", 902.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"US902.7 Ch3", 902.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"US902.9 Ch4", 902.900f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"US903.1 Ch5", 903.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"US903.3 Ch6", 903.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"US903.5 Ch7", 903.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
+                {"US903.7 Ch8", 903.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
             };
         }},
         {"433 MHz ISM Band", [&]() {
@@ -103,6 +125,9 @@ void runLoRaChannelDetector() {
             for (float f = 433.050f; f <= 434.750f; f += 0.200f) {
                 channels.push_back({String(f, 3) + " MHz", f, 9, 125.0f, 0, -140.0f, -140.0f, 0});
             }
+            scanCr = 5;
+            scanSyncWord = 0x12;
+            scanPreambleLen = 8;
         }},
         {"SF Sweeper (Current Freq)", [&]() {
             channels.clear();
@@ -110,11 +135,22 @@ void runLoRaChannelDetector() {
                 channels.push_back({"SF" + String(sf) + " (" + String(loraConfig.freqMHz, 2) + "M)",
                                     loraConfig.freqMHz, sf, loraConfig.bwKHz, 0, -140.0f, -140.0f, 0});
             }
+        }},
+        {"Sync Word Sweep (Current Freq)", [&]() {
+            channels = {
+                {"Private", loraConfig.freqMHz, loraConfig.sf, loraConfig.bwKHz, 0, -140.0f, -140.0f, 0, 0x12, true},
+                {"Meshtastic", loraConfig.freqMHz, loraConfig.sf, loraConfig.bwKHz, 0, -140.0f, -140.0f, 0, 0x2B, true},
+                {"LoRaWAN", loraConfig.freqMHz, loraConfig.sf, loraConfig.bwKHz, 0, -140.0f, -140.0f, 0, 0x34, true},
+            };
         }}
     };
 
-    int chosen = loopOptions(scanModes, MENU_TYPE_SUBMENU, "Select Scan Band");
+    int chosen = loopOptions(scanModes, MENU_TYPE_SUBMENU, "Select Scan Band", 0, false, false, 0, true, FP);
     if (chosen < 0 || channels.empty()) return;
+
+    for (auto &channel : channels) {
+        if (!channel.hasSyncWord) channel.syncWord = scanSyncWord;
+    }
 
     // Drain any leftover Enter/Esc press from menu selection
     drainKeyboardInput();
@@ -125,7 +161,7 @@ void runLoRaChannelDetector() {
     scanCfg.sf = channels[0].sf;
     scanCfg.bwKHz = channels[0].bwKHz;
     scanCfg.cr = scanCr;
-    scanCfg.syncWord = scanSyncWord;
+    scanCfg.syncWord = channels[0].syncWord;
     scanCfg.preambleLen = scanPreambleLen;
 
     if (!initLoRaRadio(scanCfg, true)) {
@@ -158,6 +194,7 @@ void runLoRaChannelDetector() {
             status += " [PAUSED]";
         } else if (!channels.empty()) {
             status += " [Scan: " + String(channels[currentChIdx].freqMHz, 2) + "M]";
+            status += " SW" + formatSyncWord(channels[currentChIdx].syncWord);
         }
         tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
         tft.drawString(status, 10, BORDER_PAD_Y);
@@ -180,8 +217,10 @@ void runLoRaChannelDetector() {
             }
 
             String line = ch.label;
-            if (line.length() > 14) line = line.substring(0, 14);
-            while (line.length() < 14) line += " ";
+            if (line.length() > 8) line = line.substring(0, 8);
+            while (line.length() < 8) line += " ";
+            line += " SW";
+            line += formatSyncWord(ch.syncWord);
 
             line += " H:" + String(ch.hits);
             if (ch.peakRssi > -130.0f) {
@@ -334,6 +373,9 @@ void runLoRaChannelDetector() {
                 loraConfig.freqMHz = selCh.freqMHz;
                 loraConfig.sf = selCh.sf;
                 loraConfig.bwKHz = selCh.bwKHz;
+                loraConfig.cr = scanCr;
+                loraConfig.syncWord = selCh.syncWord;
+                loraConfig.preambleLen = scanPreambleLen;
                 saveLoRaConfig();
                 stopLoRaRadio();
 
@@ -355,6 +397,7 @@ void runLoRaChannelDetector() {
                 scanCfg.freqMHz = channels[currentChIdx].freqMHz;
                 scanCfg.sf = channels[currentChIdx].sf;
                 scanCfg.bwKHz = channels[currentChIdx].bwKHz;
+                scanCfg.syncWord = channels[currentChIdx].syncWord;
                 initLoRaRadio(scanCfg, true);
                 drawMainBorder(true);
                 drawFullUI();
@@ -371,8 +414,8 @@ void runLoRaChannelDetector() {
                 auto &ch = channels[currentChIdx];
                 const bool crcOk = state == RADIOLIB_ERR_NONE;
                 Serial.printf(
-                    "[LoRaDetector] RX channel=%u freq=%.3fMHz SF%d BW%.2fkHz crc=%s len=%u RSSI=%.1f SNR=%.1f\n",
-                    (unsigned)currentChIdx, ch.freqMHz, ch.sf, ch.bwKHz, crcOk ? "OK" : "FAIL",
+                    "[LoRaDetector] RX channel=%u freq=%.3fMHz SF%d BW%.2fkHz sync=0x%02X crc=%s len=%u RSSI=%.1f SNR=%.1f\n",
+                    (unsigned)currentChIdx, ch.freqMHz, ch.sf, ch.bwKHz, ch.syncWord, crcOk ? "OK" : "FAIL",
                     (unsigned)pktLen, rssi, snr
                 );
                 ch.hits++;
@@ -393,7 +436,7 @@ void runLoRaChannelDetector() {
                 pkt.sf = ch.sf;
                 pkt.bwKHz = ch.bwKHz;
                 pkt.cr = scanCfg.cr;
-                pkt.syncWord = scanCfg.syncWord;
+                pkt.syncWord = ch.syncWord;
                 pkt.rssi = rssi;
                 pkt.snr = snr;
                 pkt.freqErrorHz = freqErr;
@@ -439,13 +482,14 @@ void runLoRaChannelDetector() {
         }
 
         // Dwell on current channel before hopping to next
-        if (!isPaused && channels.size() > 1 && (millis() - lastHopTime >= 500)) {
+        if (!isPaused && channels.size() > 1 && (millis() - lastHopTime >= LORA_SCAN_DWELL_MS)) {
             lastHopTime = millis();
             currentChIdx = (currentChIdx + 1) % channels.size();
             auto &ch = channels[currentChIdx];
             setLoRaFrequency(ch.freqMHz);
             setLoRaSpreadingFactor(ch.sf);
             setLoRaBandwidth(ch.bwKHz);
+            setLoRaSyncWord(ch.syncWord);
             startLoRaReceive();
             drawStatus();
         }
