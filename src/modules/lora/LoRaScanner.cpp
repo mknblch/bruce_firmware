@@ -22,8 +22,6 @@ struct ScanChannelEntry {
     bool hasSyncWord = false;
 };
 
-static constexpr uint32_t LORA_SCAN_DWELL_MS = 1500;
-
 static String formatSyncWord(uint8_t syncWord) {
     char buffer[3];
     snprintf(buffer, sizeof(buffer), "%02X", syncWord);
@@ -483,7 +481,7 @@ void runLoRaChannelDetector() {
         }
 
         // Dwell on current channel before hopping to next
-        if (!isPaused && channels.size() > 1 && (millis() - lastHopTime >= LORA_SCAN_DWELL_MS)) {
+        if (!isPaused && channels.size() > 1 && (millis() - lastHopTime >= loraConfig.scanDwellMs)) {
             lastHopTime = millis();
             currentChIdx = (currentChIdx + 1) % channels.size();
             auto &ch = channels[currentChIdx];

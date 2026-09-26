@@ -70,6 +70,15 @@ void loadLoRaConfig() {
     if (!doc["LoRa_SyncWord"].isNull()) loraConfig.syncWord = doc["LoRa_SyncWord"].as<uint8_t>();
     if (!doc["LoRa_Preamble"].isNull()) loraConfig.preambleLen = doc["LoRa_Preamble"].as<uint16_t>();
     if (!doc["LoRa_Power"].isNull()) loraConfig.powerDbm = doc["LoRa_Power"].as<int8_t>();
+    if (!doc["LoRa_SX1262_Power"].isNull()) {
+        loraConfig.sx1262PowerDbm = doc["LoRa_SX1262_Power"].as<int8_t>();
+    } else {
+        loraConfig.sx1262PowerDbm = loraConfig.powerDbm;
+    }
+    if (!doc["LoRa_Scan_Dwell"].isNull()) {
+        uint16_t scanDwellMs = doc["LoRa_Scan_Dwell"].as<uint16_t>();
+        if (scanDwellMs >= 250 && scanDwellMs <= 5000) loraConfig.scanDwellMs = scanDwellMs;
+    }
     if (!doc["LoRa_Name"].isNull()) loraConfig.username = doc["LoRa_Name"].as<String>();
 
     if (!doc["LoRa_Radio"].isNull()) {
@@ -96,6 +105,8 @@ void saveLoRaConfig() {
     doc["LoRa_SyncWord"] = loraConfig.syncWord;
     doc["LoRa_Preamble"] = loraConfig.preambleLen;
     doc["LoRa_Power"] = loraConfig.powerDbm;
+    doc["LoRa_SX1262_Power"] = loraConfig.sx1262PowerDbm;
+    doc["LoRa_Scan_Dwell"] = loraConfig.scanDwellMs;
     doc["LoRa_Name"] = loraConfig.username;
     doc["LoRa_Radio"] = (loraConfig.radioType == LoRaRadioType::SX1262) ? "SX1262" : "SX1276";
     doc["LoRa_PCAP"] = loraConfig.enablePcap;
@@ -194,6 +205,46 @@ void changeLoRaFrequency() {
     displaySuccess("Freq: " + String(f, 3) + " MHz");
 }
 
+static void selectLoRaTxPowerMenu() {
+    loadLoRaConfig();
+    static const int8_t powerPresets[] = {-9, 0, 5, 10, 14, 17, 20, 22};
+    static const char *powerLabels[] = {
+        "-9 dBm (Minimum)", "0 dBm", "5 dBm", "10 dBm (Low)", "14 dBm (Medium)",
+        "17 dBm (Default)", "20 dBm (High)", "22 dBm (SX1262 max)"
+    };
+    std::vector<Option> powerOptions;
+    int selected = 0;
+    for (size_t i = 0; i < sizeof(powerPresets) / sizeof(powerPresets[0]); i++) {
+        const int8_t powerDbm = powerPresets[i];
+        if (powerDbm == loraConfig.sx1262PowerDbm) selected = i;
+        powerOptions.push_back({powerLabels[i], [powerDbm]() {
+            loraConfig.sx1262PowerDbm = powerDbm;
+            saveLoRaConfig();
+            displaySuccess("SX1262 TX: " + String((int)powerDbm) + " dBm");
+        }});
+    }
+    loopOptions(powerOptions, MENU_TYPE_SUBMENU, "SX1262 TX Power", selected);
+}
+
+static void selectLoRaScanDwellMenu() {
+    loadLoRaConfig();
+    static const uint16_t dwellPresetsMs[] = {250, 500, 1000, 1500, 2000, 3000, 5000};
+    std::vector<Option> dwellOptions;
+    int selected = 0;
+    for (size_t i = 0; i < sizeof(dwellPresetsMs) / sizeof(dwellPresetsMs[0]); i++) {
+        const uint16_t dwellMs = dwellPresetsMs[i];
+        if (dwellMs == loraConfig.scanDwellMs) selected = i;
+        String label = String(dwellMs) + " ms";
+        if (dwellMs == 1500) label += " (Default)";
+        dwellOptions.push_back({label, [dwellMs]() {
+            loraConfig.scanDwellMs = dwellMs;
+            saveLoRaConfig();
+            displaySuccess("Scan dwell: " + String(dwellMs) + " ms");
+        }});
+    }
+    loopOptions(dwellOptions, MENU_TYPE_SUBMENU, "Channel Scan Dwell", selected);
+}
+
 void customLoRaConfigMenu() {
     loadLoRaConfig();
     std::vector<Option> options;
@@ -251,6 +302,8 @@ void customLoRaConfigMenu() {
     }});
 
     options.push_back({"Radio Chipset", selectLoRaRadioMenu});
+    options.push_back({"SX1262 TX Power (" + String((int)loraConfig.sx1262PowerDbm) + " dBm)", selectLoRaTxPowerMenu});
+    options.push_back({"Scan Dwell (" + String(loraConfig.scanDwellMs) + " ms)", selectLoRaScanDwellMenu});
     options.push_back({"Username: " + loraConfig.username, changeLoRaUsername});
 
     loopOptions(options, MENU_TYPE_SUBMENU, "LoRa Parameters");

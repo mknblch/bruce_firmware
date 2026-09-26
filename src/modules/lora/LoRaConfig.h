@@ -30,6 +30,8 @@ struct LoRaConfigData {
     uint8_t syncWord = 0x12;    // 0x12: Private/Bruce, 0x2B: Meshtastic, 0x34: LoRaWAN
     uint16_t preambleLen = 8;
     int8_t powerDbm = 17;
+    int8_t sx1262PowerDbm = 17;
+    uint16_t scanDwellMs = 1500;
     LoRaRadioType radioType = LoRaRadioType::SX1262;
     String username = "BruceNode";
     bool promiscuous = true;
