@@ -10,14 +10,50 @@
 LoRaConfigData loraConfig;
 
 const std::vector<LoRaPreset> kLoRaPresets = {
-    // Common Meshtastic presets
-    {"Mesh EU868 LongFast", "Meshtastic", 869.525f, 11, 250.0f, 5, 0x2B, 16},
-    {"Mesh US915 LongFast", "Meshtastic", 906.875f, 11, 250.0f, 5, 0x2B, 16},
-    {"Mesh 433 LongFast",   "Meshtastic", 433.175f, 11, 250.0f, 5, 0x2B, 16},
-    {"Mesh AS923 LongFast", "Meshtastic", 923.000f, 11, 250.0f, 5, 0x2B, 16},
-    {"Mesh AU915 LongFast", "Meshtastic", 915.000f, 11, 250.0f, 5, 0x2B, 16},
-    {"LoRaWAN EU868 Ch1",   "LoRaWAN",    868.100f, 7, 125.0f, 5, 0x34, 8},
-    {"Bruce Chat 868.0",    "Bruce",      868.000f, 9, 31.25f, 8, 0x12, 8},
+    // Meshtastic EU868
+    {"Mesh EU868 LongFast",   "Meshtastic EU868", 869.525f, 11, 250.0f, 5, 0x2B, 16},
+    {"Mesh EU868 MedFast",    "Meshtastic EU868", 869.525f,  9, 250.0f, 5, 0x2B, 16},
+    {"Mesh EU868 MediumSlow", "Meshtastic EU868", 869.525f, 10, 250.0f, 5, 0x2B, 16},
+    {"Mesh EU868 ShortSlow",  "Meshtastic EU868", 869.525f,  8, 250.0f, 5, 0x2B, 16},
+    {"Mesh EU868 ShortFast",  "Meshtastic EU868", 869.525f,  7, 250.0f, 5, 0x2B, 16},
+    {"Mesh EU868 ShortTurbo", "Meshtastic EU868", 869.525f,  7, 500.0f, 5, 0x2B, 16},
+
+    // Meshtastic US915
+    {"Mesh US915 LongFast",   "Meshtastic US915", 906.875f, 11, 250.0f, 5, 0x2B, 16},
+    {"Mesh US915 MedFast",    "Meshtastic US915", 906.875f,  9, 250.0f, 5, 0x2B, 16},
+    {"Mesh US915 MediumSlow", "Meshtastic US915", 906.875f, 10, 250.0f, 5, 0x2B, 16},
+    {"Mesh US915 ShortSlow",  "Meshtastic US915", 906.875f,  8, 250.0f, 5, 0x2B, 16},
+    {"Mesh US915 ShortFast",  "Meshtastic US915", 906.875f,  7, 250.0f, 5, 0x2B, 16},
+    {"Mesh US915 ShortTurbo", "Meshtastic US915", 906.875f,  7, 500.0f, 5, 0x2B, 16},
+
+    // Meshtastic Other Regions
+    {"Mesh 433 LongFast",     "Meshtastic 433 MHz", 433.175f, 11, 250.0f, 5, 0x2B, 16},
+    {"Mesh 433 MedFast",      "Meshtastic 433 MHz", 433.175f,  9, 250.0f, 5, 0x2B, 16},
+    {"Mesh AS923 LongFast",   "Meshtastic AS923",   923.000f, 11, 250.0f, 5, 0x2B, 16},
+    {"Mesh AU915 LongFast",   "Meshtastic AU915",   915.000f, 11, 250.0f, 5, 0x2B, 16},
+
+    // LoRaWAN EU868 (Public Sync 0x34)
+    {"LoRaWAN EU868 Ch1",     "LoRaWAN EU868",    868.100f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN EU868 Ch2",     "LoRaWAN EU868",    868.300f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN EU868 Ch3",     "LoRaWAN EU868",    868.500f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN EU867 Ch4",     "LoRaWAN EU868",    867.100f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN EU867 Ch5",     "LoRaWAN EU868",    867.300f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN EU867 Ch6",     "LoRaWAN EU868",    867.500f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN EU867 Ch7",     "LoRaWAN EU868",    867.700f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN EU867 Ch8",     "LoRaWAN EU868",    867.900f,  7, 125.0f, 5, 0x34,  8},
+
+    // LoRaWAN US915 (Public Sync 0x34)
+    {"LoRaWAN US915 Ch1",     "LoRaWAN US915",    902.300f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN US915 Ch2",     "LoRaWAN US915",    902.500f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN US915 Ch3",     "LoRaWAN US915",    902.700f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN US915 Ch4",     "LoRaWAN US915",    902.900f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN US915 Ch5",     "LoRaWAN US915",    903.100f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN US915 Ch6",     "LoRaWAN US915",    903.300f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN US915 Ch7",     "LoRaWAN US915",    903.500f,  7, 125.0f, 5, 0x34,  8},
+    {"LoRaWAN US915 Ch8",     "LoRaWAN US915",    903.700f,  7, 125.0f, 5, 0x34,  8},
+
+    // LoRaWAN 433 MHz
+    {"LoRaWAN 433 Ch1",       "LoRaWAN 433 MHz",  433.175f,  7, 125.0f, 5, 0x34,  8},
 };
 
 std::vector<LoRaPreset> loadLoRaPresetsFromStorage() {
@@ -158,11 +194,12 @@ bool selectLoRaPresetMenu() {
         {"Use Current Settings", [&presetSelected]() { presetSelected = true; }}
     };
     for (const auto &preset : presetProfiles) {
-        const LoRaPreset *profile = &preset;
         String family = "G";
         if (preset.category.startsWith("Meshtastic")) family = "M";
         else if (preset.category.startsWith("LoRaWAN")) family = "W";
         else if (preset.category.startsWith("Bruce")) family = "B";
+        else if (preset.category.startsWith("Flipper")) family = "F";
+        else if (preset.category.startsWith("Waveshare")) family = "S";
 
         String bandwidth = String(preset.bwKHz, 2);
         while (bandwidth.endsWith("0")) bandwidth.remove(bandwidth.length() - 1);
@@ -176,16 +213,16 @@ bool selectLoRaPresetMenu() {
         label += syncWordLabel;
         label += " P" + String(preset.preambleLen);
 
-        presetOptions.push_back({label, [profile, &presetSelected]() {
-            loraConfig.freqMHz = profile->freqMHz;
-            loraConfig.sf = profile->sf;
-            loraConfig.bwKHz = profile->bwKHz;
-            loraConfig.cr = profile->cr;
-            loraConfig.syncWord = profile->syncWord;
-            loraConfig.preambleLen = profile->preambleLen;
+        presetOptions.push_back({label, [preset, &presetSelected]() {
+            loraConfig.freqMHz = preset.freqMHz;
+            loraConfig.sf = preset.sf;
+            loraConfig.bwKHz = preset.bwKHz;
+            loraConfig.cr = preset.cr;
+            loraConfig.syncWord = preset.syncWord;
+            loraConfig.preambleLen = preset.preambleLen;
             saveLoRaConfig();
             presetSelected = true;
-            displaySuccess("Preset Applied: " + String(profile->name));
+            displaySuccess("Preset Applied: " + String(preset.name));
         }});
     }
 

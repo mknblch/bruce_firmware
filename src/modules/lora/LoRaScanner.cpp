@@ -47,12 +47,12 @@ static void drainKeyboardInput() {
 }
 
 static bool selectPresetChannels(
-    const std::vector<LoRaPreset> &storedPresets, std::vector<ScanChannelEntry> &channels
+    const std::vector<LoRaPreset> &presetsList, std::vector<ScanChannelEntry> &channels
 ) {
     channels.clear();
     std::vector<String> categories;
     std::vector<size_t> profileCounts;
-    for (const auto &preset : storedPresets) {
+    for (const auto &preset : presetsList) {
         auto category = std::find(categories.begin(), categories.end(), preset.category);
         if (category == categories.end()) {
             categories.push_back(preset.category);
@@ -95,7 +95,7 @@ static bool selectPresetChannels(
     }
 
     channels.clear();
-    for (const auto &preset : storedPresets) {
+    for (const auto &preset : presetsList) {
         auto category = std::find(categories.begin(), categories.end(), preset.category);
         if (category == categories.end() || !selected[category - categories.begin()]) continue;
         channels.push_back({preset.name, preset.freqMHz, preset.sf, preset.bwKHz, 0, -140.0f, -140.0f, 0,
@@ -114,89 +114,18 @@ void runLoRaChannelDetector() {
     displayTextLine("Init Channel Detector...");
 
     std::vector<ScanChannelEntry> channels;
+    std::vector<LoRaPreset> allPresets(kLoRaPresets.begin(), kLoRaPresets.end());
     std::vector<LoRaPreset> storedPresets = loadLoRaPresetsFromStorage();
+    allPresets.insert(allPresets.end(), storedPresets.begin(), storedPresets.end());
+
     uint8_t scanCr = loraConfig.cr;
     uint8_t scanSyncWord = loraConfig.syncWord;
     uint16_t scanPreambleLen = loraConfig.preambleLen;
 
     // Pick scan mode
     std::vector<Option> scanModes = {
-        {"Waveshare HF-B 868.0 (SF7/BW125)", [&]() {
-            channels = {
-                {"Waveshare 868.0", 868.000f, 7, 125.0f, 0, -140.0f, -140.0f, 0},
-            };
-            scanCr = 5;
-            scanSyncWord = 0x12;
-            scanPreambleLen = 8;
-        }},
-        {"Bruce 868 Test (SF9/BW31)", [&]() {
-            channels = {
-                {"Bruce 868.0", 868.000f, 9, 31.25f, 0, -140.0f, -140.0f, 0},
-                {"Bruce 868.1", 868.100f, 9, 31.25f, 0, -140.0f, -140.0f, 0},
-            };
-            scanCr = 8;
-            scanSyncWord = 0x12;
-            scanPreambleLen = 8;
-        }},
-        {"Meshtastic EU868", [&]() {
-            channels = { {"EU868 LongFast", 869.525f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
-            scanCr = 5;
-            scanSyncWord = 0x2B;
-            scanPreambleLen = 16;
-        }},
-        {"Meshtastic US915", [&]() {
-            channels = { {"US915 LongFast", 906.875f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
-            scanCr = 5;
-            scanSyncWord = 0x2B;
-            scanPreambleLen = 16;
-        }},
-        {"Meshtastic 433 MHz", [&]() {
-            channels = { {"433 LongFast", 433.175f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
-            scanCr = 5;
-            scanSyncWord = 0x2B;
-            scanPreambleLen = 16;
-        }},
-        {"Meshtastic AS923", [&]() {
-            channels = { {"AS923 LongFast", 923.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
-            scanCr = 5;
-            scanSyncWord = 0x2B;
-            scanPreambleLen = 16;
-        }},
-        {"Meshtastic AU915", [&]() {
-            channels = { {"AU915 LongFast", 915.000f, 11, 250.0f, 0, -140.0f, -140.0f, 0, 0x2B, true} };
-            scanCr = 5;
-            scanSyncWord = 0x2B;
-            scanPreambleLen = 16;
-        }},
-        {"LoRaWAN EU868 Band", [&]() {
-            scanCr = 5;
-            scanSyncWord = 0x34;
-            scanPreambleLen = 8;
-            channels = {
-                {"EU868.1 Ch1", 868.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"EU868.3 Ch2", 868.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"EU868.5 Ch3", 868.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"EU867.1 Ch4", 867.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"EU867.3 Ch5", 867.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"EU867.5 Ch6", 867.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"EU867.7 Ch7", 867.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"EU867.9 Ch8", 867.900f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-            };
-        }},
-        {"LoRaWAN US915 Band", [&]() {
-            scanCr = 5;
-            scanSyncWord = 0x34;
-            scanPreambleLen = 8;
-            channels = {
-                {"US902.3 Ch1", 902.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"US902.5 Ch2", 902.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"US902.7 Ch3", 902.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"US902.9 Ch4", 902.900f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"US903.1 Ch5", 903.100f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"US903.3 Ch6", 903.300f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"US903.5 Ch7", 903.500f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-                {"US903.7 Ch8", 903.700f, 7, 125.0f, 0, -140.0f, -140.0f, 0, 0x34, true},
-            };
+        {"Preset Sets (multi-select)", [&]() {
+            selectPresetChannels(allPresets, channels);
         }},
         {"433 MHz ISM Band", [&]() {
             channels.clear();
@@ -222,12 +151,6 @@ void runLoRaChannelDetector() {
             };
         }}
     };
-
-    if (!storedPresets.empty()) {
-        scanModes.push_back({"Stored Preset Sets (multi-select)", [&]() {
-            selectPresetChannels(storedPresets, channels);
-        }});
-    }
 
     int chosen = loopOptions(scanModes, MENU_TYPE_SUBMENU, "Select Scan Band", 0, false, false, 0, true, FP);
     if (chosen < 0 || channels.empty()) return;
@@ -373,22 +296,59 @@ void runLoRaChannelDetector() {
         bool sel = false;
         bool esc = false;
 
-        if (check(PrevPress)) up = true;
-        if (check(UpPress)) up = true;
-        if (check(PrevPagePress)) up = true;
+#if defined(HAS_ENCODER)
+        int32_t encSteps = drainRotarySteps();
+        if (encSteps != 0) {
+            check(PrevPress);
+            check(NextPress);
+            check(UpPress);
+            check(DownPress);
+            check(PrevPagePress);
+            check(NextPagePress);
+            while (encSteps > 0) {
+                int prevIdx = selectedIdx;
+                if (selectedIdx > 0) {
+                    selectedIdx--;
+                } else if (!channels.empty()) {
+                    selectedIdx = (int)channels.size() - 1;
+                }
+                if (selectedIdx != prevIdx) {
+                    updateSelection(prevIdx, selectedIdx);
+                }
+                encSteps--;
+            }
+            while (encSteps < 0) {
+                int prevIdx = selectedIdx;
+                if (!channels.empty() && selectedIdx + 1 < (int)channels.size()) {
+                    selectedIdx++;
+                } else {
+                    selectedIdx = 0;
+                }
+                if (selectedIdx != prevIdx) {
+                    updateSelection(prevIdx, selectedIdx);
+                }
+                encSteps++;
+            }
+            PrevPress = false;
+            NextPress = false;
+            UpPress = false;
+            DownPress = false;
+            PrevPagePress = false;
+            NextPagePress = false;
+        } else
+#endif
+        {
+            if (check(PrevPress)) up = true;
+            if (check(UpPress)) up = true;
+            if (check(PrevPagePress)) up = true;
 
-        if (check(NextPress)) down = true;
-        if (check(DownPress)) down = true;
-        if (check(NextPagePress)) down = true;
+            if (check(NextPress)) down = true;
+            if (check(DownPress)) down = true;
+            if (check(NextPagePress)) down = true;
+        }
 
         if (check(SelPress)) sel = true;
         if (check(EscPress)) esc = true;
-
-#if defined(HAS_ENCODER)
-        int encSteps = (int)drainRotarySteps();
-        if (encSteps > 0) down = true;
-        else if (encSteps < 0) up = true;
-#endif
 
         if (up || down || sel || esc) {
             KeyStroke.Clear();

@@ -1,28 +1,16 @@
 {
   "schemaVersion": 1,
-  "source": "https://meshtastic.org/blog/why-your-mesh-should-switch-from-longfast",
-  "note": "Copy to the SD card as /BruceLoRa/presets.json. Receiver profiles are grouped by region/frequency; confirm your radio hardware supports the selected band.",
+  "note": "Copy to the SD card as /BruceLoRa/presets.json. Receiver profiles are grouped by category and frequency; confirm your radio hardware supports the selected band.",
   "presets": [
-    { "name": "Mesh EU868 MedFast", "category": "Meshtastic EU868", "freqMHz": 869.525, "sf": 9, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh US915 MedFast", "category": "Meshtastic US915", "freqMHz": 906.875, "sf": 9, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh 433 MedFast", "category": "Meshtastic 433 MHz", "freqMHz": 433.175, "sf": 9, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh EU868 MediumSlow", "category": "Meshtastic EU868", "freqMHz": 869.525, "sf": 10, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh EU868 ShortSlow", "category": "Meshtastic EU868", "freqMHz": 869.525, "sf": 8, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh EU868 ShortFast", "category": "Meshtastic EU868", "freqMHz": 869.525, "sf": 7, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh EU868 ShortTurbo", "category": "Meshtastic EU868", "freqMHz": 869.525, "sf": 7, "bwKHz": 500.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh US915 MediumSlow", "category": "Meshtastic US915", "freqMHz": 906.875, "sf": 10, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh US915 ShortSlow", "category": "Meshtastic US915", "freqMHz": 906.875, "sf": 8, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh US915 ShortFast", "category": "Meshtastic US915", "freqMHz": 906.875, "sf": 7, "bwKHz": 250.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "Mesh US915 ShortTurbo", "category": "Meshtastic US915", "freqMHz": 906.875, "sf": 7, "bwKHz": 500.0, "cr": 5, "syncWord": 43, "preambleLen": 16 },
-    { "name": "LoRaWAN EU868 Ch2", "category": "LoRaWAN EU868", "freqMHz": 868.300, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 52, "preambleLen": 8 },
-    { "name": "LoRaWAN EU868 Ch3", "category": "LoRaWAN EU868", "freqMHz": 868.500, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 52, "preambleLen": 8 },
-    { "name": "LoRaWAN US915 Ch1", "category": "LoRaWAN US915", "freqMHz": 902.300, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 52, "preambleLen": 8 },
-    { "name": "LoRaWAN US915 Ch2", "category": "LoRaWAN US915", "freqMHz": 902.500, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 52, "preambleLen": 8 },
-    { "name": "LoRaWAN 433 Ch1", "category": "LoRaWAN 433 MHz", "freqMHz": 433.175, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 52, "preambleLen": 8 },
+    { "name": "Bruce Chat 868.0", "category": "Bruce 868 MHz", "freqMHz": 868.000, "sf": 9, "bwKHz": 31.25, "cr": 8, "syncWord": 18, "preambleLen": 8 },
+    { "name": "Bruce Chat 868.1", "category": "Bruce 868 MHz", "freqMHz": 868.100, "sf": 9, "bwKHz": 31.25, "cr": 8, "syncWord": 18, "preambleLen": 8 },
     { "name": "Bruce Chat 434.5", "category": "Bruce 433 MHz", "freqMHz": 434.500, "sf": 9, "bwKHz": 31.25, "cr": 8, "syncWord": 18, "preambleLen": 8 },
     { "name": "Bruce Chat 915.0", "category": "Bruce 915 MHz", "freqMHz": 915.000, "sf": 9, "bwKHz": 31.25, "cr": 8, "syncWord": 18, "preambleLen": 8 },
-    { "name": "LoRa Flipper 433.92", "category": "Generic 433 MHz", "freqMHz": 433.920, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 },
-    { "name": "LoRa Flipper 868.35", "category": "Generic 868 MHz", "freqMHz": 868.350, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 },
-    { "name": "LoRa Flipper 915.00", "category": "Generic 915 MHz", "freqMHz": 915.000, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 }
+    { "name": "Waveshare HF-B 868.0", "category": "Waveshare 868 MHz", "freqMHz": 868.000, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 },
+    { "name": "Waveshare LF-B 433.0", "category": "Waveshare 433 MHz", "freqMHz": 433.000, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 },
+    { "name": "Waveshare HF-B 915.0", "category": "Waveshare 915 MHz", "freqMHz": 915.000, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 },
+    { "name": "LoRa Flipper 433.92", "category": "Flipper 433 MHz", "freqMHz": 433.920, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 },
+    { "name": "LoRa Flipper 868.35", "category": "Flipper 868 MHz", "freqMHz": 868.350, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 },
+    { "name": "LoRa Flipper 915.00", "category": "Flipper 915 MHz", "freqMHz": 915.000, "sf": 7, "bwKHz": 125.0, "cr": 5, "syncWord": 18, "preambleLen": 8 }
   ]
 }

@@ -864,16 +864,42 @@ static void runContinuousScan(GattFilterMode filterMode) {
 
     while (true) {
         // Handle physical buttons & encoder
-        bool up = check(PrevPress) || check(UpPress);
-        bool down = check(NextPress) || check(DownPress);
+        bool up = false;
+        bool down = false;
         bool sel = check(SelPress);
         bool esc = check(EscPress);
 
 #if defined(HAS_ENCODER)
-        int encSteps = drainRotarySteps();
-        if (encSteps > 0) down = true;
-        else if (encSteps < 0) up = true;
+        int32_t encSteps = drainRotarySteps();
+        if (encSteps != 0) {
+            check(PrevPress);
+            check(NextPress);
+            check(UpPress);
+            check(DownPress);
+            while (encSteps > 0) {
+                if (selectedIdx > 0) {
+                    selectedIdx--;
+                    needsRedraw = true;
+                }
+                encSteps--;
+            }
+            while (encSteps < 0) {
+                if (selectedIdx + 1 < (int)uiCount) {
+                    selectedIdx++;
+                    needsRedraw = true;
+                }
+                encSteps++;
+            }
+            PrevPress = false;
+            NextPress = false;
+            UpPress = false;
+            DownPress = false;
+        } else
 #endif
+        {
+            if (check(PrevPress) || check(UpPress)) up = true;
+            if (check(NextPress) || check(DownPress)) down = true;
+        }
 
         keyStroke k = _getKeyPress();
         if (k.pressed || !k.word.empty()) {

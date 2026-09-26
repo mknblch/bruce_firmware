@@ -164,35 +164,52 @@ void showLoRaPacketInspector(const LoRaPacket &pkt) {
     }
 
 #if defined(HAS_ENCODER)
-    int encSteps = (int)drainRotarySteps();
-    if (encSteps > 0) {
+    int32_t encSteps = drainRotarySteps();
+    if (encSteps != 0) {
+        check(PrevPress);
+        check(NextPress);
+        check(UpPress);
+        check(DownPress);
+        check(PrevPagePress);
+        check(NextPagePress);
         int lineH = FP * LH + 1;
         int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
-        if (scroll + maxLines < (int)lines.size()) {
-            scroll = min((int)lines.size() - maxLines, scroll + encSteps);
-            if (scroll < 0) scroll = 0;
-            needsRedraw = true;
+        while (encSteps > 0) {
+            if (scroll > 0) {
+                scroll--;
+                needsRedraw = true;
+            }
+            encSteps--;
         }
-    } else if (encSteps < 0) {
-        if (scroll > 0) {
-            scroll = max(0, scroll + encSteps);
-            needsRedraw = true;
+        while (encSteps < 0) {
+            if (scroll + maxLines < (int)lines.size()) {
+                scroll++;
+                needsRedraw = true;
+            }
+            encSteps++;
         }
-    }
+        PrevPress = false;
+        NextPress = false;
+        UpPress = false;
+        DownPress = false;
+        PrevPagePress = false;
+        NextPagePress = false;
+    } else
 #endif
-
-    if (check(NextPress) || check(DownPress) || check(NextPagePress)) {
-        int lineH = FP * LH + 1;
-        int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
-        if (scroll + maxLines < (int)lines.size()) {
-            scroll++;
-            needsRedraw = true;
+    {
+        if (check(NextPress) || check(DownPress) || check(NextPagePress)) {
+            int lineH = FP * LH + 1;
+            int maxLines = (tftHeight - BORDER_PAD_Y - 24) / lineH;
+            if (scroll + maxLines < (int)lines.size()) {
+                scroll++;
+                needsRedraw = true;
+            }
         }
-    }
-    if (check(PrevPress) || check(UpPress) || check(PrevPagePress)) {
-        if (scroll > 0) {
-            scroll--;
-            needsRedraw = true;
+        if (check(PrevPress) || check(UpPress) || check(PrevPagePress)) {
+            if (scroll > 0) {
+                scroll--;
+                needsRedraw = true;
+            }
         }
     }
     if (check(EscPress) || check(SelPress)) {
@@ -238,16 +255,46 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
     drawMainBorder(true);
 
     while (loop) {
-        bool up = check(PrevPress) || check(UpPress) || check(PrevPagePress);
-        bool down = check(NextPress) || check(DownPress) || check(NextPagePress);
+        bool up = false;
+        bool down = false;
         bool sel = check(SelPress);
         bool esc = check(EscPress);
 
 #if defined(HAS_ENCODER)
-        int encSteps = (int)drainRotarySteps();
-        if (encSteps > 0) down = true;
-        else if (encSteps < 0) up = true;
+        int32_t encSteps = drainRotarySteps();
+        if (encSteps != 0) {
+            check(PrevPress);
+            check(NextPress);
+            check(UpPress);
+            check(DownPress);
+            check(PrevPagePress);
+            check(NextPagePress);
+            while (encSteps > 0) {
+                if (selectedPktIdx > 0) {
+                    selectedPktIdx--;
+                    needsRedraw = true;
+                }
+                encSteps--;
+            }
+            while (encSteps < 0) {
+                if (selectedPktIdx + 1 < (int)node.packets.size()) {
+                    selectedPktIdx++;
+                    needsRedraw = true;
+                }
+                encSteps++;
+            }
+            PrevPress = false;
+            NextPress = false;
+            UpPress = false;
+            DownPress = false;
+            PrevPagePress = false;
+            NextPagePress = false;
+        } else
 #endif
+        {
+            if (check(PrevPress) || check(UpPress) || check(PrevPagePress)) up = true;
+            if (check(NextPress) || check(DownPress) || check(NextPagePress)) down = true;
+        }
 
         keyStroke k = _getKeyPress();
         if (k.pressed || !k.word.empty()) {
@@ -448,16 +495,50 @@ void runLoRaSniffer() {
     check(EscPress);
 
     while (true) {
-        bool up = check(PrevPress) || check(UpPress) || check(PrevPagePress);
-        bool down = check(NextPress) || check(DownPress) || check(NextPagePress);
+        bool up = false;
+        bool down = false;
         bool sel = check(SelPress);
         bool esc = check(EscPress);
 
 #if defined(HAS_ENCODER)
-        int encSteps = (int)drainRotarySteps();
-        if (encSteps > 0) down = true;
-        else if (encSteps < 0) up = true;
+        int32_t encSteps = drainRotarySteps();
+        if (encSteps != 0) {
+            check(PrevPress);
+            check(NextPress);
+            check(UpPress);
+            check(DownPress);
+            check(PrevPagePress);
+            check(NextPagePress);
+            while (encSteps > 0) {
+                if (selectedIdx > 0) {
+                    selectedIdx--;
+                } else if (!gLoRaNodes.empty()) {
+                    selectedIdx = (int)gLoRaNodes.size() - 1;
+                }
+                needsRedraw = true;
+                encSteps--;
+            }
+            while (encSteps < 0) {
+                if (!gLoRaNodes.empty() && selectedIdx + 1 < (int)gLoRaNodes.size()) {
+                    selectedIdx++;
+                } else {
+                    selectedIdx = 0;
+                }
+                needsRedraw = true;
+                encSteps++;
+            }
+            PrevPress = false;
+            NextPress = false;
+            UpPress = false;
+            DownPress = false;
+            PrevPagePress = false;
+            NextPagePress = false;
+        } else
 #endif
+        {
+            if (check(PrevPress) || check(UpPress) || check(PrevPagePress)) up = true;
+            if (check(NextPress) || check(DownPress) || check(NextPagePress)) down = true;
+        }
 
         keyStroke k = _getKeyPress();
         if (k.pressed || !k.word.empty()) {
