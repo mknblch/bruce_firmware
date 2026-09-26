@@ -211,6 +211,49 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
     return true;
 }
 
+bool configureLoRaRadioForReceive(const LoRaConfigData &cfg) {
+    if (!gLoraInitialized) return false;
+
+    gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
+
+    int state = -1;
+    if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
+        state = gLora1276->standby();
+        if (state == RADIOLIB_ERR_NONE) state = gLora1276->setFrequency(cfg.freqMHz);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1276->setSpreadingFactor(cfg.sf);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1276->setBandwidth(cfg.bwKHz);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1276->setCodingRate(cfg.cr);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1276->setSyncWord(cfg.syncWord);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1276->setPreambleLength(cfg.preambleLen);
+    } else if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
+        state = gLora1262->standby();
+        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setFrequency(cfg.freqMHz, true);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setSpreadingFactor(cfg.sf);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setBandwidth(cfg.bwKHz);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setCodingRate(cfg.cr);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setSyncWord(cfg.syncWord);
+        if (state == RADIOLIB_ERR_NONE) state = gLora1262->setPreambleLength(cfg.preambleLen);
+    }
+
+    if (state == RADIOLIB_ERR_NONE) {
+        gCurFreq = cfg.freqMHz;
+        gCurSf = cfg.sf;
+        gCurBw = cfg.bwKHz;
+    } else {
+        Serial.printf("[LoRa] Channel configuration failed: %d\n", state);
+    }
+
+    gLoraPacketReceived = false;
+    const int rxState = startLoRaReceiveOnActiveRadio();
+    gLoraInterruptEnabled = (rxState == RADIOLIB_ERR_NONE);
+    if (rxState != RADIOLIB_ERR_NONE) {
+        Serial.printf("[LoRa] Failed to restart receive after channel change: %d\n", rxState);
+    }
+
+    return state == RADIOLIB_ERR_NONE && rxState == RADIOLIB_ERR_NONE;
+}
+
 bool setLoRaFrequency(float freqMHz) {
     if (!gLoraInitialized) return false;
     if (fabs(gCurFreq - freqMHz) < 0.0001f) return true;

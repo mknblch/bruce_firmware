@@ -12,6 +12,7 @@ extern volatile bool gLoraInterruptEnabled;
 bool isLoraHardwareConfigured();
 bool isLoraModulePresent(bool verbose = false);
 bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode = true);
+bool configureLoRaRadioForReceive(const LoRaConfigData &cfg);
 void stopLoRaRadio();
 
 bool setLoRaFrequency(float freqMHz);

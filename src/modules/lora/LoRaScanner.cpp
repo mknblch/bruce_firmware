@@ -46,6 +46,64 @@ static void drainKeyboardInput() {
     KeyStroke.Clear();
 }
 
+static bool selectPresetChannels(
+    const std::vector<LoRaPreset> &storedPresets, std::vector<ScanChannelEntry> &channels
+) {
+    channels.clear();
+    std::vector<String> categories;
+    std::vector<size_t> profileCounts;
+    for (const auto &preset : storedPresets) {
+        auto category = std::find(categories.begin(), categories.end(), preset.category);
+        if (category == categories.end()) {
+            categories.push_back(preset.category);
+            profileCounts.push_back(0);
+            category = categories.end() - 1;
+        }
+        profileCounts[category - categories.begin()]++;
+    }
+    if (categories.empty()) return false;
+
+    std::vector<bool> selected(categories.size(), false);
+    int menuIndex = 0;
+    bool startScan = false;
+    drainKeyboardInput();
+
+    while (!startScan) {
+        size_t selectedCount = 0;
+        for (bool isSelected : selected) {
+            if (isSelected) selectedCount++;
+        }
+
+        std::vector<Option> presetOptions;
+        Option startOption("Start scan (" + String(selectedCount) + " selected)", [&startScan]() { startScan = true; });
+        startOption.enabled = selectedCount > 0;
+        presetOptions.push_back(startOption);
+
+        for (size_t i = 0; i < categories.size(); i++) {
+            String label = selected[i] ? "[x] " : "[ ] ";
+            label += categories[i] + " (" + String(profileCounts[i]) + " profiles)";
+            presetOptions.push_back({label, [&, i]() { selected[i] = !selected[i]; }});
+        }
+
+        int chosen = loopOptions(presetOptions, MENU_TYPE_REGULAR, "Select Preset Sets", menuIndex);
+        if (chosen < 0) {
+            drainKeyboardInput();
+            return false;
+        }
+        menuIndex = chosen;
+        if (!startScan) drainKeyboardInput();
+    }
+
+    channels.clear();
+    for (const auto &preset : storedPresets) {
+        auto category = std::find(categories.begin(), categories.end(), preset.category);
+        if (category == categories.end() || !selected[category - categories.begin()]) continue;
+        channels.push_back({preset.name, preset.freqMHz, preset.sf, preset.bwKHz, 0, -140.0f, -140.0f, 0,
+                            preset.syncWord, true, preset.cr, preset.preambleLen, true});
+    }
+    return !channels.empty();
+}
+
 void runLoRaChannelDetector() {
     loadLoRaConfig();
     if (!isLoraHardwareConfigured()) {
@@ -165,21 +223,9 @@ void runLoRaChannelDetector() {
         }}
     };
 
-    std::vector<String> presetCategories;
-    for (const auto &preset : storedPresets) {
-        if (std::find(presetCategories.begin(), presetCategories.end(), preset.category) == presetCategories.end()) {
-            presetCategories.push_back(preset.category);
-        }
-    }
-    for (const auto &category : presetCategories) {
-        scanModes.push_back({category + " Presets", [&, category]() {
-            channels.clear();
-            for (const auto &preset : storedPresets) {
-                if (preset.category == category) {
-                    channels.push_back({preset.name, preset.freqMHz, preset.sf, preset.bwKHz, 0, -140.0f,
-                                        -140.0f, 0, preset.syncWord, true, preset.cr, preset.preambleLen, true});
-                }
-            }
+    if (!storedPresets.empty()) {
+        scanModes.push_back({"Stored Preset Sets (multi-select)", [&]() {
+            selectPresetChannels(storedPresets, channels);
         }});
     }
 
@@ -527,13 +573,14 @@ void runLoRaChannelDetector() {
             lastHopTime = millis();
             currentChIdx = (currentChIdx + 1) % channels.size();
             auto &ch = channels[currentChIdx];
-            setLoRaFrequency(ch.freqMHz);
-            setLoRaSpreadingFactor(ch.sf);
-            setLoRaBandwidth(ch.bwKHz);
-            setLoRaSyncWord(ch.syncWord);
-            setLoRaCodingRate(ch.hasRadioParams ? ch.cr : scanCr);
-            setLoRaPreambleLength(ch.hasRadioParams ? ch.preambleLen : scanPreambleLen);
-            startLoRaReceive();
+            LoRaConfigData channelCfg = loraConfig;
+            channelCfg.freqMHz = ch.freqMHz;
+            channelCfg.sf = ch.sf;
+            channelCfg.bwKHz = ch.bwKHz;
+            channelCfg.cr = ch.hasRadioParams ? ch.cr : scanCr;
+            channelCfg.syncWord = ch.syncWord;
+            channelCfg.preambleLen = ch.hasRadioParams ? ch.preambleLen : scanPreambleLen;
+            configureLoRaRadioForReceive(channelCfg);
             drawStatus();
         }
 
