@@ -243,7 +243,7 @@ void bleTrackerPickFromScan() {
         bool esc = check(EscPress);
 
 #if defined(HAS_ENCODER)
-        int encSteps = getEncoderSteps();
+        int encSteps = drainRotarySteps();
         if (encSteps > 0) down = true;
         else if (encSteps < 0) up = true;
 #endif
