@@ -10,6 +10,9 @@ uint32_t getBatteryAdcMilliVolts() __attribute__((weak));
 void updateClockTimezone();
 #if !defined(HAS_RTC)
 void restorePersistedClock();
+void savePersistedClock();
+#else
+inline void savePersistedClock() {}
 #endif
 void updateTimeStr(struct tm timeInfo);
 void showDeviceInfo();

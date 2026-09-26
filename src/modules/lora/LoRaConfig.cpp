@@ -146,7 +146,11 @@ void loadLoRaConfig() {
     }
     if (!doc["LoRa_Scan_Dwell"].isNull()) {
         uint16_t scanDwellMs = doc["LoRa_Scan_Dwell"].as<uint16_t>();
-        if (scanDwellMs >= 250 && scanDwellMs <= 5000) loraConfig.scanDwellMs = scanDwellMs;
+        if (scanDwellMs >= 1000 && scanDwellMs <= 5000) {
+            loraConfig.scanDwellMs = scanDwellMs;
+        } else {
+            loraConfig.scanDwellMs = 1500;
+        }
     }
     if (!doc["LoRa_Name"].isNull()) loraConfig.username = doc["LoRa_Name"].as<String>();
 
@@ -301,7 +305,7 @@ static void selectLoRaTxPowerMenu() {
 
 static void selectLoRaScanDwellMenu() {
     loadLoRaConfig();
-    static const uint16_t dwellPresetsMs[] = {250, 500, 1000, 1500, 2000, 3000, 5000};
+    static const uint16_t dwellPresetsMs[] = {1000, 1500, 2000, 3000, 5000};
     std::vector<Option> dwellOptions;
     int selected = 0;
     for (size_t i = 0; i < sizeof(dwellPresetsMs) / sizeof(dwellPresetsMs[0]); i++) {

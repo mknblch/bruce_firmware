@@ -1382,6 +1382,7 @@ String num_keyboard(const String &current_text, int max_size, const String &text
 
 void powerOff() { displayWarning("Not available", true); }
 void goToDeepSleep() {
+    savePersistedClock();
 #if DEEPSLEEP_WAKEUP_PIN >= 0
 
 #if SOC_PM_SUPPORT_EXT0_WAKEUP

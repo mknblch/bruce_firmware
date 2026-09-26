@@ -124,6 +124,7 @@ void updateClockTimezone() {
     rtc.setTime(localTime);
     updateTimeStr(rtc.getTimeStruct());
     clock_set = true;
+    savePersistedClock();
 #endif
     // Update Internal clock to system time
     struct timeval tv = {.tv_sec = localTime};
@@ -132,34 +133,23 @@ void updateClockTimezone() {
 
 #if !defined(HAS_RTC)
 // --- Persistent software clock (boards without an RTC chip) ---
-// Boards without an RTC lose a set time on a full power-off. Periodically save
-// the current epoch to NVS and restore it on boot, so the clock comes back
-// close to correct (it re-syncs exactly via NTP/GPS when available). NVS (not
-// the user filesystem) so it survives FS reformats and custom partition layouts.
+// Boards without an RTC lose a set time on a full power-off. Save
+// the current epoch to NVS on time sync/configuration and restore it on boot,
+// so the clock comes back close to correct (it re-syncs exactly via NTP/GPS when available).
+// NVS (not the user filesystem) so it survives FS reformats and custom partition layouts.
 #define CLOCK_PERSIST_NS "clock"
 #define CLOCK_PERSIST_KEY "epoch"
-#define CLOCK_PERSIST_INTERVAL_MS 300000 // 5 min: bounds NVS wear, <=5 min drift after power loss
 
-static void time_persist_task(void *param) {
+void savePersistedClock() {
+    if (!clock_set) return;
     Preferences prefs;
-    uint32_t last_write_ms = 0;
-    bool saved = false;
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(60000)); // wake every minute
-        if (!clock_set) continue;
-        // Save promptly the first time the clock is set, then at most every 5 min.
-        if (saved && (millis() - last_write_ms) < CLOCK_PERSIST_INTERVAL_MS) continue;
-        if (prefs.begin(CLOCK_PERSIST_NS, false)) {
-            prefs.putULong(CLOCK_PERSIST_KEY, (uint32_t)rtc.getEpoch());
-            prefs.end();
-            last_write_ms = millis();
-            saved = true;
-        }
+    if (prefs.begin(CLOCK_PERSIST_NS, false)) {
+        prefs.putULong(CLOCK_PERSIST_KEY, (uint32_t)rtc.getEpoch());
+        prefs.end();
     }
 }
 
-// Restore the last-saved time from NVS (if plausible) and start the periodic
-// save task. Call once from init_clock() on boards without an RTC.
+// Restore the last-saved time from NVS (if plausible). Call once from init_clock() on boards without an RTC.
 void restorePersistedClock() {
     Preferences prefs;
     if (prefs.begin(CLOCK_PERSIST_NS, true)) { // read-only
@@ -172,7 +162,6 @@ void restorePersistedClock() {
             settimeofday(&tv, nullptr);
         }
     }
-    xTaskCreate(time_persist_task, "clockSave", 4096, NULL, 1, NULL);
 }
 #endif
 

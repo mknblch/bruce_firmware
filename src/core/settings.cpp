@@ -981,6 +981,7 @@ void setClock() {
         time_t epoch = mktime(&t);
         struct timeval tv = {.tv_sec = epoch};
         settimeofday(&tv, nullptr);
+        savePersistedClock();
 #endif
         clock_set = true;
     }
