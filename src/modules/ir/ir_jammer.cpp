@@ -378,7 +378,7 @@ void setupJammer(IRsend &irsend) {
     irsend.begin();
 
     // Configure IR LED pin as output
-    setup_ir_pin(bruceConfigPins.irTx, OUTPUT);
+    setup_ir_pin(bruceConfigPins.IR_Pins.tx, OUTPUT);
 
     // Draw UI border on the display
     drawMainBorder();
@@ -536,9 +536,9 @@ void performBasicJamming(JammerState &state, IRsend &irsend) {
         // Method 1: Direct LED control for precise timing
         // Generates simple square wave with equal mark/space duration
         for (int i = 0; i < 50 * state.jamDensity; i++) {
-            digitalWrite(bruceConfigPins.irTx, HIGH);
+            digitalWrite(bruceConfigPins.IR_Pins.tx, HIGH);
             delayMicroseconds(state.markTiming);
-            digitalWrite(bruceConfigPins.irTx, LOW);
+            digitalWrite(bruceConfigPins.IR_Pins.tx, LOW);
             delayMicroseconds(state.markTiming);
         }
 
@@ -563,9 +563,9 @@ void performEnhancedBasicJamming(JammerState &state, IRsend &irsend) {
         // Method 1: Direct LED control with separate mark/space timing
         // Provides more flexibility to target specific IR protocols
         for (int i = 0; i < 25 * state.jamDensity; i++) {
-            digitalWrite(bruceConfigPins.irTx, HIGH);
+            digitalWrite(bruceConfigPins.IR_Pins.tx, HIGH);
             delayMicroseconds(state.markTiming);
-            digitalWrite(bruceConfigPins.irTx, LOW);
+            digitalWrite(bruceConfigPins.IR_Pins.tx, LOW);
             delayMicroseconds(state.spaceTiming);
         }
 
@@ -605,9 +605,9 @@ void performSweepJamming(JammerState &state, IRsend &irsend) {
 
         // Direct LED control for precise timing
         for (int i = 0; i < 20 * state.jamDensity; i++) {
-            digitalWrite(bruceConfigPins.irTx, HIGH);
+            digitalWrite(bruceConfigPins.IR_Pins.tx, HIGH);
             delayMicroseconds(state.markTiming);
-            digitalWrite(bruceConfigPins.irTx, LOW);
+            digitalWrite(bruceConfigPins.IR_Pins.tx, LOW);
             delayMicroseconds(state.markTiming);
         }
 
@@ -682,7 +682,7 @@ void cleanupJammer(IRsend &irsend) {
     PPM.disableOTG();
 #endif
     // Ensure IR LED is turned off
-    digitalWrite(bruceConfigPins.irTx, LOW);
+    digitalWrite(bruceConfigPins.IR_Pins.tx, LOW);
 
     // Display exit message
     displayRedStripe("IR Jamming Stopped");
@@ -700,7 +700,7 @@ void startIrJammer() {
     PPM.enableOTG();
 #endif
     // Initialize IR transmitter with configured pin
-    IRsend irsend(bruceConfigPins.irTx);
+    IRsend irsend(bruceConfigPins.IR_Pins.tx);
 
     // Initialize jammer state structure
     JammerState state;

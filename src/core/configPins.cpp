@@ -44,25 +44,25 @@ void BruceConfigPins::fromJson(JsonObject obj) {
         log_e("Fail");
     }
 
-    if (!root["irTx"].isNull()) {
-        irTx = root["irTx"].as<int>();
-    } else {
+    bool hasIrPinsObject = root["IR_Pins"].is<JsonObject>();
+    if (hasIrPinsObject) IR_Pins.fromJson(root["IR_Pins"].as<JsonObject>());
+    JsonObject irPins = root["IR_Pins"].as<JsonObject>();
+    if (irPins["tx"].isNull()) {
+        if (!root["irTx"].isNull()) IR_Pins.tx = root["irTx"].as<int>();
         count++;
-        log_e("Fail");
     }
+    if (irPins["rx"].isNull()) {
+        if (!root["irRx"].isNull()) IR_Pins.rx = root["irRx"].as<int>();
+        count++;
+    }
+    if (!root["irTx"].isNull() || !root["irRx"].isNull()) count++;
+
     if (!root["irTxRepeats"].isNull()) {
         irTxRepeats = root["irTxRepeats"].as<uint8_t>();
     } else {
         count++;
         log_e("Fail");
     }
-    if (!root["irRx"].isNull()) {
-        irRx = root["irRx"].as<int>();
-    } else {
-        count++;
-        log_e("Fail");
-    }
-
     if (!root["rfTx"].isNull()) {
         rfTx = root["rfTx"].as<int>();
     } else {
@@ -236,9 +236,9 @@ void BruceConfigPins::toJson(JsonObject obj) const {
     JsonObject root = obj[getMacAddress()].to<JsonObject>();
 
     root["rot"] = rotation;
-    root["irTx"] = irTx;
     root["irTxRepeats"] = irTxRepeats;
-    root["irRx"] = irRx;
+    JsonObject _IR = root["IR_Pins"].to<JsonObject>();
+    IR_Pins.toJson(_IR);
     root["rfTx"] = rfTx;
     root["rfRx"] = rfRx;
     root["rfModule"] = rfModule;
@@ -487,7 +487,7 @@ void BruceConfigPins::setBleName(String value) {
 }
 
 void BruceConfigPins::setIrTxPin(int value) {
-    irTx = value;
+    IR_Pins.tx = value;
     saveFile();
 }
 
@@ -497,7 +497,7 @@ void BruceConfigPins::setIrTxRepeats(uint8_t value) {
 }
 
 void BruceConfigPins::setIrRxPin(int value) {
-    irRx = value;
+    IR_Pins.rx = value;
     saveFile();
 }
 

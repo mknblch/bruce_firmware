@@ -137,12 +137,12 @@ void _post_setup_gpio() {
         bruceConfigPins.rfRx = 27;
         pinsChanged = true;
     }
-    if (bruceConfigPins.irTx != 22) {
-        bruceConfigPins.irTx = 22;
+    if (bruceConfigPins.IR_Pins.tx != 22) {
+        bruceConfigPins.IR_Pins.tx = 22;
         pinsChanged = true;
     }
-    if (bruceConfigPins.irRx != 27) {
-        bruceConfigPins.irRx = 27;
+    if (bruceConfigPins.IR_Pins.rx != 27) {
+        bruceConfigPins.IR_Pins.rx = 27;
         pinsChanged = true;
     }
     if (pinsChanged) bruceConfigPins.saveFile();

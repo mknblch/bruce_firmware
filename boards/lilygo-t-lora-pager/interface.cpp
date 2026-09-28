@@ -207,7 +207,7 @@ void _setup_gpio() {
     // Start with default IR, RF, GPS and RFID Configs, replace old
     bruceConfigPins.rfModule = CC1101_SPI_MODULE;
     bruceConfigPins.rfidModule = ST25R3916_SPI_MODULE;
-    bruceConfigPins.irRx = 1;
+    bruceConfigPins.IR_Pins.rx = 1;
     bruceConfigPins.gpsBaudrate = 38400;
 
     // Encoder

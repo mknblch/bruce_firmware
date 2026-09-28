@@ -35,7 +35,7 @@ void _setup_gpio() {
     // Starts SPI instance for CC1101 and NRF24 with CS pins blocking communication at start
 
     bruceConfigPins.rfModule = CC1101_SPI_MODULE;
-    bruceConfigPins.irRx = RXLED;
+    bruceConfigPins.IR_Pins.rx = RXLED;
     setSysI2CBus(&Wire); // PMU lives on the default Wire object
     bool pmu_ret = false;
     Wire.begin(SYS_I2C_SDA, SYS_I2C_SCL);

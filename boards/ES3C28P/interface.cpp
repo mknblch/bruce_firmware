@@ -115,8 +115,8 @@ void _setup_gpio() {
     // ---- Start with default module configs ----
     bruceConfigPins.rfModule = CC1101_SPI_MODULE;
     bruceConfigPins.rfidModule = PN532_I2C_MODULE;
-    bruceConfigPins.irRx = RXLED;
-    bruceConfigPins.irTx = TXLED;
+    bruceConfigPins.IR_Pins.rx = RXLED;
+    bruceConfigPins.IR_Pins.tx = TXLED;
 
     Serial.begin(115200);
 }

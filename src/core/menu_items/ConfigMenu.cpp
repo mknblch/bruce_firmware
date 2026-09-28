@@ -3,6 +3,7 @@
 #include "core/display.h"
 #include "core/i2c_finder.h"
 #include "core/main_menu.h"
+#include "core/pin_profiles.h"
 #include "core/settings.h"
 #include "core/utils.h"
 #include "core/wifi/wifi_common.h"
@@ -198,6 +199,7 @@ void ConfigMenu::systemMenu() {
 void ConfigMenu::advancedMenu() {
     while (true) {
         std::vector<Option> localOptions = {
+            {"Pin Profiles",    [this]() { pinProfilesMenu(); }    },
             {"Set Device pins", [this]() { pinsMenu(); }           },
 #if !defined(LITE_VERSION)
             {"Toggle BLE API",  [this]() { enableBLEAPI(); }       },
@@ -323,6 +325,43 @@ void ConfigMenu::pinsMenu() {
         // Exit to Config menu on Back or ESC
         if (selected == -1 || selected == localOptions.size() - 1) { return; }
         // Menu rebuilds after each action
+    }
+}
+
+void ConfigMenu::pinProfilesMenu() {
+    while (true) {
+        std::vector<PinProfile> profiles = scanPinProfiles();
+        std::vector<Option> localOptions;
+
+        if (profiles.empty()) {
+            localOptions.push_back({"No .pins files in storage root", []() {}});
+        } else {
+            for (const PinProfile &profile : profiles) {
+                localOptions.push_back({
+                    profile.displayName,
+                    [profile]() {
+                        drawMainBorder(true);
+                        int8_t choice = displayMessage(
+                            "Apply this pin profile?\nDevice will reboot", "Cancel", nullptr, "Apply", TFT_RED
+                        );
+                        if (choice != 1) return;
+
+                        String error;
+                        if (!applyPinProfile(profile, error)) {
+                            displayError("Pin profile failed: " + error, true);
+                            return;
+                        }
+                        displayInfo("Pin profile applied; rebooting");
+                        delay(400);
+                        ESP.restart();
+                    }
+                });
+            }
+        }
+        localOptions.push_back({"Back", []() {}});
+
+        int selected = loopOptions(localOptions, MENU_TYPE_SUBMENU, "Pin Profiles");
+        if (selected == -1 || selected == localOptions.size() - 1) return;
     }
 }
 
