@@ -135,8 +135,8 @@ bool nrf_ble_build_packet(uint8_t *out_buf, uint8_t &out_len, uint8_t pdu_type,
 
     uint8_t raw[32];
     uint8_t header = pdu_type;
-    // Set TxAdd = 1 (Random Address) if random MAC is used (MSB top 2 bits 11, or if bit 6 requested)
-    if ((header & 0x40) == 0 && ((mac[5] & 0xC0) == 0xC0 || (mac[0] & 0x01) == 0)) {
+    // Set TxAdd = 1 (Random Address) if random MAC is used (MSB top 2 bits 11)
+    if ((header & 0x40) == 0 && ((mac[5] & 0xC0) == 0xC0)) {
         header |= 0x40; // TxAdd = 1 (Random)
     }
     raw[0] = header;
@@ -203,6 +203,94 @@ bool nrf_ble_send_adv(uint8_t pdu_type, const uint8_t *mac,
         }
     }
     return false;
+}
+
+bool nrf_ble_send_adv_dual(uint8_t adv_pdu_type, const uint8_t *mac,
+                           const uint8_t *adv_payload, uint8_t adv_len,
+                           const uint8_t *rsp_payload, uint8_t rsp_len,
+                           uint8_t ble_chan) {
+    if (mac == nullptr || (adv_len > 0 && adv_payload == nullptr) ||
+        (rsp_len > 0 && rsp_payload == nullptr) || adv_len > 21 || rsp_len > 21 ||
+        (adv_pdu_type != NRF_BLE_ADV_IND && adv_pdu_type != NRF_BLE_ADV_SCAN_IND)) {
+        return false;
+    }
+
+    auto send_channel_dual = [&](uint8_t ch) -> bool {
+        uint8_t tx_buf[32];
+        uint8_t tx_len = 0;
+        if (!nrf_ble_build_packet(tx_buf, tx_len, adv_pdu_type, mac, adv_payload, adv_len, ch) ||
+            !nrf_ble_send_raw(tx_buf, tx_len, ch)) {
+            return false;
+        }
+
+        NRFradio.startListening();
+        bool success = true;
+        for (uint8_t attempt = 0; attempt < 100; attempt++) {
+            if (NRFradio.available()) {
+                uint8_t request_raw[32];
+                NRFradio.read(request_raw, sizeof(request_raw));
+                NrfBlePacket request;
+                if (nrf_ble_parse_packet(request_raw, ch, request) && request.crc_ok &&
+                    request.pdu_type == NRF_BLE_SCAN_REQ && request.adv_len >= 6 &&
+                    memcmp(request.mac, mac, 6) == 0) {
+                    NRFradio.stopListening();
+                    delayMicroseconds(150); // T_IFS (Inter Frame Space)
+                    if (!nrf_ble_build_packet(tx_buf, tx_len, NRF_BLE_SCAN_RSP, mac,
+                                              rsp_payload, rsp_len, ch) ||
+                        !nrf_ble_send_raw(tx_buf, tx_len, ch)) {
+                        success = false;
+                    }
+                    break;
+                }
+            }
+            delayMicroseconds(100);
+        }
+        NRFradio.stopListening();
+        return success;
+    };
+
+    if (ble_chan == 0xFF) {
+        const uint8_t channels[3] = {37, 38, 39};
+        bool success = true;
+        for (int i = 0; i < 3; i++) {
+            if (!send_channel_dual(channels[i])) {
+                success = false;
+            }
+        }
+        return success;
+    } else {
+        if (ble_chan != 37 && ble_chan != 38 && ble_chan != 39) return false;
+        return send_channel_dual(ble_chan);
+    }
+}
+
+uint8_t nrf_ble_build_pcap_frame(const NrfBlePacket &pkt, uint8_t *out_buf, uint8_t out_capacity) {
+    const uint8_t payload_len = pkt.raw[1] & 0x3F;
+    if (out_buf == nullptr || payload_len < 6 || payload_len > 27) return 0;
+
+    const uint8_t pdu_and_crc_len = 2 + payload_len + 3;
+    const uint8_t frame_len = NRF_BLE_PCAP_PHDR_LEN + 4 + pdu_and_crc_len;
+    if (out_capacity < frame_len) return 0;
+
+    out_buf[0] = pkt.channel;
+    out_buf[1] = 0x7F; // Signal power unavailable
+    out_buf[2] = 0x7F; // Noise power unavailable
+    out_buf[3] = 0;    // No access-address offenses
+    out_buf[4] = 0xD6; // Reference access address, little-endian
+    out_buf[5] = 0xBE;
+    out_buf[6] = 0x89;
+    out_buf[7] = 0x8E;
+
+    uint16_t flags = 0x0001 | 0x0010 | 0x0020 | 0x0400; // Dewhitened, reference AA/offenses valid, CRC checked
+    if (pkt.crc_ok) flags |= 0x0800;
+    out_buf[8] = flags & 0xFF;
+    out_buf[9] = flags >> 8;
+    out_buf[10] = 0xD6; // Advertising access address, little-endian
+    out_buf[11] = 0xBE;
+    out_buf[12] = 0x89;
+    out_buf[13] = 0x8E;
+    memcpy(&out_buf[NRF_BLE_PCAP_PHDR_LEN + 4], pkt.raw, pdu_and_crc_len);
+    return frame_len;
 }
 
 bool nrf_ble_parse_packet(const uint8_t *raw_32, uint8_t ble_chan, NrfBlePacket &pkt) {
@@ -346,10 +434,7 @@ String nrf_ble_pdu_type_str(uint8_t pdu_type) {
 // ── Preset Packet Builders ───────────────────────────────────────────
 
 uint8_t nrf_ble_build_ibeacon(uint8_t *buf, const uint8_t *uuid, uint16_t major, uint16_t minor, int8_t tx_power) {
-    // Flags (3 bytes) + Apple iBeacon prefix (4 bytes) + UUID (16 bytes) + Major (2 bytes) + Minor (2 bytes) + TX Power (1 byte)
-    // To fit within 21 bytes payload:
-    // Format: 0x14 (len 20), 0xFF (Mfg Data), 0x4C, 0x00 (Apple), 0x02, 0x15 (iBeacon), 10-byte truncated UUID / 16B:
-    // Compact iBeacon format (21 bytes total):
+    // Visual-only legacy preset: the 21-byte payload cap forces a truncated, non-compliant iBeacon block.
     uint8_t idx = 0;
     buf[idx++] = 0x14; // Length 20
     buf[idx++] = 0xFF; // Type: Manufacturer Specific
@@ -380,27 +465,73 @@ uint8_t nrf_ble_build_eddystone_url(uint8_t *buf, const String &url, int8_t tx_p
     buf[idx++] = 0xAA;
     buf[idx++] = 0xFE;
 
-    // Service Data: 0x16, 0xAA, 0xFE, 0x10 (URL Frame), tx_power, scheme, url_encoded
-    uint8_t scheme = 0x03; // "https://"
+    // URL Scheme prefixes (Eddystone URL Spec):
+    // 0x00: "http://www."
+    // 0x01: "https://www."
+    // 0x02: "http://"
+    // 0x03: "https://"
+    uint8_t scheme = 0x03; // default "https://"
     String cleanUrl = url;
     if (cleanUrl.startsWith("http://www.")) { scheme = 0x00; cleanUrl = cleanUrl.substring(11); }
     else if (cleanUrl.startsWith("https://www.")) { scheme = 0x01; cleanUrl = cleanUrl.substring(12); }
     else if (cleanUrl.startsWith("http://")) { scheme = 0x02; cleanUrl = cleanUrl.substring(7); }
     else if (cleanUrl.startsWith("https://")) { scheme = 0x03; cleanUrl = cleanUrl.substring(8); }
 
-    uint8_t url_len = cleanUrl.length();
-    if (url_len > 8) url_len = 8; // Fit in 21 bytes limit (3 flags + 4 uuid + 6 hdr + 8 url = 21)
+    // Eddystone URL Suffix Token Table (ordered by longest match first)
+    static const struct {
+        const char *suffix;
+        uint8_t code;
+    } SUFFIX_TOKENS[] = {
+        {".com/", 0x00},
+        {".org/", 0x01},
+        {".edu/", 0x02},
+        {".net/", 0x03},
+        {".info/", 0x04},
+        {".biz/", 0x05},
+        {".gov/", 0x06},
+        {".com",  0x07},
+        {".org",  0x08},
+        {".edu",  0x09},
+        {".net",  0x0A},
+        {".info", 0x0B},
+        {".biz",  0x0C},
+        {".gov",  0x0D}
+    };
 
-    uint8_t service_len = 5 + url_len;
+    uint8_t encoded_url[21];
+    uint8_t enc_len = 0;
+    // Total adv payload limit is 21 bytes.
+    // Fixed bytes: 3 (Flags) + 4 (UUID) + 1 (Service Data len) + 6 (Service Data Header) = 14 bytes
+    // Max encoded url bytes = 21 - 14 = 7 bytes.
+    const uint8_t max_enc_len = 7;
+
+    size_t i = 0;
+    while (i < cleanUrl.length() && enc_len < max_enc_len) {
+        bool matched = false;
+        for (const auto &token : SUFFIX_TOKENS) {
+            size_t tlen = strlen(token.suffix);
+            if (cleanUrl.substring(i).startsWith(token.suffix)) {
+                encoded_url[enc_len++] = token.code;
+                i += tlen;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            encoded_url[enc_len++] = (uint8_t)cleanUrl[i++];
+        }
+    }
+
+    uint8_t service_len = 6 + enc_len; // 1 (0x16) + 2 (UUID) + 1 (Frame) + 1 (tx_power) + 1 (scheme) + enc_len
     buf[idx++] = service_len;
-    buf[idx++] = 0x16; // Service Data
+    buf[idx++] = 0x16; // Service Data - 16-bit UUID
     buf[idx++] = 0xAA; // UUID LSB
     buf[idx++] = 0xFE; // UUID MSB
     buf[idx++] = 0x10; // Frame: URL
     buf[idx++] = (uint8_t)tx_power;
     buf[idx++] = scheme;
-    for (uint8_t i = 0; i < url_len; i++) {
-        buf[idx++] = cleanUrl[i];
+    for (uint8_t j = 0; j < enc_len; j++) {
+        buf[idx++] = encoded_url[j];
     }
     return idx;
 }
@@ -414,12 +545,14 @@ uint8_t nrf_ble_build_eddystone_uid(uint8_t *buf, const uint8_t *nid, const uint
     buf[idx++] = 0xFE;
 
     // Service Data (UID Frame)
-    buf[idx++] = 0x10; // Length 16 (1+2+1+1+6+4+1)
+    // Emitted bytes: 0x16, 0xAA, 0xFE, 0x00, tx_power, 6 bytes nid, 4 bytes bid -> total 15 bytes
+    buf[idx++] = 0x0F; // Length 15 (1 type + 2 uuid + 1 frame + 1 pwr + 6 nid + 4 bid)
     buf[idx++] = 0x16; // Service Data
     buf[idx++] = 0xAA;
     buf[idx++] = 0xFE;
     buf[idx++] = 0x00; // UID Frame Type
     buf[idx++] = (uint8_t)tx_power;
+    // Visual-only compact preset: shortened identifiers do not meet the Eddystone UID specification.
     memcpy(&buf[idx], nid, 6); // Namespace (truncated to 6 for 21B payload fit)
     idx += 6;
     memcpy(&buf[idx], bid, 4); // Instance (4 bytes)
@@ -429,7 +562,8 @@ uint8_t nrf_ble_build_eddystone_uid(uint8_t *buf, const uint8_t *nid, const uint
 
 uint8_t nrf_ble_build_altbeacon(uint8_t *buf, const uint8_t *beacon_id, uint16_t mfg_id, int8_t ref_rssi) {
     uint8_t idx = 0;
-    buf[idx++] = 0x14; // Length 20
+    // Visual-only legacy preset: shortened ID and field ordering are not AltBeacon-compliant.
+    buf[idx++] = 0x13; // Length 19 (1 type + 2 mfg + 2 code + 12 beacon_id + 1 rssi + 1 rsv)
     buf[idx++] = 0xFF; // Manufacturer Specific
     buf[idx++] = mfg_id & 0xFF;
     buf[idx++] = (mfg_id >> 8) & 0xFF;
@@ -466,6 +600,31 @@ uint8_t nrf_ble_build_bruce_beacon(uint8_t *buf, const String &name) {
         buf[idx++] = 0xBC;
     }
     return idx;
+}
+
+void nrf_ble_build_bruce_beacon_dual(uint8_t *adv_buf, uint8_t &adv_len,
+                                     uint8_t *rsp_buf, uint8_t &rsp_len,
+                                     const String &name) {
+    adv_len = 0;
+    rsp_len = 0;
+    if (adv_buf == nullptr || rsp_buf == nullptr) return;
+
+    adv_buf[adv_len++] = 0x02;
+    adv_buf[adv_len++] = 0x01;
+    adv_buf[adv_len++] = 0x06;
+
+    String n = name;
+    if (n.length() > 10) n = n.substring(0, 10);
+    adv_buf[adv_len++] = n.length() + 1;
+    adv_buf[adv_len++] = 0x09;
+    for (size_t i = 0; i < n.length(); i++) {
+        adv_buf[adv_len++] = n[i];
+    }
+
+    rsp_buf[rsp_len++] = 0x03;
+    rsp_buf[rsp_len++] = 0x03;
+    rsp_buf[rsp_len++] = 0xBC;
+    rsp_buf[rsp_len++] = 0xBC;
 }
 
 // ── Notification Builders ───────────────────────────────────────────

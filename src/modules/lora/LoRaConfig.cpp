@@ -11,6 +11,10 @@
 LoRaConfigData loraConfig;
 
 const std::vector<LoRaPreset> kLoRaPresets = {
+    // MeshCore
+    {"MeshCore EU/UK",          "MeshCore",          869.618f,  8,  62.5f, 8, 0x12,  8},
+    {"MeshCore USA/Canada",     "MeshCore",          910.525f,  7,  62.5f, 5, 0x12,  8},
+
     // Meshtastic EU868
     {"Mesh EU868 LongFast",   "Meshtastic EU868", 869.525f, 11, 250.0f, 5, 0x2B, 16},
     {"Mesh EU868 MedFast",    "Meshtastic EU868", 869.525f,  9, 250.0f, 5, 0x2B, 16},
@@ -282,7 +286,8 @@ bool selectLoRaPresetMenu() {
     };
     for (const auto &preset : presetProfiles) {
         String family = "G";
-        if (preset.category.startsWith("Meshtastic")) family = "M";
+        if (preset.category.startsWith("MeshCore")) family = "C";
+        else if (preset.category.startsWith("Meshtastic")) family = "M";
         else if (preset.category.startsWith("LoRaWAN")) family = "W";
         else if (preset.category.startsWith("Bruce")) family = "B";
         else if (preset.category.startsWith("Flipper")) family = "F";

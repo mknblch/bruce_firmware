@@ -4,6 +4,7 @@
 #include "core/sd_functions.h"
 #include <SD.h>
 #include <vector>
+#include <sys/time.h>
 #include <globals.h>
 
 // ── Shared Settings ─────────────────────────────────────────────────
@@ -20,8 +21,10 @@ public:
     File file;
     bool active = false;
     String filename;
+    uint32_t packet_write_count = 0;
 
     bool begin() {
+        packet_write_count = 0;
         FS *fs = nullptr;
         if (setupSdCard()) {
             fs = &SD;
@@ -49,14 +52,14 @@ public:
             return false;
         }
 
-        // Global PCAP Header (LINKTYPE_BLUETOOTH_LE_LL = 251)
+        // Global PCAP Header (LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR = 256)
         uint32_t magic_number = 0xa1b2c3d4;
         uint16_t version_major = 2;
         uint16_t version_minor = 4;
         uint32_t thiszone = 0;
         uint32_t sigfigs = 0;
         uint32_t snaplen = 65535;
-        uint32_t network = 251; // LINKTYPE_BLUETOOTH_LE_LL
+        uint32_t network = NRF_BLE_PCAP_LINKTYPE;
 
         file.write((const uint8_t *)&magic_number, 4);
         file.write((const uint8_t *)&version_major, 2);
@@ -74,39 +77,26 @@ public:
     void writePacket(const NrfBlePacket &pkt) {
         if (!active || !file) return;
 
-        // In LINKTYPE_BLUETOOTH_LE_LL (251):
-        // Layout: Access Address (4B) + PDU Header (1B) + PDU Len (1B) + AdvA MAC (6B) + AdvData (NB) + CRC (3B)
-        uint8_t wire_buf[48];
+        // LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (256) uses a 10-byte RF pseudo-header.
+        uint8_t wire_buf[64];
+        uint8_t total_wire_len = nrf_ble_build_pcap_frame(pkt, wire_buf, sizeof(wire_buf));
+        if (total_wire_len == 0) return;
 
-        // Access Address for BLE Advertising (0x8E89BED6)
-        wire_buf[0] = 0xD6;
-        wire_buf[1] = 0xBE;
-        wire_buf[2] = 0x89;
-        wire_buf[3] = 0x8E;
-
-        // PDU Header
-        wire_buf[4] = pkt.raw[0];
-        // PDU Length (6 + adv_len)
-        wire_buf[5] = pkt.raw[1];
-        // AdvA
-        memcpy(&wire_buf[6], pkt.mac, 6);
-        // Payload
-        if (pkt.adv_len > 0) {
-            memcpy(&wire_buf[12], pkt.adv_data, pkt.adv_len);
+        // Timestamp calculation (wall-clock RTC/SNTP if available, fallback to uptime)
+        struct timeval tv;
+        uint32_t ts_sec = 0;
+        uint32_t ts_usec = 0;
+        if (gettimeofday(&tv, nullptr) == 0 && tv.tv_sec > 1577836800) {
+            uint32_t elapsed_ms = millis() - pkt.timestamp;
+            int64_t pkt_us = ((int64_t)tv.tv_sec * 1000000LL + tv.tv_usec) - ((int64_t)elapsed_ms * 1000LL);
+            if (pkt_us < 0) pkt_us = 0;
+            ts_sec = (uint32_t)(pkt_us / 1000000LL);
+            ts_usec = (uint32_t)(pkt_us % 1000000LL);
+        } else {
+            ts_sec = pkt.timestamp / 1000;
+            ts_usec = (pkt.timestamp % 1000) * 1000;
         }
 
-        uint8_t pdu_len = 2 + 6 + pkt.adv_len;
-
-        // CRC (3 bytes)
-        wire_buf[4 + pdu_len + 0] = (pkt.packet_crc >> 16) & 0xFF;
-        wire_buf[4 + pdu_len + 1] = (pkt.packet_crc >> 8) & 0xFF;
-        wire_buf[4 + pdu_len + 2] = pkt.packet_crc & 0xFF;
-
-        uint32_t total_wire_len = 4 + pdu_len + 3;
-
-        // PCAP Record Header
-        uint32_t ts_sec = pkt.timestamp / 1000;
-        uint32_t ts_usec = (pkt.timestamp % 1000) * 1000;
         uint32_t incl_len = total_wire_len;
         uint32_t orig_len = total_wire_len;
 
@@ -115,7 +105,11 @@ public:
         file.write((const uint8_t *)&incl_len, 4);
         file.write((const uint8_t *)&orig_len, 4);
         file.write(wire_buf, total_wire_len);
-        file.flush();
+
+        packet_write_count++;
+        if ((packet_write_count % 16) == 0) {
+            file.flush();
+        }
     }
 
     void end() {
@@ -134,10 +128,8 @@ public:
 static void add_hex_ascii_dump(std::vector<String> &lines, const uint8_t *data, uint8_t len) {
     for (uint8_t i = 0; i < len; i += 8) {
         uint8_t chunk_len = (len - i >= 8) ? 8 : (len - i);
-        char hex_buf[36];
-        char asc_buf[24];
         char hex_part[26] = "";
-        char asc_part[12] = "";
+        char asc_part[10] = "";
 
         for (uint8_t j = 0; j < chunk_len; j++) {
             char hb[4];
@@ -147,8 +139,10 @@ static void add_hex_ascii_dump(std::vector<String> &lines, const uint8_t *data, 
             asc_part[j] = (c >= 32 && c <= 126) ? (char)c : '.';
             asc_part[j + 1] = '\0';
         }
-        snprintf(hex_buf, sizeof(hex_buf), "%02X: %s", i, hex_part);
-        snprintf(asc_buf, sizeof(asc_buf), "  ASC: %s", asc_part);
+        char hex_buf[40];
+        char asc_buf[24];
+        snprintf(hex_buf, sizeof(hex_buf), "%02X: %-24s", i, hex_part);
+        snprintf(asc_buf, sizeof(asc_buf), "  ASC: %-8s", asc_part);
         lines.push_back(String(hex_buf));
         lines.push_back(String(asc_buf));
     }
@@ -221,9 +215,16 @@ static void nrf_ble_show_scrollable_details(const String &header_title, const st
 // ═══════════════════════ 1. BLE SCANNER ════════════════════════════
 // ══════════════════════════════════════════════════════════════════
 
+struct ScannedBlePacketHistory {
+    uint8_t channel;
+    uint8_t pdu_type;
+    uint8_t adv_len;
+    uint8_t adv_data[24];
+};
+
 struct ScannedBleDevice {
     NrfBlePacket packet;
-    std::vector<NrfBlePacket> packets; // Keep last 8 packets per device
+    std::vector<ScannedBlePacketHistory> packets; // Keep last 8 packets per device
     uint16_t packet_count;
     unsigned long last_seen;
 };
@@ -238,7 +239,7 @@ static void nrf_ble_inspect_device(const ScannedBleDevice &dev) {
 
     for (size_t p = 0; p < dev.packets.size(); p++) {
         // Show newest packets first
-        const NrfBlePacket &pkt = dev.packets[dev.packets.size() - 1 - p];
+        const ScannedBlePacketHistory &pkt = dev.packets[dev.packets.size() - 1 - p];
         lines.push_back("--- Pkt #" + String(p + 1) + " (Ch " + String(pkt.channel) + ") ---");
         lines.push_back("Type: " + nrf_ble_pdu_type_str(pkt.pdu_type) + " (" + String(pkt.adv_len) + "B)");
 
@@ -311,21 +312,41 @@ void nrf_ble_scanner() {
                     bool found = false;
                     for (size_t i = 0; i < devices.size(); i++) {
                         if (memcmp(devices[i].packet.mac, pkt.mac, 6) == 0) {
+                            String saved_name = devices[i].packet.name;
+                            String saved_vendor = devices[i].packet.vendor;
+                            uint16_t saved_company_id = devices[i].packet.company_id;
+
                             devices[i].packet_count++;
                             devices[i].last_seen = millis();
-                            devices[i].packet.channel = pkt.channel;
-                            if (pkt.name.length() > 0 && devices[i].packet.name.length() == 0) {
+                            devices[i].packet = pkt;
+
+                            // Preserve known name/vendor if new packet does not provide them
+                            if (pkt.name.length() > 0) {
                                 devices[i].packet.name = pkt.name;
+                            } else {
+                                devices[i].packet.name = saved_name;
                             }
-                            if (pkt.vendor.length() > 0 && devices[i].packet.vendor.length() == 0) {
+
+                            if (pkt.vendor.length() > 0) {
                                 devices[i].packet.vendor = pkt.vendor;
+                                devices[i].packet.company_id = pkt.company_id;
+                            } else if (saved_vendor.length() > 0) {
+                                devices[i].packet.vendor = saved_vendor;
+                                devices[i].packet.company_id = saved_company_id;
                             }
+
                             // Store up to 8 recent packets per device
+                            ScannedBlePacketHistory hist;
+                            hist.channel = pkt.channel;
+                            hist.pdu_type = pkt.pdu_type;
+                            hist.adv_len = pkt.adv_len;
+                            if (pkt.adv_len > 0) {
+                                memcpy(hist.adv_data, pkt.adv_data, pkt.adv_len);
+                            }
                             if (devices[i].packets.size() >= 8) {
                                 devices[i].packets.erase(devices[i].packets.begin());
                             }
-                            devices[i].packets.push_back(pkt);
-                            devices[i].packet = pkt;
+                            devices[i].packets.push_back(hist);
                             found = true;
                             break;
                         }
@@ -333,9 +354,16 @@ void nrf_ble_scanner() {
                     if (!found && devices.size() < 60) {
                         ScannedBleDevice dev;
                         dev.packet = pkt;
-                        dev.packets.push_back(pkt);
                         dev.packet_count = 1;
                         dev.last_seen = millis();
+                        ScannedBlePacketHistory hist;
+                        hist.channel = pkt.channel;
+                        hist.pdu_type = pkt.pdu_type;
+                        hist.adv_len = pkt.adv_len;
+                        if (pkt.adv_len > 0) {
+                            memcpy(hist.adv_data, pkt.adv_data, pkt.adv_len);
+                        }
+                        dev.packets.push_back(hist);
                         devices.push_back(dev);
                         needs_redraw = true;
                     }
@@ -414,7 +442,8 @@ void nrf_ble_scanner() {
 
 static void nrf_ble_run_beacon(const String &beaconName, uint8_t pdu_type,
                                const uint8_t *mac, const uint8_t *payload,
-                               uint8_t payload_len) {
+                               uint8_t payload_len, const uint8_t *rsp_payload = nullptr,
+                               uint8_t rsp_len = 0) {
     if (!nrf_ble_init_radio()) {
         displayError("NRF24 not available", true);
         return;
@@ -445,7 +474,12 @@ static void nrf_ble_run_beacon(const String &beaconName, uint8_t pdu_type,
             else if (ble_active_channel_mode == 2) target_chan = 38;
             else if (ble_active_channel_mode == 3) target_chan = 39;
 
-            nrf_ble_send_adv(pdu_type, mac, payload, payload_len, target_chan);
+            if (rsp_payload != nullptr) {
+                nrf_ble_send_adv_dual(pdu_type, mac, payload, payload_len,
+                                      rsp_payload, rsp_len, target_chan);
+            } else {
+                nrf_ble_send_adv(pdu_type, mac, payload, payload_len, target_chan);
+            }
             pkts_sent += (target_chan == 0xFF ? 3 : 1);
         }
 
@@ -559,6 +593,15 @@ void nrf_ble_beacon_menu() {
             uint8_t len = nrf_ble_build_bruce_beacon(payload, "Bruce-NRF");
             nrf_ble_run_beacon("Bruce Beacon", NRF_BLE_ADV_NONCONN_IND, mac, payload, len);
         }},
+        {"Bruce Scannable Beacon", [&]() {
+            uint8_t adv_payload[24];
+            uint8_t rsp_payload[24];
+            uint8_t adv_len = 0;
+            uint8_t rsp_len = 0;
+            nrf_ble_build_bruce_beacon_dual(adv_payload, adv_len, rsp_payload, rsp_len, "Bruce-NRF");
+            nrf_ble_run_beacon("Bruce Scannable", NRF_BLE_ADV_SCAN_IND, mac,
+                               adv_payload, adv_len, rsp_payload, rsp_len);
+        }},
     };
 
     loopOptions(options, MENU_TYPE_SUBMENU, "BLE Beacon");
@@ -596,8 +639,13 @@ void nrf_ble_sniffer() {
         return;
     }
 
+    struct SnifferLogEntry {
+        NrfBlePacket pkt;
+        uint32_t seq;
+    };
+
     // Ring buffer of last 50 packets
-    std::vector<NrfBlePacket> packet_log;
+    std::vector<SnifferLogEntry> packet_log;
     const uint8_t channels[] = {37, 38, 39};
     uint8_t ch_idx = 0;
     unsigned long total_pkts = 0;
@@ -636,7 +684,7 @@ void nrf_ble_sniffer() {
             } else {
                 // In paused mode, SelPress opens full scrollable packet details
                 if (packet_log.size() > 0 && selected_pkt_idx >= 0 && selected_pkt_idx < (int)packet_log.size()) {
-                    nrf_ble_inspect_packet(packet_log[selected_pkt_idx]);
+                    nrf_ble_inspect_packet(packet_log[selected_pkt_idx].pkt);
                     drawMainBorder(true);
                     needs_redraw = true;
                 }
@@ -676,14 +724,18 @@ void nrf_ble_sniffer() {
                         total_pkts++;
                         if (pkt.crc_ok) valid_crc_pkts++;
 
+                        SnifferLogEntry entry;
+                        entry.pkt = pkt;
+                        entry.seq = total_pkts;
+
                         // Ring buffer of last 50 packets
                         if (packet_log.size() >= 50) {
                             packet_log.erase(packet_log.begin());
                         }
-                        packet_log.push_back(pkt);
+                        packet_log.push_back(entry);
 
-                        // Direct PCAP file logging
-                        if (pcap_ok) {
+                        // Direct PCAP file logging (filter out CRC errors)
+                        if (pcap_ok && pkt.crc_ok) {
                             pcap.writePacket(pkt);
                         }
                     }
@@ -724,23 +776,23 @@ void nrf_ble_sniffer() {
                     tft.fillRect(7, currentY, tftWidth - 14, lineH, bruceConfig.bgColor);
 
                     if (pktIdx < (int)packet_log.size()) {
-                        const NrfBlePacket &pkt = packet_log[pktIdx];
+                        const SnifferLogEntry &entry = packet_log[pktIdx];
                         bool isSelected = (pktIdx == selected_pkt_idx);
 
                         if (isSelected) {
                             tft.fillRect(7, currentY, tftWidth - 14, lineH, bruceConfig.priColor);
                             tft.setTextColor(bruceConfig.bgColor, bruceConfig.priColor);
                         } else {
-                            tft.setTextColor(pkt.crc_ok ? TFT_WHITE : TFT_DARKGREY, bruceConfig.bgColor);
+                            tft.setTextColor(entry.pkt.crc_ok ? TFT_WHITE : TFT_DARKGREY, bruceConfig.bgColor);
                         }
 
-                        String line = String(pktIdx + 1) + ". 3" + String(pkt.channel % 10) + " " + pkt.mac_str.substring(9) + " ";
-                        if (pkt.name.length() > 0) line += pkt.name;
-                        else if (pkt.vendor.length() > 0) line += pkt.vendor;
-                        else line += nrf_ble_pdu_type_str(pkt.pdu_type);
+                        String line = "#" + String(entry.seq) + " 3" + String(entry.pkt.channel % 10) + " " + entry.pkt.mac_str.substring(9) + " ";
+                        if (entry.pkt.name.length() > 0) line += entry.pkt.name;
+                        else if (entry.pkt.vendor.length() > 0) line += entry.pkt.vendor;
+                        else line += nrf_ble_pdu_type_str(entry.pkt.pdu_type);
 
                         if (line.length() > 22) line = line.substring(0, 22);
-                        line += (pkt.crc_ok ? " OK" : " ERR");
+                        line += (entry.pkt.crc_ok ? " OK" : " ERR");
                         tft.drawString(line, 10, currentY);
                     }
                 }
@@ -756,16 +808,16 @@ void nrf_ble_sniffer() {
                     tft.fillRect(7, currentY, tftWidth - 14, lineH, bruceConfig.bgColor);
 
                     if (i < displayCount) {
-                        const NrfBlePacket &pkt = packet_log[startIdx + i];
-                        tft.setTextColor(pkt.crc_ok ? TFT_WHITE : TFT_DARKGREY, bruceConfig.bgColor);
+                        const SnifferLogEntry &entry = packet_log[startIdx + i];
+                        tft.setTextColor(entry.pkt.crc_ok ? TFT_WHITE : TFT_DARKGREY, bruceConfig.bgColor);
 
-                        String line = "3" + String(pkt.channel % 10) + " " + pkt.mac_str.substring(9) + " ";
-                        if (pkt.name.length() > 0) line += pkt.name;
-                        else if (pkt.vendor.length() > 0) line += pkt.vendor;
-                        else line += nrf_ble_pdu_type_str(pkt.pdu_type);
+                        String line = "#" + String(entry.seq) + " 3" + String(entry.pkt.channel % 10) + " " + entry.pkt.mac_str.substring(9) + " ";
+                        if (entry.pkt.name.length() > 0) line += entry.pkt.name;
+                        else if (entry.pkt.vendor.length() > 0) line += entry.pkt.vendor;
+                        else line += nrf_ble_pdu_type_str(entry.pkt.pdu_type);
 
                         if (line.length() > 22) line = line.substring(0, 22);
-                        line += (pkt.crc_ok ? " OK" : " ERR");
+                        line += (entry.pkt.crc_ok ? " OK" : " ERR");
                         tft.drawString(line, 10, currentY);
                     }
                 }
@@ -848,8 +900,13 @@ static void nrf_ble_run_notifications(const String &suiteName, uint8_t notificat
             }
 
             if (len > 0) {
-                nrf_ble_send_adv(NRF_BLE_ADV_NONCONN_IND, mac, payload, len, 0xFF);
-                pkts_sent += 3;
+                uint8_t target_chan = 0xFF; // Hop across all 3
+                if (ble_active_channel_mode == 1) target_chan = 37;
+                else if (ble_active_channel_mode == 2) target_chan = 38;
+                else if (ble_active_channel_mode == 3) target_chan = 39;
+
+                nrf_ble_send_adv(NRF_BLE_ADV_NONCONN_IND, mac, payload, len, target_chan);
+                pkts_sent += (target_chan == 0xFF ? 3 : 1);
             }
         }
 
@@ -897,7 +954,8 @@ static void nrf_ble_run_notifications(const String &suiteName, uint8_t notificat
             tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
             tft.drawString("Channels: ", 10, r5);
             tft.setTextColor(TFT_WHITE, bruceConfig.bgColor);
-            tft.drawString("37, 38, 39 (Hop)", 70, r5);
+            static const char *chan_display_names[] = {"37, 38, 39 (Hop)", "Ch 37", "Ch 38", "Ch 39"};
+            tft.drawString(chan_display_names[ble_active_channel_mode], 70, r5);
 
             printCenterFootnote(is_paused ? "[OK] Resume  [ESC] Stop" : "[OK] Pause   [ESC] Stop");
         }
@@ -925,17 +983,27 @@ void nrf_ble_notification_menu() {
 // ══════════════════════════════════════════════════════════════════
 
 void nrf_ble_menu() {
-    options = {
-        {"Scanner",      nrf_ble_scanner},
-        {"Beacon",       nrf_ble_beacon_menu},
-        {"Sniffing",     nrf_ble_sniffer},
-        {"Notification", nrf_ble_notification_menu},
-        {"PA Power: " + String(pa_level_names[ble_pa_level]), [&]() {
-            ble_pa_level = (rf24_pa_dbm_e)((ble_pa_level + 1) % 4);
-            nrf_ble_set_power(ble_pa_level);
-            nrf_ble_menu();
-        }},
-    };
+    static const char *chan_mode_names[] = {"Hop (37/38/39)", "Ch 37", "Ch 38", "Ch 39"};
+    int last_idx = 0;
 
-    loopOptions(options, MENU_TYPE_SUBMENU, "NRF24BLE");
+    while (true) {
+        options = {
+            {"Scanner",      nrf_ble_scanner},
+            {"Beacon",       nrf_ble_beacon_menu},
+            {"Sniffing",     nrf_ble_sniffer},
+            {"Notification", nrf_ble_notification_menu},
+            {"PA Power: " + String(pa_level_names[ble_pa_level]), [&]() {
+                ble_pa_level = (rf24_pa_dbm_e)((ble_pa_level + 1) % 4);
+                nrf_ble_set_power(ble_pa_level);
+            }},
+            {"Channel: " + String(chan_mode_names[ble_active_channel_mode]), [&]() {
+                ble_active_channel_mode = (ble_active_channel_mode + 1) % 4;
+            }},
+        };
+
+        last_idx = loopOptions(options, MENU_TYPE_SUBMENU, "NRF24BLE", last_idx);
+        if (last_idx < 0) {
+            break;
+        }
+    }
 }

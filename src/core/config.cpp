@@ -90,6 +90,7 @@ JsonDocument BruceConfig::toJson() const {
         JsonObject bleTrackerEntry = bleTrackerArray.add<JsonObject>();
         bleTrackerEntry["label"] = entry.label;
         bleTrackerEntry["mac"] = entry.mac;
+        if (entry.addrType != 0xFF) bleTrackerEntry["addrType"] = entry.addrType;
     }
 
     return jsonDoc;
@@ -457,7 +458,10 @@ void BruceConfig::fromFile(bool checkFS) {
         for (JsonObject bleTrackerEntry : bleTrackerArray) {
             String label = bleTrackerEntry["label"].as<String>();
             String mac = bleTrackerEntry["mac"].as<String>();
-            bleTrackerFavorites.push_back({label, mac});
+            uint8_t addrType = bleTrackerEntry["addrType"].isNull()
+                                   ? 0xFF
+                                   : bleTrackerEntry["addrType"].as<uint8_t>();
+            bleTrackerFavorites.push_back({label, mac, addrType});
         }
     }
 
@@ -902,25 +906,25 @@ void BruceConfig::removeQrCodeEntry(const String &menuName) {
     saveFile();
 }
 
-void BruceConfig::addBleTrackerFavorite(const String &label, const String &mac) {
+void BruceConfig::addBleTrackerFavorite(const String &label, const String &mac, uint8_t addrType) {
     for (auto &entry : bleTrackerFavorites) {
-        if (entry.mac.equalsIgnoreCase(mac)) {
+        if (entry.mac.equalsIgnoreCase(mac) && entry.addrType == addrType) {
             entry.label = label;
             saveFile();
             return;
         }
     }
-    bleTrackerFavorites.push_back({label, mac});
+    bleTrackerFavorites.push_back({label, mac, addrType});
     saveFile();
 }
 
-void BruceConfig::removeBleTrackerFavorite(const String &mac) {
+void BruceConfig::removeBleTrackerFavorite(const String &mac, uint8_t addrType) {
     size_t writeIndex = 0;
 
     for (size_t readIndex = 0; readIndex < bleTrackerFavorites.size(); ++readIndex) {
         const BleTrackerTarget &entry = bleTrackerFavorites[readIndex];
 
-        if (!entry.mac.equalsIgnoreCase(mac)) {
+        if (!entry.mac.equalsIgnoreCase(mac) || entry.addrType != addrType) {
             if (writeIndex != readIndex) {
                 bleTrackerFavorites[writeIndex] = std::move(bleTrackerFavorites[readIndex]);
             }
@@ -940,9 +944,9 @@ void BruceConfig::clearBleTrackerFavorites() {
     saveFile();
 }
 
-bool BruceConfig::isBleTrackerFavorite(const String &mac) const {
+bool BruceConfig::isBleTrackerFavorite(const String &mac, uint8_t addrType) const {
     for (const auto &entry : bleTrackerFavorites) {
-        if (entry.mac.equalsIgnoreCase(mac)) {
+        if (entry.mac.equalsIgnoreCase(mac) && entry.addrType == addrType) {
             return true;
         }
     }

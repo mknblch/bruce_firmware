@@ -25,7 +25,7 @@ struct BleTrackerDiscoveredDevice {
     int8_t rssi;
     uint8_t addrType; // 0 = Public, 1 = Random
     uint32_t lastSeenMs;
-    uint16_t packetCount;
+    uint32_t packetCount;
 };
 
 constexpr size_t BLE_TRACKER_MAX_SCAN_DEVICES = 40;
@@ -63,53 +63,69 @@ public:
     void onDiscovered(const NimBLEAdvertisedDevice *dev) override {}
 
     void onResult(const NimBLEAdvertisedDevice *dev) override {
-        if (!dev || !g_trackerScanState.active) return;
+        if (!dev) return;
         if (!g_trackerScanState.mutex) return;
+
+        const uint8_t *devVal = dev->getAddress().getVal();
+        const int8_t rssi = dev->getRSSI();
+        const uint8_t addrType = dev->getAddressType();
+        const uint32_t now = millis();
+        char name[32] = {0};
+        char vendor[24] = {0};
+
+        // Resolve optional metadata before taking the shared-state mutex.
+        if (dev->haveName()) {
+            std::string n = dev->getName();
+            if (!n.empty()) {
+                strncpy(name, n.c_str(), sizeof(name) - 1);
+                name[sizeof(name) - 1] = '\0';
+            }
+        }
+#if !defined(LITE_VERSION)
+        if (dev->haveManufacturerData()) {
+            std::string mfg = dev->getManufacturerData();
+            if (mfg.length() >= 2) {
+                uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
+                const char *comp = getBleCompanyIdName(companyId);
+                if (comp) {
+                    strncpy(vendor, comp, sizeof(vendor) - 1);
+                    vendor[sizeof(vendor) - 1] = '\0';
+                }
+            }
+        }
+        if (vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
+            const char *oui = getBleOuiNameFromMacBytes(devVal);
+            if (oui) {
+                strncpy(vendor, oui, sizeof(vendor) - 1);
+                vendor[sizeof(vendor) - 1] = '\0';
+            }
+        }
+#endif
 
         // Try-take mutex with 0 timeout so NimBLE host task is never delayed
         if (xSemaphoreTake(g_trackerScanState.mutex, 0) != pdTRUE) return;
+        if (!g_trackerScanState.active) {
+            xSemaphoreGive(g_trackerScanState.mutex);
+            return;
+        }
 
-        g_trackerScanState.totalPackets++;
-
-        const uint8_t *devVal = dev->getAddress().getVal();
-        int8_t rssi = dev->getRSSI();
-        uint32_t now = millis();
+        if (g_trackerScanState.totalPackets < UINT32_MAX) g_trackerScanState.totalPackets++;
 
         // Check if device already exists in list (fast 6-byte binary comparison)
         for (size_t i = 0; i < g_trackerScanState.count; i++) {
-            if (memcmp(g_trackerScanState.devices[i].macBytes, devVal, 6) == 0) {
+            if (memcmp(g_trackerScanState.devices[i].macBytes, devVal, 6) == 0 &&
+                g_trackerScanState.devices[i].addrType == addrType) {
                 g_trackerScanState.devices[i].rssi = rssi;
                 g_trackerScanState.devices[i].lastSeenMs = now;
-                g_trackerScanState.devices[i].packetCount++;
+                if (g_trackerScanState.devices[i].packetCount < UINT32_MAX) {
+                    g_trackerScanState.devices[i].packetCount++;
+                }
 
-                if (g_trackerScanState.devices[i].name[0] == '\0' && dev->haveName()) {
-                    std::string n = dev->getName();
-                    if (!n.empty() && n.length() < sizeof(g_trackerScanState.devices[i].name)) {
-                        strncpy(g_trackerScanState.devices[i].name, n.c_str(), sizeof(g_trackerScanState.devices[i].name) - 1);
-                        g_trackerScanState.devices[i].name[sizeof(g_trackerScanState.devices[i].name) - 1] = '\0';
-                    }
+                if (g_trackerScanState.devices[i].name[0] == '\0' && name[0] != '\0') {
+                    memcpy(g_trackerScanState.devices[i].name, name, sizeof(name));
                 }
                 if (g_trackerScanState.devices[i].vendor[0] == '\0') {
-#if !defined(LITE_VERSION)
-                    if (dev->haveManufacturerData()) {
-                        std::string mfg = dev->getManufacturerData();
-                        if (mfg.length() >= 2) {
-                            uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
-                            const char *comp = getBleCompanyIdName(companyId);
-                            if (comp) {
-                                strncpy(g_trackerScanState.devices[i].vendor, comp, sizeof(g_trackerScanState.devices[i].vendor) - 1);
-                                g_trackerScanState.devices[i].vendor[sizeof(g_trackerScanState.devices[i].vendor) - 1] = '\0';
-                            }
-                        }
-                    }
-                    if (g_trackerScanState.devices[i].vendor[0] == '\0' && dev->getAddressType() == BLE_ADDR_PUBLIC) {
-                        const char *oui = getBleOuiNameFromMacBytes(devVal);
-                        if (oui) {
-                            strncpy(g_trackerScanState.devices[i].vendor, oui, sizeof(g_trackerScanState.devices[i].vendor) - 1);
-                            g_trackerScanState.devices[i].vendor[sizeof(g_trackerScanState.devices[i].vendor) - 1] = '\0';
-                        }
-                    }
-#endif
+                    memcpy(g_trackerScanState.devices[i].vendor, vendor, sizeof(vendor));
                 }
                 xSemaphoreGive(g_trackerScanState.mutex);
                 return;
@@ -123,39 +139,9 @@ public:
             snprintf(d.macStr, sizeof(d.macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                      devVal[5], devVal[4], devVal[3], devVal[2], devVal[1], devVal[0]);
 
-            if (dev->haveName()) {
-                std::string n = dev->getName();
-                if (!n.empty()) {
-                    strncpy(d.name, n.c_str(), sizeof(d.name) - 1);
-                    d.name[sizeof(d.name) - 1] = '\0';
-                } else {
-                    d.name[0] = '\0';
-                }
-            } else {
-                d.name[0] = '\0';
-            }
+            memcpy(d.name, name, sizeof(name));
 
-            d.vendor[0] = '\0';
-#if !defined(LITE_VERSION)
-            if (dev->haveManufacturerData()) {
-                std::string mfg = dev->getManufacturerData();
-                if (mfg.length() >= 2) {
-                    uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
-                    const char *comp = getBleCompanyIdName(companyId);
-                    if (comp) {
-                        strncpy(d.vendor, comp, sizeof(d.vendor) - 1);
-                        d.vendor[sizeof(d.vendor) - 1] = '\0';
-                    }
-                }
-            }
-            if (d.vendor[0] == '\0' && dev->getAddressType() == BLE_ADDR_PUBLIC) {
-                const char *oui = getBleOuiNameFromMacBytes(devVal);
-                if (oui) {
-                    strncpy(d.vendor, oui, sizeof(d.vendor) - 1);
-                    d.vendor[sizeof(d.vendor) - 1] = '\0';
-                }
-            }
-#endif
+            memcpy(d.vendor, vendor, sizeof(vendor));
 
             d.rssi = rssi;
             d.addrType = dev->getAddressType();
@@ -170,9 +156,8 @@ public:
 
 static BleTrackerLiveScanCallbacks g_trackerLiveScanCallbacks;
 
-// Dedicated, thread-safe Live Scanner for BLE Tracker.
-// Uses passive continuous scanning with zero heap allocations on the NimBLE host task,
-// capturing all nearby trackers, beacons (AirTags, Tile, SmartTags), and standard BLE devices.
+// Dedicated passive scanner used only when the tracker owns the BLE stack.
+// NimBLE metadata accessors may allocate, so they are evaluated before taking the UI-state mutex.
 void bleTrackerPickFromScan() {
     // 1. Drain residual keys from menu selection
     vTaskDelay(pdMS_TO_TICKS(150));
@@ -192,6 +177,11 @@ void bleTrackerPickFromScan() {
         bleWasActiveBefore || BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0;
 #endif
 
+    if (bleWasActiveBefore || pBLEScan != nullptr) {
+        displayError("BLE scanner already in use");
+        return;
+    }
+
     // 3. Setup BLE scan
     if (!ble_scan_setup() || pBLEScan == nullptr) {
         displayError("Failed to init BLE scan");
@@ -210,7 +200,13 @@ void bleTrackerPickFromScan() {
 
     drawMainBorder(true);
 
-    pBLEScan->start(0, false);
+    if (!pBLEScan->start(0, false)) {
+        g_trackerScanState.stop();
+        pBLEScan->setScanCallbacks(nullptr);
+        stopBLEStack();
+        displayError("Failed to start BLE scan");
+        return;
+    }
 
     int selectedIdx = 0;
     int scrollOffset = 0;
@@ -221,6 +217,7 @@ void bleTrackerPickFromScan() {
     bool scanPaused = false;
     String pickedName = "";
     String pickedMac = "";
+    uint8_t pickedAddrType = 0xFF;
     bool devicePicked = false;
 
     // Snapshot buffer for UI rendering to minimize lock hold time (static to protect task stack)
@@ -289,11 +286,12 @@ void bleTrackerPickFromScan() {
                 } else if (lowerKey == 's') {
                     sel = true;
                 } else if (lowerKey == 'p' || lowerKey == ' ') {
-                    scanPaused = !scanPaused;
-                    if (scanPaused) {
+                    if (!scanPaused) {
                         pBLEScan->stop();
+                        scanPaused = true;
                     } else {
-                        pBLEScan->start(0, false);
+                        scanPaused = !pBLEScan->start(0, false);
+                        if (scanPaused) displayError("Failed to resume BLE scan");
                     }
                     needsRedraw = true;
                 } else if (lowerKey == 'c') {
@@ -335,6 +333,7 @@ void bleTrackerPickFromScan() {
 
         if (sel && uiCount > 0 && selectedIdx >= 0 && selectedIdx < (int)uiCount) {
             pickedMac = String(uiDevices[selectedIdx].macStr);
+            pickedAddrType = uiDevices[selectedIdx].addrType;
             if (uiDevices[selectedIdx].name[0] != '\0') {
                 pickedName = String(uiDevices[selectedIdx].name);
             } else if (uiDevices[selectedIdx].vendor[0] != '\0') {
@@ -415,6 +414,8 @@ void bleTrackerPickFromScan() {
                     devLabel += " " + String(rssi) + "d";
                     if (uiDevices[itemIdx].addrType == BLE_ADDR_PUBLIC) {
                         devLabel += " [P]";
+                    } else {
+                        devLabel += " [R]";
                     }
 
                     // Truncate to fit screen width
@@ -459,7 +460,7 @@ void bleTrackerPickFromScan() {
     _getKeyPress();
 
     if (devicePicked && !pickedMac.isEmpty()) {
-        bleTrackerLockTarget(pickedName, pickedMac);
+        bleTrackerLockTarget(pickedName, pickedMac, pickedAddrType);
     }
 }
 
@@ -482,17 +483,21 @@ struct BleTrackerHistory {
     size_t count = 0;
     SemaphoreHandle_t mutex = nullptr;
     uint8_t targetMacBytes[6] = {0};
-    volatile bool hasTarget = false;
-    volatile bool active = false;
+    uint8_t targetAddrType = 0xFF;
+    uint16_t headingBucket = 0;
+    bool hasTarget = false;
+    bool active = false;
 
-    void begin(const String &mac) {
+    void begin(const String &mac, uint8_t addrType) {
         if (!mutex) mutex = xSemaphoreCreateMutex();
         if (!mutex || !xSemaphoreTake(mutex, portMAX_DELAY)) return;
-        NimBLEAddress addr(std::string(mac.c_str()), 0);
+        NimBLEAddress addr(std::string(mac.c_str()), addrType == 0xFF ? BLE_ADDR_PUBLIC : addrType);
         memcpy(targetMacBytes, addr.getVal(), 6);
+        targetAddrType = addrType;
         hasTarget = true;
         head = 0;
         count = 0;
+        headingBucket = 0;
         active = true;
         xSemaphoreGive(mutex);
     }
@@ -506,38 +511,51 @@ struct BleTrackerHistory {
         xSemaphoreGive(mutex);
     }
 
-    void append(int8_t rssi, uint16_t headingBucket, BleTrackerSampleSource source) {
+    void setHeadingBucket(uint16_t bucket) {
+        if (!mutex || !xSemaphoreTake(mutex, 0)) return;
+        headingBucket = bucket;
+        xSemaphoreGive(mutex);
+    }
+
+    void appendLocked(int8_t rssi, BleTrackerSampleSource source) {
+        samples[head] = {rssi, headingBucket, millis(), source};
+        head = (head + 1) % BLE_TRACKER_RING_SIZE;
+        if (count < BLE_TRACKER_RING_SIZE) count++;
+    }
+
+    void appendTarget(const uint8_t *address, uint8_t addrType, int8_t rssi) {
         if (!mutex) return;
         // Called from the NimBLE host task: never block it - drop the sample if the main
         // loop happens to be reading the buffer at the same instant.
         if (!xSemaphoreTake(mutex, 0)) return;
-        samples[head] = {rssi, headingBucket, millis(), source};
-        head = (head + 1) % BLE_TRACKER_RING_SIZE;
-        if (count < BLE_TRACKER_RING_SIZE) count++;
+        if (active && hasTarget && memcmp(address, targetMacBytes, 6) == 0 &&
+            (targetAddrType == 0xFF || targetAddrType == addrType)) {
+            appendLocked(rssi, TRACK_SRC_ESP32);
+        }
         xSemaphoreGive(mutex);
     }
 
-    // Copies out the most recent sample (if any) in one locked pass, so the UI loop never
-    // sees a torn/half-written entry.
-    bool latest(BleTrackerSample &out) {
-        if (!mutex || !xSemaphoreTake(mutex, 20 / portTICK_PERIOD_MS)) return false;
-        bool has = count > 0;
-        if (has) {
-            size_t lastIdx = (head + BLE_TRACKER_RING_SIZE - 1) % BLE_TRACKER_RING_SIZE;
-            out = samples[lastIdx];
-        }
+    void appendCurrent(int8_t rssi, BleTrackerSampleSource source) {
+        if (!mutex || !xSemaphoreTake(mutex, 0)) return;
+        if (active) appendLocked(rssi, source);
         xSemaphoreGive(mutex);
-        return has;
+    }
+
+    // Copies buffered samples oldest-first. Samples retain ring order even when timestamps match.
+    size_t drain(BleTrackerSample *out, size_t capacity) {
+        if (!mutex || !xSemaphoreTake(mutex, 20 / portTICK_PERIOD_MS)) return 0;
+        size_t copied = min(count, capacity);
+        size_t oldest = (head + BLE_TRACKER_RING_SIZE - count) % BLE_TRACKER_RING_SIZE;
+        for (size_t i = 0; i < copied; i++) {
+            out[i] = samples[(oldest + i) % BLE_TRACKER_RING_SIZE];
+        }
+        count -= copied;
+        xSemaphoreGive(mutex);
+        return copied;
     }
 };
 
 BleTrackerHistory g_history;
-
-// Current heading bucket (36 x 10deg sectors), refreshed once per UI frame from
-// imu_get_heading_delta_deg() - never read from the scan callback itself, since that runs on
-// the NimBLE host task and must not touch the I2C bus. On boards without an IMU this simply
-// stays 0 forever, which is exactly what every sample should be tagged with in that case.
-volatile uint16_t g_currentHeadingBucket = 0;
 
 constexpr int HEADING_BUCKETS = 36;
 constexpr float HEADING_BUCKET_DEG = 360.0f / HEADING_BUCKETS; // 10 degrees per bin
@@ -556,9 +574,9 @@ uint16_t headingDegToBucket(float deg) {
 // Fast 6-byte binary comparison with zero dynamic memory allocation on the Bluetooth stack.
 class TrackerScanCallbacks : public NimBLEScanCallbacks {
     void onResult(const NimBLEAdvertisedDevice *device) override {
-        if (!device || !g_history.active || !g_history.hasTarget) return;
-        if (memcmp(device->getAddress().getVal(), g_history.targetMacBytes, 6) != 0) return;
-        g_history.append(device->getRSSI(), g_currentHeadingBucket, TRACK_SRC_ESP32);
+        if (!device) return;
+        const NimBLEAddress &address = device->getAddress();
+        g_history.appendTarget(address.getVal(), address.getType(), device->getRSSI());
     }
 };
 
@@ -734,22 +752,22 @@ uint16_t getDimColor(uint16_t color) {
 
 } // namespace
 
-void bleTrackerLockTarget(const String &label, const String &mac) {
+void bleTrackerLockTarget(const String &label, const String &mac, uint8_t addrType) {
     while (true) {
-        bool isFav = bruceConfig.isBleTrackerFavorite(mac);
+        bool isFav = bruceConfig.isBleTrackerFavorite(mac, addrType);
         std::vector<Option> targetOptions = {
-            {"Track now", [=]() { bleTrackerRun(mac, label); }},
+            {"Track now", [=]() { bleTrackerRun(mac, label, nullptr, addrType); }},
         };
         if (isFav) {
             targetOptions.push_back({"Remove from favorites", [=]() {
-                bruceConfig.removeBleTrackerFavorite(mac);
+                bruceConfig.removeBleTrackerFavorite(mac, addrType);
                 displaySuccess("Removed from favs", true);
             }});
         } else {
             targetOptions.push_back({"Save as favorite & track", [=]() {
                 String saved = promptForLabel(label);
-                bruceConfig.addBleTrackerFavorite(saved, mac);
-                bleTrackerRun(mac, saved);
+                bruceConfig.addBleTrackerFavorite(saved, mac, addrType);
+                bleTrackerRun(mac, saved, nullptr, addrType);
             }});
         }
         targetOptions.push_back({"< Back", []() {}});
@@ -770,7 +788,8 @@ void BleTrackerMenu() {
         for (const auto &fav : bruceConfig.bleTrackerFavorites) {
             String label = fav.label;
             String mac = fav.mac;
-            trackerOptions.emplace_back(label, [=]() { bleTrackerLockTarget(label, mac); });
+            uint8_t addrType = fav.addrType;
+            trackerOptions.emplace_back(label, [=]() { bleTrackerLockTarget(label, mac, addrType); });
         }
 
         trackerOptions.emplace_back("Live Scan", bleTrackerScanAndPick);
@@ -791,7 +810,7 @@ void BleTrackerMenu() {
     }
 }
 
-void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient) {
+void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient, uint8_t targetAddrType) {
     // Full-screen tracking view, sized for 240x135 (Cardputer/ADV) and smaller displays: a
     // title row with [ACTIVE]/[PASSIVE] status indicator, an audio-mixer style VU meter with
     // smoothed RSSI & decaying peak hold, and a dBm/stale readout. A persistent onResult()
@@ -803,14 +822,25 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
         bleWasActiveBefore || BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0;
 #endif
 
-    if (!ble_scan_setup() || pBLEScan == nullptr) {
-        displayError("Failed to init BLE scan");
+    bool scannerWasPresent = pBLEScan != nullptr;
+    bool scannerWasScanning = scannerWasPresent && pBLEScan->isScanning();
+    bool ownsScanner = !bleWasActiveBefore && !scannerWasPresent && !scannerWasScanning;
+    bool connectedClient = pClient != nullptr && pClient->isConnected();
+    if (!ownsScanner && !connectedClient) {
+        displayError("BLE scanner already in use");
         return;
     }
-    pBLEScan->setActiveScan(false);                          // passive: never send scan requests
-    pBLEScan->setScanCallbacks(&g_trackerScanCallbacks, true); // wantDuplicates=true: keep seeing the same MAC
 
-    g_history.begin(targetMac);
+    if (ownsScanner) {
+        if (!ble_scan_setup() || pBLEScan == nullptr) {
+            displayError("Failed to init BLE scan");
+            return;
+        }
+        pBLEScan->setActiveScan(false);                           // passive: never send scan requests
+        pBLEScan->setScanCallbacks(&g_trackerScanCallbacks, true); // wantDuplicates=true: keep seeing the same MAC
+    }
+
+    g_history.begin(targetMac, targetAddrType);
 
     // IMU boards additionally show a direction arrow, built from a user-guided rotation
     // sweep - calibrate resting gyro bias and reset both the heading accumulator and the
@@ -834,7 +864,7 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                 tft.fillRect(calBarX + 2, calBarY + 2, fillW, calBarH - 4, bruceConfig.priColor);
             }
         });
-        g_currentHeadingBucket = 0;
+        g_history.setHeadingBucket(0);
     }
     BestHeadingTable bestHeading;
     if (hasImu) bestHeading.reset();
@@ -871,7 +901,6 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
     float emaRssi = -100.0f;
     bool emaInitialized = false;
     unsigned long lastSeenMs = 0;
-    uint32_t lastProcessedSampleTs = 0;
 
     float peakFraction = 0.0f;
     unsigned long peakHoldUntilMs = 0;
@@ -888,7 +917,13 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
     int lastDrawnConnState = -1;
     bool firstDraw = true;
 
-    pBLEScan->start(0, false); // duration=0: scan indefinitely until stop()
+    if (ownsScanner && !pBLEScan->start(0, false)) { // duration=0: scan indefinitely until stop()
+        g_history.end();
+        pBLEScan->setScanCallbacks(nullptr);
+        stopBLEStack();
+        displayError("Failed to start BLE scan");
+        return;
+    }
 
     while (!check(EscPress)) {
         unsigned long nowMs = millis();
@@ -901,19 +936,20 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
         if (isActivelyConnected) {
             int connRssi = pClient->getRssi();
             if (connRssi != 0) {
-                g_history.append((int8_t)connRssi, g_currentHeadingBucket, TRACK_SRC_ESP32);
+                g_history.appendCurrent((int8_t)connRssi, TRACK_SRC_ESP32);
             }
         }
 
         if (hasImu) {
             currentHeadingDeg = imu_get_heading_delta_deg();
-            g_currentHeadingBucket = headingDegToBucket(currentHeadingDeg);
+            g_history.setHeadingBucket(headingDegToBucket(currentHeadingDeg));
             bestHeading.decay();
         }
 
-        BleTrackerSample sample;
-        if (g_history.latest(sample) && sample.timestamp != lastProcessedSampleTs) {
-            lastProcessedSampleTs = sample.timestamp;
+        static BleTrackerSample pendingSamples[BLE_TRACKER_RING_SIZE];
+        size_t pendingCount = g_history.drain(pendingSamples, BLE_TRACKER_RING_SIZE);
+        for (size_t i = 0; i < pendingCount; i++) {
+            const BleTrackerSample &sample = pendingSamples[i];
             constexpr float EMA_ALPHA = 0.25f;
             emaRssi = emaInitialized ? (EMA_ALPHA * sample.rssi + (1.0f - EMA_ALPHA) * emaRssi) : (float)sample.rssi;
             emaInitialized = true;
@@ -994,7 +1030,7 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
             } else {
                 int pct = (int)(smoothedFraction * 100.0f + 0.5f);
                 int peakDbm = (int)(-100.0f + peakFraction * 60.0f + 0.5f);
-                tft.printf("%d%% (%d dBm)  Peak: %d dBm", pct, (int)(emaRssi + 0.5f), peakDbm);
+                tft.printf("%d%% (%d dBm)  Peak: %d dBm", pct, (int)lroundf(emaRssi), peakDbm);
             }
         }
 
@@ -1108,7 +1144,7 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
     }
 
     g_history.end();
-    if (pBLEScan) {
+    if (ownsScanner && pBLEScan) {
         pBLEScan->stop();
         pBLEScan->clearResults();
         pBLEScan->setScanCallbacks(nullptr);

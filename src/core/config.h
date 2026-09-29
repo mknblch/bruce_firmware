@@ -32,6 +32,7 @@ public:
     struct BleTrackerTarget {
         String label;
         String mac;
+        uint8_t addrType = 0xFF;
     };
     struct EvilPortalEndpoints {
         String getCredsEndpoint;
@@ -175,10 +176,10 @@ public:
     void addWifiCredential(const String &ssid, const String &pwd);
     void addQrCodeEntry(const String &menuName, const String &content);
     void removeQrCodeEntry(const String &menuName);
-    void addBleTrackerFavorite(const String &label, const String &mac);
-    void removeBleTrackerFavorite(const String &mac);
+    void addBleTrackerFavorite(const String &label, const String &mac, uint8_t addrType = 0xFF);
+    void removeBleTrackerFavorite(const String &mac, uint8_t addrType = 0xFF);
     void clearBleTrackerFavorites();
-    bool isBleTrackerFavorite(const String &mac) const;
+    bool isBleTrackerFavorite(const String &mac, uint8_t addrType = 0xFF) const;
     String getWifiPassword(const String &ssid) const;
     void addEvilWifiName(String value);
     void removeEvilWifiName(String value);

@@ -16,9 +16,8 @@
 // driver Bruce uses, so it never carried genuine range information).
 enum BleTrackerSampleSource : uint8_t { TRACK_SRC_ESP32 = 0 };
 
-// One RSSI sighting of the locked target. headingBucket is 0..15 (16 x 22.5 deg sectors) on
-// IMU boards, always 0 otherwise - added in a later revision, kept here now so the ring
-// buffer's shape doesn't need to change when it lands.
+// One RSSI sighting of the locked target. headingBucket is 0..35 (36 x 10 deg sectors) on IMU
+// boards and always 0 otherwise.
 struct BleTrackerSample {
     int8_t rssi;
     uint16_t headingBucket;
@@ -36,16 +35,14 @@ void bleTrackerScanAndPick();
 
 // Locks onto `mac` and offers to save it as a favorite before entering the tracking view.
 // `label` is only used for on-screen display and as the default favorite name.
-void bleTrackerLockTarget(const String &label, const String &mac);
+void bleTrackerLockTarget(const String &label, const String &mac, uint8_t addrType = 0xFF);
 
 class NimBLEClient;
 
-// Main tracking loop/UI for a locked target, identified by its MAC address string (as
-// returned by NimBLEAddress::toString()/NimBLEAdvertisedDevice::getAddress()). Filters every
-// subsequent advertisement to `targetMac` and renders a live range readout (plus a
-// directional arrow on IMU boards, added in a later revision). If `pClient` is provided and
-// connected, actively samples link-layer connection RSSI with automatic fallback to passive
-// scan if disconnected. Returns when the user presses EscPress.
-void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient = nullptr);
+// Main tracking loop/UI for a locked target. A supplied address type distinguishes matching
+// public/random addresses; 0xFF preserves MAC-only matching for older saved favorites. When a
+// connected `pClient` shares an existing BLE session, tracking uses connection RSSI without
+// modifying its scanner. Returns when the user presses EscPress.
+void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient = nullptr, uint8_t targetAddrType = 0xFF);
 
 #endif

@@ -15,6 +15,9 @@
 #define NRF_BLE_RF_CH38 26
 #define NRF_BLE_RF_CH39 80
 
+#define NRF_BLE_PCAP_LINKTYPE 256 // LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR
+#define NRF_BLE_PCAP_PHDR_LEN 10
+
 // PDU Types
 #define NRF_BLE_ADV_IND         0x00
 #define NRF_BLE_ADV_DIRECT_IND  0x01
@@ -67,6 +70,11 @@ bool nrf_ble_send_raw(const uint8_t *packet, uint8_t len, uint8_t ble_chan);
 bool nrf_ble_send_adv(uint8_t pdu_type, const uint8_t *mac,
                       const uint8_t *adv_payload, uint8_t adv_len,
                       uint8_t ble_chan = 0xFF);
+bool nrf_ble_send_adv_dual(uint8_t adv_pdu_type, const uint8_t *mac,
+                           const uint8_t *adv_payload, uint8_t adv_len,
+                           const uint8_t *rsp_payload, uint8_t rsp_len,
+                           uint8_t ble_chan = 0xFF);
+uint8_t nrf_ble_build_pcap_frame(const NrfBlePacket &pkt, uint8_t *out_buf, uint8_t out_capacity);
 
 // Packet Parsing & Analysis
 bool nrf_ble_parse_packet(const uint8_t *raw_32, uint8_t ble_chan, NrfBlePacket &pkt);
@@ -82,6 +90,9 @@ uint8_t nrf_ble_build_eddystone_url(uint8_t *buf, const String &url, int8_t tx_p
 uint8_t nrf_ble_build_eddystone_uid(uint8_t *buf, const uint8_t *nid, const uint8_t *bid, int8_t tx_power);
 uint8_t nrf_ble_build_altbeacon(uint8_t *buf, const uint8_t *beacon_id, uint16_t mfg_id, int8_t ref_rssi);
 uint8_t nrf_ble_build_bruce_beacon(uint8_t *buf, const String &name);
+void nrf_ble_build_bruce_beacon_dual(uint8_t *adv_buf, uint8_t &adv_len,
+                                     uint8_t *rsp_buf, uint8_t &rsp_len,
+                                     const String &name);
 
 // Notification Builders
 uint8_t nrf_ble_build_apple_notification(uint8_t *buf, uint8_t notification_type);
