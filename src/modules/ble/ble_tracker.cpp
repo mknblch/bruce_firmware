@@ -51,6 +51,8 @@ struct BleTrackerScannerState {
         if (!mutex) return;
         if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
             active = false;
+            count = 0;
+            totalPackets = 0;
             xSemaphoreGive(mutex);
         }
     }

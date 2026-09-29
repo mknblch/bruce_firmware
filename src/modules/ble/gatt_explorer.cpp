@@ -92,6 +92,16 @@ struct GattScannerState {
             xSemaphoreGive(mutex);
         }
     }
+
+    void clear() {
+        if (!mutex) return;
+        if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+            active = false;
+            count = 0;
+            totalPackets = 0;
+            xSemaphoreGive(mutex);
+        }
+    }
 };
 
 static GattSettings g_gattSettings;
@@ -2121,8 +2131,12 @@ bool gattScanAndPick(String &outName, String &outMac, int &outRssi, uint8_t &out
         outMac = String(picked.macStr);
         outRssi = picked.rssi;
         outAddrType = picked.addressType;
+        g_discoveredDevices.clear();
+        g_gattScanState.clear();
         return true;
     }
+    g_discoveredDevices.clear();
+    g_gattScanState.clear();
     return false;
 }
 
@@ -2178,6 +2192,9 @@ void gattExplorerMenu() {
             break;
         }
     }
+
+    g_discoveredDevices.clear();
+    g_gattScanState.clear();
 }
 
 //=============================================================================

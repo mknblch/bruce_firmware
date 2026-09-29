@@ -228,12 +228,25 @@ void ble_scan() {
 
         if (options.size() >= MAX_DISPLAY_DEVICES) { options.emplace_back("... and more devices", nullptr); }
     } catch (...) {
+        if (pBLEScan) {
+            pBLEScan->stop();
+            pBLEScan->clearResults();
+        }
+        if (!bleWasActiveBefore) {
+#if !defined(LITE_VERSION)
+            if (!BLEStateManager::isBLEActive()) stopBLEStack();
+#else
+            stopBLEStack();
+#endif
+        }
         displayError("BLE scan error");
-        pBLEScan->clearResults();
         return;
     }
 
-    if (pBLEScan) { pBLEScan->stop(); }
+    if (pBLEScan) {
+        pBLEScan->stop();
+        pBLEScan->clearResults();
+    }
 
     if (!bleWasActiveBefore) {
 #if !defined(LITE_VERSION)
