@@ -1,5 +1,7 @@
 #if !defined(LITE_VERSION)
 #include "LoRaRadio.h"
+#include "LoRaConfigHelpers.h"
+#include "LoRaRadioStateHelpers.h"
 #include "core/bus_HAL.h"
 #include "core/configPins.h"
 #include "core/display.h"
@@ -8,7 +10,7 @@
 extern BruceConfigPins bruceConfigPins;
 
 volatile bool gLoraPacketReceived = false;
-volatile bool gLoraInterruptEnabled = true;
+volatile bool gLoraInterruptEnabled = false;
 
 static SPIClass *gLoraSpi = nullptr;
 static Module *gLoraModule = nullptr;
@@ -107,18 +109,38 @@ void stopLoRaRadio() {
     gLoraSpi = nullptr;
 }
 
+static bool isValidLoRaRadioConfig(const LoRaConfigData &cfg) {
+    return LoRaConfigHelpers::isValidRadioSettings(
+               cfg.freqMHz, cfg.sf, cfg.bwKHz, cfg.cr, cfg.preambleLen, cfg.powerDbm,
+               cfg.sx1262PowerDbm, cfg.scanDwellMs, (int)cfg.radioType, cfg.sx1262TcxoVoltage
+           ) &&
+           LoRaConfigHelpers::isValidSyncWord(cfg.syncWord);
+}
+
+static bool finishLoRaSettingChange(bool wasReceiving, int state) {
+    gLoraPacketReceived = false;
+    if (state != RADIOLIB_ERR_NONE) {
+        gLoraInterruptEnabled = false;
+        stopLoRaRadio();
+        return false;
+    }
+    gLoraInterruptEnabled = wasReceiving;
+    return true;
+}
+
 bool isLoraModulePresent(bool verbose) {
     if (!isLoraHardwareConfigured()) {
         if (verbose) displayError("LoRa pins not configured!", true);
         return false;
     }
 
-    if (gLoraInitialized && (gLora1276 || gLora1262)) {
-        return true;
-    }
-
+    const bool wasInitialized = gLoraInitialized && (gLora1276 || gLora1262);
+    if (wasInitialized) return true;
     loadLoRaConfig();
-    bool ok = initLoRaRadio(loraConfig, false);
+    const bool ok = initLoRaRadio(loraConfig, false);
+    if (LoRaRadioStateHelpers::probeOwnsRadioResources(wasInitialized)) {
+        stopLoRaRadio();
+    }
     if (!ok && verbose) {
         displayError("LoRa module not responding!", true);
     }
@@ -126,9 +148,13 @@ bool isLoraModulePresent(bool verbose) {
 }
 
 bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
-    gLoraInterruptEnabled = false;
-    gLoraPacketReceived = false;
-    gLoraInitialized = false;
+    if (!isValidLoRaRadioConfig(cfg)) {
+        Serial.println("[LoRa] Refusing invalid radio configuration");
+        stopLoRaRadio();
+        return false;
+    }
+
+    stopLoRaRadio();
 
     if (!isLoraHardwareConfigured()) {
         Serial.println("[LoRa] Pins not configured");
@@ -137,10 +163,9 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
 
     if (!prepareBoardLoRaRadio()) {
         Serial.println("[LoRa] Failed to prepare board LoRa frontend");
+        stopLoRaRadio();
         return false;
     }
-
-    stopLoRaRadio();
 
     gLoraSpi = selectLoraSPI();
     gActiveRadioType = cfg.radioType;
@@ -171,11 +196,17 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
     } else {
         gLora1262 = new SX1262(gLoraModule);
         state = gLora1262->begin(
-            cfg.freqMHz, cfg.bwKHz, cfg.sf, cfg.cr, cfg.syncWord, cfg.sx1262PowerDbm, cfg.preambleLen, 3.0f, true
+            cfg.freqMHz, cfg.bwKHz, cfg.sf, cfg.cr, cfg.syncWord, cfg.sx1262PowerDbm, cfg.preambleLen,
+            cfg.sx1262TcxoVoltage, cfg.sx1262UseRegulatorLdo
         );
         if (state != RADIOLIB_ERR_NONE) {
-            Serial.printf("[LoRa] SX1262 begin with 3.0V TCXO/LDO failed (%d), falling back to default begin\n", state);
+            Serial.printf("[LoRa] SX1262 begin with configured TCXO/regulator failed (%d), trying library defaults\n", state);
             state = gLora1262->begin(cfg.freqMHz);
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setTCXO(cfg.sx1262TcxoVoltage);
+            if (state == RADIOLIB_ERR_NONE) {
+                state = cfg.sx1262UseRegulatorLdo ? gLora1262->setRegulatorLDO() : gLora1262->setRegulatorDCDC();
+            }
+            if (state == RADIOLIB_ERR_NONE) state = gLora1262->setFrequency(cfg.freqMHz, true);
             if (state == RADIOLIB_ERR_NONE) state = gLora1262->setSpreadingFactor(cfg.sf);
             if (state == RADIOLIB_ERR_NONE) state = gLora1262->setBandwidth(cfg.bwKHz);
             if (state == RADIOLIB_ERR_NONE) state = gLora1262->setCodingRate(cfg.cr);
@@ -200,7 +231,7 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
     }
 
     gLoraInitialized = true;
-    gLoraInterruptEnabled = true;
+    gLoraInterruptEnabled = rxMode;
     gCurFreq = cfg.freqMHz;
     gCurSf = cfg.sf;
     gCurBw = cfg.bwKHz;
@@ -213,6 +244,7 @@ bool initLoRaRadio(const LoRaConfigData &cfg, bool rxMode) {
 
 bool configureLoRaRadioForReceive(const LoRaConfigData &cfg) {
     if (!gLoraInitialized) return false;
+    if (cfg.radioType != gActiveRadioType || !isValidLoRaRadioConfig(cfg)) return false;
 
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
@@ -236,144 +268,149 @@ bool configureLoRaRadioForReceive(const LoRaConfigData &cfg) {
         if (state == RADIOLIB_ERR_NONE) state = gLora1262->setPreambleLength(cfg.preambleLen);
     }
 
-    if (state == RADIOLIB_ERR_NONE) {
-        gCurFreq = cfg.freqMHz;
-        gCurSf = cfg.sf;
-        gCurBw = cfg.bwKHz;
-    } else {
+    if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[LoRa] Channel configuration failed: %d\n", state);
+        stopLoRaRadio();
+        return false;
+    }
+
+    gCurFreq = cfg.freqMHz;
+    gCurSf = cfg.sf;
+    gCurBw = cfg.bwKHz;
+    const int rxState = startLoRaReceiveOnActiveRadio();
+    if (!LoRaRadioStateHelpers::receiveCanBeEnabled(true, rxState == RADIOLIB_ERR_NONE)) {
+        Serial.printf("[LoRa] Failed to restart receive after channel change: %d\n", rxState);
+        stopLoRaRadio();
+        return false;
     }
 
     gLoraPacketReceived = false;
-    const int rxState = startLoRaReceiveOnActiveRadio();
-    gLoraInterruptEnabled = (rxState == RADIOLIB_ERR_NONE);
-    if (rxState != RADIOLIB_ERR_NONE) {
-        Serial.printf("[LoRa] Failed to restart receive after channel change: %d\n", rxState);
-    }
-
-    return state == RADIOLIB_ERR_NONE && rxState == RADIOLIB_ERR_NONE;
+    gLoraInterruptEnabled = true;
+    return true;
 }
 
 bool setLoRaFrequency(float freqMHz) {
     if (!gLoraInitialized) return false;
     if (fabs(gCurFreq - freqMHz) < 0.0001f) return true;
+    const bool wasReceiving = gLoraInterruptEnabled;
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
-    int state = RADIOLIB_ERR_NONE;
+    int state = -1;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setFrequency(freqMHz);
     } else if (gLora1262) {
         state = gLora1262->setFrequency(freqMHz, true);
     }
     if (state == RADIOLIB_ERR_NONE) gCurFreq = freqMHz;
-    gLoraPacketReceived = false;
-    gLoraInterruptEnabled = true;
-    return (state == RADIOLIB_ERR_NONE);
+    return finishLoRaSettingChange(wasReceiving, state);
 }
 
 bool setLoRaBandwidth(float bwKHz) {
     if (!gLoraInitialized) return false;
     if (fabs(gCurBw - bwKHz) < 0.01f) return true;
+    const bool wasReceiving = gLoraInterruptEnabled;
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
-    int state = RADIOLIB_ERR_NONE;
+    int state = -1;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setBandwidth(bwKHz);
     } else if (gLora1262) {
         state = gLora1262->setBandwidth(bwKHz);
     }
     if (state == RADIOLIB_ERR_NONE) gCurBw = bwKHz;
-    gLoraPacketReceived = false;
-    gLoraInterruptEnabled = true;
-    return (state == RADIOLIB_ERR_NONE);
+    return finishLoRaSettingChange(wasReceiving, state);
 }
 
 bool setLoRaSpreadingFactor(uint8_t sf) {
     if (!gLoraInitialized) return false;
     if (gCurSf == sf) return true;
+    const bool wasReceiving = gLoraInterruptEnabled;
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
-    int state = RADIOLIB_ERR_NONE;
+    int state = -1;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setSpreadingFactor(sf);
     } else if (gLora1262) {
         state = gLora1262->setSpreadingFactor(sf);
     }
     if (state == RADIOLIB_ERR_NONE) gCurSf = sf;
-    gLoraPacketReceived = false;
-    gLoraInterruptEnabled = true;
-    return (state == RADIOLIB_ERR_NONE);
+    return finishLoRaSettingChange(wasReceiving, state);
 }
 
 bool setLoRaSyncWord(uint8_t syncWord) {
     if (!gLoraInitialized) return false;
+    const bool wasReceiving = gLoraInterruptEnabled;
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
-    int state = RADIOLIB_ERR_NONE;
+    int state = -1;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setSyncWord(syncWord);
     } else if (gLora1262) {
         state = gLora1262->setSyncWord(syncWord);
     }
-    gLoraPacketReceived = false;
-    gLoraInterruptEnabled = true;
-    return (state == RADIOLIB_ERR_NONE);
+    return finishLoRaSettingChange(wasReceiving, state);
 }
 
 bool setLoRaCodingRate(uint8_t cr) {
     if (!gLoraInitialized) return false;
+    const bool wasReceiving = gLoraInterruptEnabled;
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
-    int state = RADIOLIB_ERR_NONE;
+    int state = -1;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setCodingRate(cr);
     } else if (gLora1262) {
         state = gLora1262->setCodingRate(cr);
     }
-    gLoraPacketReceived = false;
-    gLoraInterruptEnabled = true;
-    return (state == RADIOLIB_ERR_NONE);
+    return finishLoRaSettingChange(wasReceiving, state);
 }
 
 bool setLoRaPreambleLength(uint16_t preambleLen) {
     if (!gLoraInitialized) return false;
+    const bool wasReceiving = gLoraInterruptEnabled;
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
-    int state = RADIOLIB_ERR_NONE;
+    int state = -1;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->setPreambleLength(preambleLen);
     } else if (gLora1262) {
         state = gLora1262->setPreambleLength(preambleLen);
     }
-    gLoraPacketReceived = false;
-    gLoraInterruptEnabled = true;
-    return (state == RADIOLIB_ERR_NONE);
+    return finishLoRaSettingChange(wasReceiving, state);
 }
 
 bool startLoRaReceive() {
     if (!gLoraInitialized) return false;
     gLoraInterruptEnabled = false;
     gLoraPacketReceived = false;
-    int state = RADIOLIB_ERR_NONE;
+    int state = -1;
     if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
         state = gLora1276->startReceive();
-    } else {
+    } else if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
         state = startLoRaReceiveOnActiveRadio();
     }
     gLoraPacketReceived = false;
+    if (state != RADIOLIB_ERR_NONE) {
+        stopLoRaRadio();
+        return false;
+    }
     gLoraInterruptEnabled = true;
-    return (state == RADIOLIB_ERR_NONE);
+    return true;
 }
 
 bool checkLoRaPacketAvailable() {
     if (!gLoraInitialized) return false;
     if (gLoraPacketReceived) return true;
+    const uint32_t flags = getLoRaIrqFlags();
+    uint32_t receiveFlags = 0;
     if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
-        uint32_t flags = gLora1262->getIrqFlags();
-        if (flags & (RADIOLIB_SX126X_IRQ_RX_DONE | RADIOLIB_SX126X_IRQ_HEADER_ERR | RADIOLIB_SX126X_IRQ_CRC_ERR)) {
-            gLoraPacketReceived = true;
-            return true;
-        }
+        receiveFlags = RADIOLIB_SX126X_IRQ_RX_DONE | RADIOLIB_SX126X_IRQ_HEADER_ERR | RADIOLIB_SX126X_IRQ_CRC_ERR;
+    } else if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
+        receiveFlags = RADIOLIB_SX127X_CLEAR_IRQ_FLAG_RX_DONE | RADIOLIB_SX127X_CLEAR_IRQ_FLAG_PAYLOAD_CRC_ERROR;
+    }
+    if (LoRaRadioStateHelpers::hasAnyIrqFlag(flags, receiveFlags)) {
+        gLoraPacketReceived = true;
+        return true;
     }
     return false;
 }
@@ -396,14 +433,26 @@ int readLoRaRawData(
     }
 
     if (len == 0) {
-        bool headerError = false;
+        const uint32_t irqFlags = getLoRaIrqFlags();
+        bool packetError = false;
         if (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262) {
-            headerError = (gLora1262->getIrqFlags() & RADIOLIB_SX126X_IRQ_HEADER_ERR) != 0;
+            packetError = LoRaRadioStateHelpers::hasAnyIrqFlag(
+                irqFlags, RADIOLIB_SX126X_IRQ_HEADER_ERR | RADIOLIB_SX126X_IRQ_CRC_ERR
+            );
+        } else if (gActiveRadioType == LoRaRadioType::SX1276 && gLora1276) {
+            packetError = LoRaRadioStateHelpers::hasAnyIrqFlag(
+                irqFlags, RADIOLIB_SX127X_CLEAR_IRQ_FLAG_PAYLOAD_CRC_ERROR
+            );
         }
-        startLoRaReceiveOnActiveRadio();
         gLoraPacketReceived = false;
+        const int rxState = startLoRaReceiveOnActiveRadio();
+        if (rxState != RADIOLIB_ERR_NONE) {
+            Serial.printf("[LoRa] Failed to resume RX after an empty read: %d\n", rxState);
+            stopLoRaRadio();
+            return rxState;
+        }
         gLoraInterruptEnabled = true;
-        return headerError ? RADIOLIB_ERR_CRC_MISMATCH : -1;
+        return packetError ? RADIOLIB_ERR_CRC_MISMATCH : -1;
     }
 
     if (len > maxLen) len = maxLen;
@@ -425,9 +474,13 @@ int readLoRaRawData(
         }
     }
 
-    startLoRaReceiveOnActiveRadio();
-
     gLoraPacketReceived = false;
+    const int rxState = startLoRaReceiveOnActiveRadio();
+    if (rxState != RADIOLIB_ERR_NONE) {
+        Serial.printf("[LoRa] Failed to resume RX after packet read: %d\n", rxState);
+        stopLoRaRadio();
+        return rxState;
+    }
     gLoraInterruptEnabled = true;
     return state;
 }
@@ -436,12 +489,17 @@ bool transmitLoRaRawData(const uint8_t *buffer, size_t len) {
     if (!gLoraInitialized) return false;
     gLoraInterruptEnabled = false;
 
-    int state = (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262)
+    const int state = (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262)
                     ? gLora1262->transmit((uint8_t *)buffer, len)
                     : (gLora1276 ? gLora1276->transmit((uint8_t *)buffer, len) : -1);
 
-    startLoRaReceiveOnActiveRadio();
-
+    const int rxState = startLoRaReceiveOnActiveRadio();
+    if (rxState != RADIOLIB_ERR_NONE) {
+        Serial.printf("[LoRa] Failed to resume RX after transmit: %d\n", rxState);
+        stopLoRaRadio();
+        return false;
+    }
+    gLoraPacketReceived = false;
     gLoraInterruptEnabled = true;
     return (state == RADIOLIB_ERR_NONE);
 }
@@ -453,9 +511,17 @@ bool transmitLoRaString(const String &str) {
 int scanLoRaCAD() {
     if (!gLoraInitialized) return -1;
     gLoraInterruptEnabled = false;
+    gLoraPacketReceived = false;
     int state = (gActiveRadioType == LoRaRadioType::SX1262 && gLora1262)
                     ? gLora1262->scanChannel()
                     : (gLora1276 ? gLora1276->scanChannel() : -1);
+    const int rxState = startLoRaReceiveOnActiveRadio();
+    if (rxState != RADIOLIB_ERR_NONE) {
+        Serial.printf("[LoRa] Failed to resume RX after CAD: %d\n", rxState);
+        stopLoRaRadio();
+        return rxState;
+    }
+    gLoraPacketReceived = false;
     gLoraInterruptEnabled = true;
     return state;
 }

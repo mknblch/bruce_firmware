@@ -3,6 +3,7 @@
 
 #if !defined(LITE_VERSION)
 #include "LoRaPacket.h"
+#include "LoRaPcapEncoding.h"
 #include <Arduino.h>
 #include <FS.h>
 
@@ -10,11 +11,12 @@ class LoRaPcapWriter {
 public:
     File file;
     bool active = false;
+    bool failed = false;
     String filename = "";
 
     bool begin();
-    void writePacket(const LoRaPacket &pkt);
-    void end();
+    bool writePacket(const LoRaPacket &pkt);
+    bool end();
     bool isActive() const { return active; }
 };
 

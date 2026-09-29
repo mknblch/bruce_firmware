@@ -31,6 +31,8 @@ struct LoRaConfigData {
     uint16_t preambleLen = 8;
     int8_t powerDbm = 17;
     int8_t sx1262PowerDbm = 17;
+    float sx1262TcxoVoltage = 3.0f;
+    bool sx1262UseRegulatorLdo = true;
     uint16_t scanDwellMs = 1500;
     LoRaRadioType radioType = LoRaRadioType::SX1262;
     String username = "BruceNode";

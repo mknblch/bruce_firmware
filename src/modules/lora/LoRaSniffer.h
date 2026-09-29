@@ -2,6 +2,7 @@
 #define __LORA_SNIFFER_H__
 
 #if !defined(LITE_VERSION)
+#include "LoRaConfig.h"
 #include "LoRaPacket.h"
 #include <Arduino.h>
 #include <vector>
@@ -15,10 +16,11 @@ struct LoRaNodeRecord {
     float lastSnr = 0.0f;
     uint32_t packetCount = 0;
     uint32_t lastSeenMs = 0;
-    std::vector<LoRaPacket> packets; // Ring buffer of last 8 packets per MAC/address
+    std::vector<uint32_t> packets; // Capture IDs for the last 8 packets per MAC/address
 };
 
 void runLoRaSniffer();
+void runLoRaSnifferWithConfig(const LoRaConfigData &config);
 void showLoRaPacketInspector(const LoRaPacket &pkt);
 void showLoRaNodeInspector(LoRaNodeRecord &node);
 void viewLoRaCapturedPackets();

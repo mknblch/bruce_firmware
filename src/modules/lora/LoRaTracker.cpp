@@ -2,6 +2,7 @@
 #include "LoRaTracker.h"
 #include "LoRaConfig.h"
 #include "LoRaPacket.h"
+#include "LoRaTrackerHelpers.h"
 #include "LoRaRadio.h"
 #include "LoRaSniffer.h"
 #include "core/display.h"
@@ -17,6 +18,7 @@ constexpr int HEADING_BUCKETS = 16;
 constexpr float HEADING_BUCKET_DEG = 360.0f / HEADING_BUCKETS;
 constexpr float HEADING_NOISE_FLOOR = -135.0f;
 constexpr float HEADING_BEST_DECAY_DB_PER_SEC = 2.0f;
+const LoRaConfigData *temporaryTrackerConfig = nullptr;
 
 enum HeadingConfidence {
     CONFIDENCE_LOW = 0,
@@ -58,10 +60,9 @@ struct BestHeadingTable {
         }
     }
 
-    void feed(uint16_t bucket, int8_t rssi) {
+    void feed(uint16_t bucket, float rssi) {
         if (bucket >= HEADING_BUCKETS) return;
-        float r = (float)rssi;
-        if (r < HEADING_NOISE_FLOOR) r = HEADING_NOISE_FLOOR;
+        const float r = LoRaTrackerHelpers::clampHeadingRssi(rssi, HEADING_NOISE_FLOOR);
 
         if (sampleCount[bucket] == 0 || binRssi[bucket] <= HEADING_NOISE_FLOOR) {
             binRssi[bucket] = r;
@@ -175,7 +176,11 @@ uint16_t getVuColor(float f) {
 } // namespace
 
 void trackLoRaTarget(const String &targetMacOrId, const String &label) {
-    loadLoRaConfig();
+    if (temporaryTrackerConfig) {
+        loraConfig = *temporaryTrackerConfig;
+    } else {
+        loadLoRaConfig();
+    }
     if (!isLoraHardwareConfigured()) {
         displayError("LoRa pins not configured!", true);
         return;
@@ -243,6 +248,7 @@ void trackLoRaTarget(const String &targetMacOrId, const String &label) {
     bool emaInitialized = false;
     unsigned long lastSeenMs = 0;
     float peakFraction = 0.0f;
+    uint32_t lastPeakDecayMs = millis();
     uint32_t packetCount = 0;
     float currentSnr = 0;
     float currentHeadingDeg = 0.0f;
@@ -271,6 +277,7 @@ void trackLoRaTarget(const String &targetMacOrId, const String &label) {
                     packetCount = 0;
                     emaInitialized = false;
                     peakFraction = 0.0f;
+                    lastPeakDecayMs = millis();
                     if (hasImu) bestHeading.reset();
                 }
             }
@@ -301,11 +308,9 @@ void trackLoRaTarget(const String &targetMacOrId, const String &label) {
 
                 bool matches = trackAny;
                 if (!matches) {
-                    if (pkt.sender.indexOf(targetMacOrId) >= 0 ||
-                        pkt.destination.indexOf(targetMacOrId) >= 0 ||
-                        pkt.payloadAscii.indexOf(targetMacOrId) >= 0) {
-                        matches = true;
-                    }
+                    matches = LoRaTrackerHelpers::matchesTarget(
+                        pkt.sender.c_str(), pkt.destination.c_str(), targetMacOrId.c_str()
+                    );
                 }
 
                 if (matches) {
@@ -324,14 +329,16 @@ void trackLoRaTarget(const String &targetMacOrId, const String &label) {
 
                     if (hasImu) {
                         uint16_t bucket = headingDegToBucket(currentHeadingDeg);
-                        bestHeading.feed(bucket, (int8_t)rssi);
+                        bestHeading.feed(bucket, rssi);
                     }
                 }
             }
         }
 
-        // Decay peak bar over time
-        peakFraction = max(0.0f, peakFraction - 0.015f);
+        // Decay the signal peak at a fixed rate regardless of loop frequency.
+        const uint32_t nowMs = millis();
+        peakFraction = LoRaTrackerHelpers::decayPeakFraction(peakFraction, nowMs - lastPeakDecayMs, 1.5f);
+        lastPeakDecayMs = nowMs;
 
         // Render Frame
         if (millis() - lastUiDraw > 100) {
@@ -510,7 +517,11 @@ static void liveScanAndPickLoRaTarget() {
 }
 
 void runLoRaTrackerMenu() {
-    loadLoRaConfig();
+    if (temporaryTrackerConfig) {
+        loraConfig = *temporaryTrackerConfig;
+    } else {
+        loadLoRaConfig();
+    }
     if (!isLoraHardwareConfigured()) {
         displayError("LoRa pins not configured!", true);
         return;
@@ -547,6 +558,14 @@ void runLoRaTrackerMenu() {
     }});
 
     loopOptions(options, MENU_TYPE_SUBMENU, "LoRa Tracker");
+}
+
+void runLoRaTrackerMenuWithConfig(const LoRaConfigData &config) {
+    const LoRaConfigData *previousOverride = temporaryTrackerConfig;
+    temporaryTrackerConfig = &config;
+    loraConfig = config;
+    runLoRaTrackerMenu();
+    temporaryTrackerConfig = previousOverride;
 }
 
 #endif // !LITE_VERSION

@@ -6,6 +6,7 @@
 #include "core/sd_functions.h"
 #include "core/settings.h"
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
+#include <algorithm>
 
 static void rf_clear_nav_state() {
     NextPress = false;
@@ -198,39 +199,246 @@ static void view_recent_packets_menu() {
     }
 }
 
-static void select_fixed_preset_menu() {
-    Rtl433Engine &engine = Rtl433Engine::instance();
-    std::vector<Option> opts;
+static std::vector<float> get_band_frequencies(Rtl433Band band) {
+    static const float minFrequency[] = {300.0f, 387.0f, 779.0f};
+    static const float maxFrequency[] = {348.0f, 464.0f, 928.0f};
+    int bandIndex = (int)band;
+    if (bandIndex < 0 || bandIndex >= RTL433_BAND_COUNT) return {};
 
-    for (int p = 0; p < RTL433_PRESET_COUNT; p++) {
-        const Rtl433PresetDef *pdef = rtl433_get_preset_def(p);
-        String label = String(pdef->name) + " (" + String(pdef->default_freq, 2) + "M)";
-        opts.push_back({label, [p, &engine, pdef]() {
-            engine.isChangingPreset = false;
-            engine.currentPreset = p;
-            engine.currentFrequency = pdef->default_freq;
-            displaySuccess("Fixed: " + String(rtl433_get_preset_name(p)), true);
-        }});
+    std::vector<float> frequencies;
+    for (int i = range_limits[bandIndex][0]; i <= range_limits[bandIndex][1]; i++) {
+        float frequency = subghz_frequency_list[i];
+        if (frequency >= minFrequency[bandIndex] && frequency <= maxFrequency[bandIndex]) {
+            frequencies.push_back(frequency);
+        }
     }
-    opts.push_back({"Go Back", []() {}});
-    loopOptions(opts, engine.isChangingPreset ? 0 : engine.currentPreset);
+    return frequencies;
 }
 
-static void select_changing_preset_menu() {
+static bool same_preset_mode(const Rtl433PresetDef *left, const Rtl433PresetDef *right) {
+    return left->modulation == right->modulation && left->deviation == right->deviation &&
+           left->rx_bw == right->rx_bw && left->data_rate == right->data_rate;
+}
+
+static std::vector<int> unique_preset_modes(const std::vector<int> &presets) {
+    std::vector<int> modes;
+    for (int preset : presets) {
+        const Rtl433PresetDef *candidate = rtl433_get_preset_def(preset);
+        bool duplicate = false;
+        for (int selected : modes) {
+            if (same_preset_mode(candidate, rtl433_get_preset_def(selected))) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) modes.push_back(preset);
+    }
+    return modes;
+}
+
+static bool is_band_range_profile(int profile) {
+    switch (profile) {
+        case RTL433_HOP_300_BAND_OOK:
+        case RTL433_HOP_300_BAND_FSK:
+        case RTL433_HOP_300_BAND_GFSK:
+        case RTL433_HOP_300_BAND_ALL:
+        case RTL433_HOP_400_BAND_OOK:
+        case RTL433_HOP_400_BAND_FSK:
+        case RTL433_HOP_400_BAND_GFSK:
+        case RTL433_HOP_400_BAND_MSK:
+        case RTL433_HOP_400_BAND_ALL:
+        case RTL433_HOP_800_BAND_OOK:
+        case RTL433_HOP_800_BAND_FSK:
+        case RTL433_HOP_800_BAND_GFSK:
+        case RTL433_HOP_800_BAND_MSK:
+        case RTL433_HOP_800_BAND_ALL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void select_freq_and_mode_menu(Rtl433Band band) {
     Rtl433Engine &engine = Rtl433Engine::instance();
     std::vector<Option> opts;
+    std::vector<float> frequencies = get_band_frequencies(band);
 
-    for (int g = 0; g < RTL433_CHANGING_PRESET_COUNT; g++) {
-        const char *name = rtl433_get_changing_preset_name(g);
-        opts.push_back({name, [&engine, g, name]() {
-            engine.isChangingPreset = true;
-            engine.changingPreset = g;
-            engine.hopGroup = g;
-            displaySuccess("Changing: " + String(name), true);
+    float selectedFrequency = 0.0f;
+    for (float frequency : frequencies) {
+        String label = String(frequency, 3) + " MHz";
+        opts.push_back({label, [frequency, &selectedFrequency]() { selectedFrequency = frequency; }});
+    }
+    opts.push_back({"Go Back", []() {}});
+    loopOptions(opts, MENU_TYPE_SUBMENU, "1 Freq + 1 Mode");
+
+    if (selectedFrequency <= 0.0f) return;
+
+    std::vector<int> modePresets;
+    for (int preset : rtl433_get_band_presets(band)) {
+        const Rtl433PresetDef *candidate = rtl433_get_preset_def(preset);
+        bool duplicate = false;
+        for (int selected : modePresets) {
+            const Rtl433PresetDef *existing = rtl433_get_preset_def(selected);
+            if (candidate->modulation == existing->modulation && candidate->deviation == existing->deviation &&
+                candidate->rx_bw == existing->rx_bw && candidate->data_rate == existing->data_rate) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) modePresets.push_back(preset);
+    }
+
+    opts.clear();
+    for (int preset : modePresets) {
+        const Rtl433PresetDef *pdef = rtl433_get_preset_def(preset);
+        String modeName;
+        switch (pdef->modulation) {
+            case 0: modeName = "2-FSK"; break;
+            case 1: modeName = "GFSK"; break;
+            case 2: modeName = "OOK"; break;
+            case 4: modeName = "MSK"; break;
+            default: modeName = "Mode"; break;
+        }
+        if (pdef->modulation != 2) modeName += " " + String(pdef->data_rate, 3) + " kbps";
+        opts.push_back({modeName, [preset, selectedFrequency, modeName, &engine]() {
+            engine.isChangingPreset = false;
+            engine.currentPreset = preset;
+            engine.currentFrequency = selectedFrequency;
+            displaySuccess("Fixed: " + String(selectedFrequency, 3) + " MHz (" + modeName + ")", true);
         }});
     }
     opts.push_back({"Go Back", []() {}});
-    loopOptions(opts, engine.isChangingPreset ? engine.changingPreset : 0);
+    loopOptions(opts, MENU_TYPE_SUBMENU, (String(selectedFrequency, 3) + " MHz - Select Mode").c_str());
+}
+
+static void select_freq_all_modes_menu(Rtl433Band band) {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    std::vector<Option> opts;
+    std::vector<float> frequencies = get_band_frequencies(band);
+
+    for (float frequency : frequencies) {
+        String label = String(frequency, 3) + " MHz (All Modes)";
+        opts.push_back({label, [&engine, band, frequency]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_SINGLE_FREQ_ALL;
+            engine.hopGroup = RTL433_HOP_SINGLE_FREQ_ALL;
+            engine.hopFrequencyBand = band;
+            engine.hopFrequency = frequency;
+            displaySuccess(String(frequency, 3) + " MHz All Modes", true);
+        }});
+    }
+
+    opts.push_back({"Go Back", []() {}});
+    loopOptions(opts, MENU_TYPE_SUBMENU, "1 Freq + All Modes");
+}
+
+static void select_range_single_mode_menu(Rtl433Band band) {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    std::vector<Option> opts;
+
+    if (band == RTL433_BAND_300) {
+        opts.push_back({"300 Band (OOK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_300_BAND_OOK;
+            engine.hopGroup = RTL433_HOP_300_BAND_OOK;
+            displaySuccess("300 Band (OOK)", true);
+        }});
+        opts.push_back({"300 Band (2-FSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_300_BAND_FSK;
+            engine.hopGroup = RTL433_HOP_300_BAND_FSK;
+            displaySuccess("300 Band (2-FSK)", true);
+        }});
+        opts.push_back({"300 Band (GFSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_300_BAND_GFSK;
+            engine.hopGroup = RTL433_HOP_300_BAND_GFSK;
+            displaySuccess("300 Band (GFSK)", true);
+        }});
+    } else if (band == RTL433_BAND_400) {
+        opts.push_back({"400 Band (OOK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_400_BAND_OOK;
+            engine.hopGroup = RTL433_HOP_400_BAND_OOK;
+            displaySuccess("400 Band (OOK)", true);
+        }});
+        opts.push_back({"400 Band (2-FSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_400_BAND_FSK;
+            engine.hopGroup = RTL433_HOP_400_BAND_FSK;
+            displaySuccess("400 Band (2-FSK)", true);
+        }});
+        opts.push_back({"400 Band (GFSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_400_BAND_GFSK;
+            engine.hopGroup = RTL433_HOP_400_BAND_GFSK;
+            displaySuccess("400 Band (GFSK)", true);
+        }});
+        opts.push_back({"400 Band (MSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_400_BAND_MSK;
+            engine.hopGroup = RTL433_HOP_400_BAND_MSK;
+            displaySuccess("400 Band (MSK)", true);
+        }});
+    } else if (band == RTL433_BAND_800) {
+        opts.push_back({"800 Band (OOK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_800_BAND_OOK;
+            engine.hopGroup = RTL433_HOP_800_BAND_OOK;
+            displaySuccess("800 Band (OOK)", true);
+        }});
+        opts.push_back({"800 Band (2-FSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_800_BAND_FSK;
+            engine.hopGroup = RTL433_HOP_800_BAND_FSK;
+            displaySuccess("800 Band (2-FSK)", true);
+        }});
+        opts.push_back({"800 Band (GFSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_800_BAND_GFSK;
+            engine.hopGroup = RTL433_HOP_800_BAND_GFSK;
+            displaySuccess("800 Band (GFSK)", true);
+        }});
+        opts.push_back({"800 Band (MSK)", [&engine]() {
+            engine.isChangingPreset = true;
+            engine.changingPreset = RTL433_HOP_800_BAND_MSK;
+            engine.hopGroup = RTL433_HOP_800_BAND_MSK;
+            displaySuccess("800 Band (MSK)", true);
+        }});
+    }
+
+    opts.push_back({"Go Back", []() {}});
+    loopOptions(opts, MENU_TYPE_SUBMENU, "Range + 1 Mode");
+}
+
+static void select_band_menu(Rtl433Band band) {
+    Rtl433Engine &engine = Rtl433Engine::instance();
+    bool exitBand = false;
+    const char *bandTitle = rtl433_get_band_name(band);
+
+    while (!exitBand) {
+        int allHopPreset = (band == RTL433_BAND_300) ? RTL433_HOP_300_BAND_ALL :
+                           (band == RTL433_BAND_400) ? RTL433_HOP_400_BAND_ALL : RTL433_HOP_800_BAND_ALL;
+
+        std::vector<Option> opts = {
+            {"1 Freq + 1 Mode",   [band]() { select_freq_and_mode_menu(band); }},
+            {"1 Freq + All Modes",[band]() { select_freq_all_modes_menu(band); }},
+            {"Range + 1 Mode",    [band]() { select_range_single_mode_menu(band); }},
+            {"Range + All Modes", [allHopPreset, &engine, bandTitle]() {
+                engine.isChangingPreset = true;
+                engine.changingPreset = allHopPreset;
+                engine.hopGroup = allHopPreset;
+                displaySuccess(String(bandTitle) + " All", true);
+            }},
+            {"Go Back",           [&]() { exitBand = true; }},
+        };
+
+        int res = loopOptions(opts, MENU_TYPE_SUBMENU, bandTitle);
+        if (check(EscPress) || res < 0 || returnToMenu || exitBand) {
+            returnToMenu = false;
+            break;
+        }
+    }
 }
 
 static void select_hop_timeout_menu() {
@@ -266,43 +474,35 @@ void rtl433_presets_menu() {
     bool exitPresets = false;
 
     while (!exitPresets) {
-        String fixedLabel = String("Fixed Presets") + (!engine.isChangingPreset ? " [*]" : "");
-        String changingLabel = String("Changing Presets") + (engine.isChangingPreset ? " [*]" : "");
+        String modeStatus = engine.isChangingPreset ?
+            (String("Hop: ") + rtl433_get_changing_preset_name(engine.changingPreset)) :
+            (String("Fixed: ") + rtl433_get_preset_name(engine.currentPreset));
         String intervalStr = "Hop Interval (" + String(engine.hopTimeoutMs / 1000) + "s)";
 
         std::vector<Option> opts = {
-            {fixedLabel,                                                                select_fixed_preset_menu   },
-            {changingLabel,                                                             select_changing_preset_menu},
-            {intervalStr,                                                               select_hop_timeout_menu    },
+            {"300 Band (300-348M)",                                                  []() { select_band_menu(RTL433_BAND_300); } },
+            {"400 Band (387-464M)",                                                  []() { select_band_menu(RTL433_BAND_400); } },
+            {"800 Band (779-928M)",                                                  []() { select_band_menu(RTL433_BAND_800); } },
+            {"All Bands (All Modes)",                                                [&]() {
+                engine.isChangingPreset = true;
+                engine.changingPreset = RTL433_HOP_ALL_BANDS_ALL;
+                engine.hopGroup = RTL433_HOP_ALL_BANDS_ALL;
+                displaySuccess("Selected: All Bands", true);
+            }},
+            {intervalStr,                                                               select_hop_timeout_menu                     },
             {String("Extend on Signal: ") + (engine.hopStayOnSignal ? "[ON]" : "[OFF]"), [&]() {
                 engine.hopStayOnSignal = !engine.hopStayOnSignal;
                 displayInfo(String("Extend on Signal: ") + (engine.hopStayOnSignal ? "ON" : "OFF"), true);
             }},
-            {"Go Back",                                                                 [&]() { exitPresets = true; }},
+            {"Go Back",                                                                 [&]() { exitPresets = true; }               },
         };
 
-        int res = loopOptions(opts, MENU_TYPE_SUBMENU, "RTL433 Presets");
+        int res = loopOptions(opts, MENU_TYPE_SUBMENU, "RTL433 Profiles");
         if (check(EscPress) || res < 0 || returnToMenu || exitPresets) {
             returnToMenu = false;
             break;
         }
     }
-}
-
-static void select_frequency_menu() {
-    Rtl433Engine &engine = Rtl433Engine::instance();
-    std::vector<Option> opts = {
-        {"433.92 MHz", [&]() { engine.currentFrequency = 433.92f; }},
-        {"868.35 MHz", [&]() { engine.currentFrequency = 868.35f; }},
-        {"868.95 MHz (wM-Bus T)", [&]() { engine.currentFrequency = 868.95f; }},
-        {"868.30 MHz (wM-Bus S)", [&]() { engine.currentFrequency = 868.30f; }},
-        {"915.00 MHz", [&]() { engine.currentFrequency = 915.00f; }},
-        {"345.00 MHz (Honeywell)", [&]() { engine.currentFrequency = 345.00f; }},
-        {"315.00 MHz (TPMS)", [&]() { engine.currentFrequency = 315.00f; }},
-        {"434.42 MHz", [&]() { engine.currentFrequency = 434.42f; }},
-    };
-    opts.push_back({"Go Back", []() {}});
-    loopOptions(opts, MENU_TYPE_SUBMENU, "Select Frequency");
 }
 
 static void view_sd_log_menu() {
@@ -444,14 +644,14 @@ static void select_test_tx_sample_menu() {
 static void select_test_tx_frequency_menu() {
     Rtl433Engine &engine = Rtl433Engine::instance();
     std::vector<Option> opts = {
-        {"433.92 MHz", [&]() { engine.testTxFrequency = 433.92f; }},
-        {"868.35 MHz", [&]() { engine.testTxFrequency = 868.35f; }},
+        {"433.92 MHz (400 Band)", [&]() { engine.testTxFrequency = 433.92f; }},
+        {"434.42 MHz (400 Band)", [&]() { engine.testTxFrequency = 434.42f; }},
+        {"315.00 MHz (300 Band)", [&]() { engine.testTxFrequency = 315.00f; }},
+        {"345.00 MHz (300 Band)", [&]() { engine.testTxFrequency = 345.00f; }},
+        {"868.35 MHz (800 Band)", [&]() { engine.testTxFrequency = 868.35f; }},
         {"868.95 MHz (wM-Bus T)", [&]() { engine.testTxFrequency = 868.95f; }},
         {"868.30 MHz (wM-Bus S)", [&]() { engine.testTxFrequency = 868.30f; }},
-        {"915.00 MHz", [&]() { engine.testTxFrequency = 915.00f; }},
-        {"345.00 MHz (Honeywell)", [&]() { engine.testTxFrequency = 345.00f; }},
-        {"315.00 MHz (TPMS)", [&]() { engine.testTxFrequency = 315.00f; }},
-        {"434.42 MHz", [&]() { engine.testTxFrequency = 434.42f; }},
+        {"915.00 MHz (800 Band)", [&]() { engine.testTxFrequency = 915.00f; }},
     };
     opts.push_back({"Go Back", []() {}});
     loopOptions(opts, MENU_TYPE_SUBMENU, "Select Frequency");
@@ -496,16 +696,54 @@ void rtl433_sniff_screen(bool hopping) {
     Rtl433Engine &engine = Rtl433Engine::instance();
     bool isHopping = hopping || engine.isChangingPreset;
 
-    std::vector<int> hopList;
+    struct HopStep {
+        float frequency;
+        int preset;
+    };
+    std::vector<HopStep> hopList;
     size_t currentHopIdx = 0;
     int currentPreset = engine.currentPreset;
     float currentFreq = engine.currentFrequency;
 
     if (isHopping) {
-        hopList = rtl433_get_changing_presets(engine.changingPreset);
-        if (hopList.empty()) hopList.push_back(RTL433_PRESET_OOK_433);
-        currentPreset = hopList[0];
-        currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
+        std::vector<int> profilePresets = rtl433_get_changing_presets(engine.changingPreset);
+        if (engine.changingPreset == RTL433_HOP_SINGLE_FREQ_ALL) {
+            profilePresets = unique_preset_modes(rtl433_get_band_presets(engine.hopFrequencyBand));
+            for (int preset : profilePresets) {
+                hopList.push_back({engine.hopFrequency, preset});
+            }
+        } else if (is_band_range_profile(engine.changingPreset) ||
+                   engine.changingPreset == RTL433_HOP_ALL_BANDS_ALL) {
+            if (engine.changingPreset == RTL433_HOP_ALL_BANDS_ALL) {
+                for (Rtl433Band band : {RTL433_BAND_300, RTL433_BAND_400, RTL433_BAND_800}) {
+                    std::vector<float> frequencies = get_band_frequencies(band);
+                    std::vector<int> bandModes;
+                    for (int preset : profilePresets) {
+                        if (rtl433_get_preset_def(preset)->band == band) bandModes.push_back(preset);
+                    }
+                    bandModes = unique_preset_modes(bandModes);
+                    for (float frequency : frequencies) {
+                        for (int preset : bandModes) hopList.push_back({frequency, preset});
+                    }
+                }
+            } else {
+                profilePresets = unique_preset_modes(profilePresets);
+            }
+            if (engine.changingPreset != RTL433_HOP_ALL_BANDS_ALL && !profilePresets.empty()) {
+                Rtl433Band band = rtl433_get_preset_def(profilePresets[0])->band;
+                std::vector<float> frequencies = get_band_frequencies(band);
+                for (float frequency : frequencies) {
+                    for (int preset : profilePresets) hopList.push_back({frequency, preset});
+                }
+            }
+        } else {
+            for (int preset : profilePresets) {
+                hopList.push_back({rtl433_get_preset_def(preset)->default_freq, preset});
+            }
+        }
+        if (hopList.empty()) hopList.push_back({433.92f, RTL433_PRESET_OOK_433});
+        currentPreset = hopList[0].preset;
+        currentFreq = hopList[0].frequency;
     }
 
     RfRxSession rx;
@@ -540,8 +778,8 @@ void rtl433_sniff_screen(bool hopping) {
             uint32_t elapsed = now - hopStart;
             if (elapsed >= engine.hopTimeoutMs) {
                 currentHopIdx = (currentHopIdx + 1) % hopList.size();
-                currentPreset = hopList[currentHopIdx];
-                currentFreq = rtl433_get_preset_def(currentPreset)->default_freq;
+                currentPreset = hopList[currentHopIdx].preset;
+                currentFreq = hopList[currentHopIdx].frequency;
                 engine.switchPreset(currentFreq, currentPreset);
                 rx.flush();
                 hopStart = millis();
@@ -671,9 +909,9 @@ void rtl433_sniff_screen(bool hopping) {
             if (count == 0) {
                 tft.setTextColor(getColorVariation(bruceConfig.priColor), bruceConfig.bgColor);
                 if (isHopping) {
-                    padprintln("\n  Scanning modulations...\n  (Listening on " + String(currentFreq, 2) + "M)");
+                    padprintln("\n  Scanning profile...\n  (" + String(rtl433_get_changing_preset_name(engine.changingPreset)) + ")");
                 } else {
-                    padprintln("\n  Listening for sensors...\n  (Weather, TPMS, Alarms)");
+                    padprintln("\n  Listening on " + String(currentFreq, 2) + "M\n  (" + String(rtl433_get_preset_name(currentPreset)) + ")");
                 }
             } else {
                 int maxLines = (tftHeight - 55) / (FP * LH + 1);
@@ -719,10 +957,13 @@ void rtl433_menu() {
     bool exitMain = false;
 
     while (!exitMain) {
+        String profileLabel = engine.isChangingPreset ?
+            ("Presets: [" + String(rtl433_get_changing_preset_name(engine.changingPreset)) + "]") :
+            ("Presets: [" + String(rtl433_get_preset_name(engine.currentPreset)) + "]");
+
         std::vector<Option> opts = {
             {"Sniff Live",       []() { rtl433_sniff_screen(); }                   },
-            {"Presets",          rtl433_presets_menu                               },
-            {"Frequency",        select_frequency_menu                             },
+            {profileLabel,       rtl433_presets_menu                               },
             {"Recent Packets",   view_recent_packets_menu                          },
             {"Clear Results",    [&]() {
                 engine.clearRecent();

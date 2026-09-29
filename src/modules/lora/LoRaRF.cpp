@@ -1,5 +1,7 @@
 #if !defined(LITE_VERSION)
 #include "LoRaRF.h"
+#include "LoRaChatHelpers.h"
+#include "LoRaChatStorageHelpers.h"
 #include "LoRaConfig.h"
 #include "LoRaRadio.h"
 #include "core/display.h"
@@ -16,6 +18,7 @@ static const int maxChatMessages = 19;
 static bool chatNeedUpdate = false;
 static String chatOutgoingMsg = "";
 static uint8_t chatRxBuffer[256];
+static void persistChatMessages();
 
 static void renderChat() {
     if (!chatNeedUpdate) return;
@@ -49,20 +52,48 @@ static void loadChatMessages() {
     }
     File file = LittleFS.open("/chats.txt", "r");
     if (file) {
-        while (file.available()) {
-            String line = file.readStringUntil('\n');
-            line.trim();
-            if (line.length() > 0) {
-                chatMessages.push_back(line);
-            }
-        }
+        LoRaChatStorageHelpers::loadMessages(file, chatMessages);
         file.close();
     }
-    if ((int)chatMessages.size() > maxChatMessages) {
-        chatScrollOffset = chatMessages.size() - maxChatMessages;
-    } else {
-        chatScrollOffset = 0;
+    chatScrollOffset = (chatMessages.size() > maxChatMessages) ? chatMessages.size() - maxChatMessages : 0;
+    persistChatMessages();
+}
+
+static String normalizeChatLine(const String &message) {
+    String normalized = "";
+    for (size_t i = 0; i < message.length(); i++) {
+        const unsigned char character = (unsigned char)message[i];
+        if (character >= 32 && character <= 126) {
+            normalized += (char)character;
+        } else if (character == '\t' || character == '\r' || character == '\n') {
+            normalized += ' ';
+        }
     }
+    normalized.trim();
+    if (normalized.length() > LoRaChatStorageHelpers::MAX_CHAT_MESSAGE_LENGTH) {
+        normalized = normalized.substring(0, LoRaChatStorageHelpers::MAX_CHAT_MESSAGE_LENGTH);
+    }
+    return normalized;
+}
+
+static bool appendChatMessage(const String &message) {
+    const String normalized = normalizeChatLine(message);
+    if (normalized.isEmpty()) return false;
+    LoRaChatStorageHelpers::appendBoundedMessage(chatMessages, normalized);
+    chatScrollOffset = (chatMessages.size() > maxChatMessages) ? chatMessages.size() - maxChatMessages : 0;
+    chatNeedUpdate = true;
+    return true;
+}
+
+static void persistChatMessages() {
+    while (LoRaChatStorageHelpers::serializedSize(chatMessages) > LoRaChatStorageHelpers::MAX_CHAT_FILE_BYTES &&
+           !chatMessages.empty()) {
+        chatMessages.erase(chatMessages.begin());
+    }
+    File file = LittleFS.open("/chats.txt", "w");
+    if (!file) return;
+    for (const String &message : chatMessages) file.println(message);
+    file.close();
 }
 
 static void sendChatMessage() {
@@ -73,19 +104,16 @@ static void sendChatMessage() {
         return;
     }
 
-    String fullMsg = loraConfig.username + ": " + chatOutgoingMsg;
+    String fullMsg = normalizeChatLine(loraConfig.username + ": " + chatOutgoingMsg);
+    if (fullMsg.isEmpty()) {
+        chatNeedUpdate = true;
+        return;
+    }
     if (!transmitLoRaString(fullMsg)) {
         displayError("Send failed");
     } else {
-        File file = LittleFS.open("/chats.txt", "a");
-        if (file) {
-            file.println(fullMsg);
-            file.close();
-        }
-        chatMessages.push_back(fullMsg);
-        if ((int)chatMessages.size() > maxChatMessages) {
-            chatScrollOffset = chatMessages.size() - maxChatMessages;
-        }
+        appendChatMessage(fullMsg);
+        persistChatMessages();
     }
     chatOutgoingMsg = "";
     chatNeedUpdate = true;
@@ -94,24 +122,30 @@ static void sendChatMessage() {
 static void receiveChatMessage() {
     float rssi = 0, snr = 0, freqErr = 0;
     size_t pktLen = 0;
-    int state = readLoRaRawData(chatRxBuffer, sizeof(chatRxBuffer) - 1, rssi, snr, freqErr, pktLen);
-    if (state == RADIOLIB_ERR_NONE && pktLen > 0) {
-        chatRxBuffer[pktLen] = '\0';
-        String incoming = String((char *)chatRxBuffer);
-        incoming.trim();
-        if (incoming.length() > 0) {
-            File file = LittleFS.open("/chats.txt", "a");
-            if (file) {
-                file.println(incoming);
-                file.close();
-            }
-            chatMessages.push_back(incoming);
-            if ((int)chatMessages.size() > maxChatMessages) {
-                chatScrollOffset = chatMessages.size() - maxChatMessages;
-            }
-            chatNeedUpdate = true;
-        }
+    const int state = readLoRaRawData(chatRxBuffer, sizeof(chatRxBuffer), rssi, snr, freqErr, pktLen);
+    if (state == RADIOLIB_ERR_NONE && pktLen > 0 && pktLen <= sizeof(chatRxBuffer)) {
+        LoRaPacket packet;
+        packet.timestampMs = millis();
+        packet.freqMHz = loraConfig.freqMHz;
+        packet.sf = loraConfig.sf;
+        packet.bwKHz = loraConfig.bwKHz;
+        packet.cr = loraConfig.cr;
+        packet.syncWord = loraConfig.syncWord;
+        packet.rssi = rssi;
+        packet.snr = snr;
+        packet.freqErrorHz = freqErr;
+        packet.timeOnAirMs = getLoRaTimeOnAir(pktLen);
+        packet.crcOk = true;
+        packet.raw.assign(chatRxBuffer, chatRxBuffer + pktLen);
+        parseLoRaPacket(packet);
+
+        const String incoming = LoRaChatHelpers::decodedDisplayText(packet);
+        if (appendChatMessage(incoming)) persistChatMessages();
     }
+}
+
+static int maxChatScrollOffset() {
+    return (chatMessages.size() > maxChatMessages) ? chatMessages.size() - maxChatMessages : 0;
 }
 
 void lorachat() {
@@ -136,17 +170,50 @@ void lorachat() {
 
         if (check(EscPress)) break;
 
-        if (check(NextPress) || check(DownPress)) {
-            if (chatScrollOffset < (int)chatMessages.size() - maxChatMessages) {
-                chatScrollOffset++;
-                chatNeedUpdate = true;
+#if defined(HAS_ENCODER)
+        int32_t encSteps = drainRotarySteps();
+        if (encSteps != 0) {
+            check(PrevPress);
+            check(NextPress);
+            check(UpPress);
+            check(DownPress);
+            check(PrevPagePress);
+            check(NextPagePress);
+            while (encSteps > 0) {
+                if (chatScrollOffset > 0) {
+                    chatScrollOffset--;
+                    chatNeedUpdate = true;
+                }
+                encSteps--;
             }
-        }
+            while (encSteps < 0) {
+                if (chatScrollOffset < maxChatScrollOffset()) {
+                    chatScrollOffset++;
+                    chatNeedUpdate = true;
+                }
+                encSteps++;
+            }
+            PrevPress = false;
+            NextPress = false;
+            UpPress = false;
+            DownPress = false;
+            PrevPagePress = false;
+            NextPagePress = false;
+        } else
+#endif
+        {
+            if (check(NextPress) || check(DownPress)) {
+                if (chatScrollOffset < maxChatScrollOffset()) {
+                    chatScrollOffset++;
+                    chatNeedUpdate = true;
+                }
+            }
 
-        if (check(PrevPress) || check(UpPress)) {
-            if (chatScrollOffset > 0) {
-                chatScrollOffset--;
-                chatNeedUpdate = true;
+            if (check(PrevPress) || check(UpPress)) {
+                if (chatScrollOffset > 0) {
+                    chatScrollOffset--;
+                    chatNeedUpdate = true;
+                }
             }
         }
 

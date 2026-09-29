@@ -1,5 +1,6 @@
 #if !defined(LITE_VERSION)
 #include "LoRaConfig.h"
+#include "LoRaConfigHelpers.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
 #include "core/sd_functions.h"
@@ -97,14 +98,44 @@ std::vector<LoRaPreset> loadLoRaPresetsFromStorage() {
         const uint16_t preambleLen = entry["preambleLen"].as<uint16_t>();
 
         if (name.isEmpty() || name.length() > 40 || category.isEmpty() || category.length() > 24 ||
-            freqMHz < 100.0f || freqMHz > 1000.0f || sf < 5 || sf > 12 || bwKHz < 7.8f ||
-            bwKHz > 500.0f || cr < 5 || cr > 8 || preambleLen == 0) {
+            !LoRaConfigHelpers::isValidFrequencyMHz(freqMHz) ||
+            !LoRaConfigHelpers::isValidSpreadingFactor(sf) || !LoRaConfigHelpers::isValidBandwidth(bwKHz) ||
+            !LoRaConfigHelpers::isValidCodingRate(cr) || !LoRaConfigHelpers::isValidPreambleLength(preambleLen)) {
             continue;
         }
 
         presets.push_back({name, category, freqMHz, sf, bwKHz, cr, syncWord, preambleLen});
     }
     return presets;
+}
+
+static bool isValidLoRaUsername(const String &username) {
+    if (username.isEmpty() || username.length() > 32) return false;
+    for (size_t i = 0; i < username.length(); i++) {
+        const unsigned char character = (unsigned char)username[i];
+        if (character < 32 || character > 126) return false;
+    }
+    return true;
+}
+
+static void normalizeLoRaConfig(LoRaConfigData &config) {
+    const LoRaConfigData defaults;
+    if (!LoRaConfigHelpers::isValidFrequencyMHz(config.freqMHz)) config.freqMHz = defaults.freqMHz;
+    if (!LoRaConfigHelpers::isValidSpreadingFactor(config.sf)) config.sf = defaults.sf;
+    if (!LoRaConfigHelpers::isValidBandwidth(config.bwKHz)) config.bwKHz = defaults.bwKHz;
+    if (!LoRaConfigHelpers::isValidCodingRate(config.cr)) config.cr = defaults.cr;
+    if (!LoRaConfigHelpers::isValidSyncWord(config.syncWord)) config.syncWord = defaults.syncWord;
+    if (!LoRaConfigHelpers::isValidPreambleLength(config.preambleLen)) config.preambleLen = defaults.preambleLen;
+    if (!LoRaConfigHelpers::isValidTxPower(config.powerDbm, false)) config.powerDbm = defaults.powerDbm;
+    if (!LoRaConfigHelpers::isValidTxPower(config.sx1262PowerDbm, true)) {
+        config.sx1262PowerDbm = defaults.sx1262PowerDbm;
+    }
+    if (!LoRaConfigHelpers::isValidTcxoVoltage(config.sx1262TcxoVoltage)) {
+        config.sx1262TcxoVoltage = defaults.sx1262TcxoVoltage;
+    }
+    if (!LoRaConfigHelpers::isValidScanDwell(config.scanDwellMs)) config.scanDwellMs = defaults.scanDwellMs;
+    if (!LoRaConfigHelpers::isValidRadioType((int)config.radioType)) config.radioType = defaults.radioType;
+    if (!isValidLoRaUsername(config.username)) config.username = defaults.username;
 }
 
 void loadLoRaConfig() {
@@ -114,64 +145,114 @@ void loadLoRaConfig() {
     }
 
     File file = LittleFS.open("/lora_settings.json", "r");
-    if (!file) return;
+    if (!file) {
+        normalizeLoRaConfig(loraConfig);
+        return;
+    }
 
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, file);
     file.close();
 
-    if (error) return;
-
-    if (!doc["LoRa_Frequency"].isNull()) {
-        double rawFreq = doc["LoRa_Frequency"].as<double>();
-        if (rawFreq > 1000000.0) {
-            loraConfig.freqMHz = (float)(rawFreq / 1000000.0);
-        } else if (rawFreq > 1000.0) {
-            loraConfig.freqMHz = (float)(rawFreq / 1000.0);
-        } else if (rawFreq > 0.0) {
-            loraConfig.freqMHz = (float)rawFreq;
-        }
+    if (error) {
+        loraConfig = LoRaConfigData();
+        return;
     }
 
-    if (!doc["LoRa_SF"].isNull()) loraConfig.sf = doc["LoRa_SF"].as<uint8_t>();
-    if (!doc["LoRa_BW"].isNull()) loraConfig.bwKHz = doc["LoRa_BW"].as<float>();
-    if (!doc["LoRa_CR"].isNull()) loraConfig.cr = doc["LoRa_CR"].as<uint8_t>();
-    if (!doc["LoRa_SyncWord"].isNull()) loraConfig.syncWord = doc["LoRa_SyncWord"].as<uint8_t>();
-    if (!doc["LoRa_Preamble"].isNull()) loraConfig.preambleLen = doc["LoRa_Preamble"].as<uint16_t>();
-    if (!doc["LoRa_Power"].isNull()) loraConfig.powerDbm = doc["LoRa_Power"].as<int8_t>();
+    LoRaConfigData loaded;
+    JsonVariantConst frequency = doc["LoRa_Frequency"];
+    if (!frequency.isNull()) {
+        String unit;
+        const bool hasUnit = !doc["LoRa_Frequency_Unit"].isNull();
+        if (hasUnit && doc["LoRa_Frequency_Unit"].is<const char *>()) {
+            unit = doc["LoRa_Frequency_Unit"].as<String>();
+        } else if (hasUnit) {
+            unit = "invalid";
+        }
+
+        float frequencyMHz = 0.0f;
+        bool validFrequency = false;
+        if (frequency.is<const char *>()) {
+            validFrequency = LoRaConfigHelpers::normalizeFrequencyMHz(
+                frequency.as<const char *>(), hasUnit ? unit.c_str() : nullptr, frequencyMHz
+            );
+        } else {
+            validFrequency = LoRaConfigHelpers::normalizeFrequencyMHz(
+                frequency.as<double>(), hasUnit ? unit.c_str() : nullptr, frequencyMHz
+            );
+        }
+        if (validFrequency) loaded.freqMHz = frequencyMHz;
+    }
+
+    if (!doc["LoRa_SF"].isNull()) {
+        const int value = doc["LoRa_SF"].as<int>();
+        if (LoRaConfigHelpers::isValidSpreadingFactor(value)) loaded.sf = (uint8_t)value;
+    }
+    if (!doc["LoRa_BW"].isNull()) {
+        const float value = doc["LoRa_BW"].as<float>();
+        if (LoRaConfigHelpers::isValidBandwidth(value)) loaded.bwKHz = value;
+    }
+    if (!doc["LoRa_CR"].isNull()) {
+        const int value = doc["LoRa_CR"].as<int>();
+        if (LoRaConfigHelpers::isValidCodingRate(value)) loaded.cr = (uint8_t)value;
+    }
+    if (!doc["LoRa_SyncWord"].isNull()) {
+        const int value = doc["LoRa_SyncWord"].as<int>();
+        if (LoRaConfigHelpers::isValidSyncWord(value)) loaded.syncWord = (uint8_t)value;
+    }
+    if (!doc["LoRa_Preamble"].isNull()) {
+        const int value = doc["LoRa_Preamble"].as<int>();
+        if (LoRaConfigHelpers::isValidPreambleLength(value)) loaded.preambleLen = (uint16_t)value;
+    }
+    if (!doc["LoRa_Power"].isNull()) {
+        const int value = doc["LoRa_Power"].as<int>();
+        if (LoRaConfigHelpers::isValidTxPower(value, false)) loaded.powerDbm = (int8_t)value;
+    }
     if (!doc["LoRa_SX1262_Power"].isNull()) {
-        loraConfig.sx1262PowerDbm = doc["LoRa_SX1262_Power"].as<int8_t>();
-    } else {
-        loraConfig.sx1262PowerDbm = loraConfig.powerDbm;
+        const int value = doc["LoRa_SX1262_Power"].as<int>();
+        if (LoRaConfigHelpers::isValidTxPower(value, true)) loaded.sx1262PowerDbm = (int8_t)value;
+    } else if (LoRaConfigHelpers::isValidTxPower(loaded.powerDbm, true)) {
+        loaded.sx1262PowerDbm = loaded.powerDbm;
+    }
+    if (!doc["LoRa_SX1262_TCXO_Voltage"].isNull()) {
+        const float value = doc["LoRa_SX1262_TCXO_Voltage"].as<float>();
+        if (LoRaConfigHelpers::isValidTcxoVoltage(value)) loaded.sx1262TcxoVoltage = value;
+    }
+    if (doc["LoRa_SX1262_Use_LDO"].is<bool>()) {
+        loaded.sx1262UseRegulatorLdo = doc["LoRa_SX1262_Use_LDO"].as<bool>();
     }
     if (!doc["LoRa_Scan_Dwell"].isNull()) {
-        uint16_t scanDwellMs = doc["LoRa_Scan_Dwell"].as<uint16_t>();
-        if (scanDwellMs >= 1000 && scanDwellMs <= 5000) {
-            loraConfig.scanDwellMs = scanDwellMs;
-        } else {
-            loraConfig.scanDwellMs = 1500;
-        }
+        const int value = doc["LoRa_Scan_Dwell"].as<int>();
+        if (LoRaConfigHelpers::isValidScanDwell(value)) loaded.scanDwellMs = (uint16_t)value;
     }
-    if (!doc["LoRa_Name"].isNull()) loraConfig.username = doc["LoRa_Name"].as<String>();
-
-    if (!doc["LoRa_Radio"].isNull()) {
-        String rad = doc["LoRa_Radio"].as<String>();
-        if (rad.equalsIgnoreCase("SX1262")) {
-            loraConfig.radioType = LoRaRadioType::SX1262;
-        } else {
-            loraConfig.radioType = LoRaRadioType::SX1276;
-        }
+    if (doc["LoRa_Name"].is<const char *>()) {
+        const String username = doc["LoRa_Name"].as<String>();
+        if (isValidLoRaUsername(username)) loaded.username = username;
     }
 
-    if (!doc["LoRa_PCAP"].isNull()) loraConfig.enablePcap = doc["LoRa_PCAP"].as<bool>();
+    if (doc["LoRa_Radio"].is<const char *>()) {
+        const String radio = doc["LoRa_Radio"].as<String>();
+        if (radio.equalsIgnoreCase("SX1262") || radio.equalsIgnoreCase("SX1268")) {
+            loaded.radioType = LoRaRadioType::SX1262;
+        } else if (radio.equalsIgnoreCase("SX1276") || radio.equalsIgnoreCase("SX1278")) {
+            loaded.radioType = LoRaRadioType::SX1276;
+        }
+    }
+    if (doc["LoRa_PCAP"].is<bool>()) loaded.enablePcap = doc["LoRa_PCAP"].as<bool>();
+
+    normalizeLoRaConfig(loaded);
+    loraConfig = loaded;
 }
 
 void saveLoRaConfig() {
+    normalizeLoRaConfig(loraConfig);
     File file = LittleFS.open("/lora_settings.json", "w");
     if (!file) return;
 
     JsonDocument doc;
-    doc["LoRa_Frequency"] = String(loraConfig.freqMHz, 3);
+    doc["LoRa_Config_Version"] = 2;
+    doc["LoRa_Frequency_Unit"] = "MHz";
+    doc["LoRa_Frequency"] = loraConfig.freqMHz;
     doc["LoRa_SF"] = loraConfig.sf;
     doc["LoRa_BW"] = loraConfig.bwKHz;
     doc["LoRa_CR"] = loraConfig.cr;
@@ -179,6 +260,8 @@ void saveLoRaConfig() {
     doc["LoRa_Preamble"] = loraConfig.preambleLen;
     doc["LoRa_Power"] = loraConfig.powerDbm;
     doc["LoRa_SX1262_Power"] = loraConfig.sx1262PowerDbm;
+    doc["LoRa_SX1262_TCXO_Voltage"] = loraConfig.sx1262TcxoVoltage;
+    doc["LoRa_SX1262_Use_LDO"] = loraConfig.sx1262UseRegulatorLdo;
     doc["LoRa_Scan_Dwell"] = loraConfig.scanDwellMs;
     doc["LoRa_Name"] = loraConfig.username;
     doc["LoRa_Radio"] = (loraConfig.radioType == LoRaRadioType::SX1262) ? "SX1262" : "SX1276";
@@ -272,7 +355,7 @@ void changeLoRaFrequency() {
     if (input == "" || input == "\x1B") return;
 
     float f = input.toFloat();
-    if (f < 100.0f || f > 1050.0f) {
+    if (!LoRaConfigHelpers::isValidFrequencyMHz(f)) {
         displayError("Invalid Freq (100-1050 MHz)");
         return;
     }
@@ -284,23 +367,33 @@ void changeLoRaFrequency() {
 
 static void selectLoRaTxPowerMenu() {
     loadLoRaConfig();
-    static const int8_t powerPresets[] = {-9, 0, 5, 10, 14, 17, 20, 22};
-    static const char *powerLabels[] = {
-        "-9 dBm (Minimum)", "0 dBm", "5 dBm", "10 dBm (Low)", "14 dBm (Medium)",
-        "17 dBm (Default)", "20 dBm (High)", "22 dBm (SX1262 max)"
-    };
+    const bool isSx1262 = loraConfig.radioType == LoRaRadioType::SX1262;
+    const std::vector<int8_t> powerPresets = isSx1262
+        ? std::vector<int8_t>{-9, 0, 5, 10, 14, 17, 20, 22}
+        : std::vector<int8_t>{2, 5, 10, 14, 17, 20};
+    const std::vector<String> powerLabels = isSx1262
+        ? std::vector<String>{
+              "-9 dBm (Minimum)", "0 dBm", "5 dBm", "10 dBm (Low)", "14 dBm (Medium)",
+              "17 dBm (Default)", "20 dBm (High)", "22 dBm (Maximum)"
+          }
+        : std::vector<String>{"2 dBm (Minimum)", "5 dBm", "10 dBm", "14 dBm", "17 dBm (Default)", "20 dBm (Maximum)"};
     std::vector<Option> powerOptions;
     int selected = 0;
-    for (size_t i = 0; i < sizeof(powerPresets) / sizeof(powerPresets[0]); i++) {
+    const int currentPower = isSx1262 ? loraConfig.sx1262PowerDbm : loraConfig.powerDbm;
+    for (size_t i = 0; i < powerPresets.size(); i++) {
         const int8_t powerDbm = powerPresets[i];
-        if (powerDbm == loraConfig.sx1262PowerDbm) selected = i;
-        powerOptions.push_back({powerLabels[i], [powerDbm]() {
-            loraConfig.sx1262PowerDbm = powerDbm;
+        if (powerDbm == currentPower) selected = i;
+        powerOptions.push_back({powerLabels[i], [powerDbm, isSx1262]() {
+            if (isSx1262) {
+                loraConfig.sx1262PowerDbm = powerDbm;
+            } else {
+                loraConfig.powerDbm = powerDbm;
+            }
             saveLoRaConfig();
-            displaySuccess("SX1262 TX: " + String((int)powerDbm) + " dBm");
+            displaySuccess(String(isSx1262 ? "SX1262" : "SX1276") + " TX: " + String((int)powerDbm) + " dBm");
         }});
     }
-    loopOptions(powerOptions, MENU_TYPE_SUBMENU, "SX1262 TX Power", selected);
+    loopOptions(powerOptions, MENU_TYPE_SUBMENU, isSx1262 ? "SX1262 TX Power" : "SX1276 TX Power", selected);
 }
 
 static void selectLoRaScanDwellMenu() {
@@ -320,6 +413,30 @@ static void selectLoRaScanDwellMenu() {
         }});
     }
     loopOptions(dwellOptions, MENU_TYPE_SUBMENU, "Channel Scan Dwell", selected);
+}
+
+static void selectLoRaSX1262HardwareMenu() {
+    loadLoRaConfig();
+    static const float tcxoVoltages[] = {0.0f, 1.6f, 1.7f, 1.8f, 2.2f, 2.4f, 2.7f, 3.0f, 3.3f};
+    std::vector<Option> options;
+    for (float voltage : tcxoVoltages) {
+        String label = voltage == 0.0f ? "XTAL (No TCXO)" : String(voltage, 1) + " V TCXO";
+        if (fabsf(loraConfig.sx1262TcxoVoltage - voltage) <= 0.01f) label = "[x] " + label;
+        options.push_back({label, [voltage]() {
+            loraConfig.sx1262TcxoVoltage = voltage;
+            saveLoRaConfig();
+            displaySuccess("TCXO: " + (voltage == 0.0f ? String("XTAL") : String(voltage, 1) + " V"));
+        }});
+    }
+    options.push_back({loraConfig.sx1262UseRegulatorLdo ? "[x] LDO regulator" : "LDO regulator", []() {
+        loraConfig.sx1262UseRegulatorLdo = true;
+        saveLoRaConfig();
+    }});
+    options.push_back({!loraConfig.sx1262UseRegulatorLdo ? "[x] DC-DC regulator" : "DC-DC regulator", []() {
+        loraConfig.sx1262UseRegulatorLdo = false;
+        saveLoRaConfig();
+    }});
+    loopOptions(options, MENU_TYPE_SUBMENU, "SX1262 Clock/Regulator");
 }
 
 void customLoRaConfigMenu() {
@@ -370,8 +487,13 @@ void customLoRaConfigMenu() {
             {"Custom Hex...",          []() {
                 String input = keyboard(String(loraConfig.syncWord, HEX), 4, "Sync Word (Hex):");
                 if (input != "" && input != "\x1B") {
-                    loraConfig.syncWord = (uint8_t)strtol(input.c_str(), NULL, 16);
-                    saveLoRaConfig();
+                    const long syncWord = strtol(input.c_str(), NULL, 16);
+                    if (LoRaConfigHelpers::isValidSyncWord(syncWord)) {
+                        loraConfig.syncWord = (uint8_t)syncWord;
+                        saveLoRaConfig();
+                    } else {
+                        displayError("Invalid Sync Word");
+                    }
                 }
             }}
         };
@@ -379,7 +501,12 @@ void customLoRaConfigMenu() {
     }});
 
     options.push_back({"Radio Chipset", selectLoRaRadioMenu});
-    options.push_back({"SX1262 TX Power (" + String((int)loraConfig.sx1262PowerDbm) + " dBm)", selectLoRaTxPowerMenu});
+    const bool isSx1262 = loraConfig.radioType == LoRaRadioType::SX1262;
+    const int txPower = isSx1262 ? loraConfig.sx1262PowerDbm : loraConfig.powerDbm;
+    options.push_back({String(isSx1262 ? "SX1262" : "SX1276") + " TX Power (" + String(txPower) + " dBm)", selectLoRaTxPowerMenu});
+    if (isSx1262) {
+        options.push_back({"SX1262 TCXO/Regulator", selectLoRaSX1262HardwareMenu});
+    }
     options.push_back({"Scan Dwell (" + String(loraConfig.scanDwellMs) + " ms)", selectLoRaScanDwellMenu});
     options.push_back({"Username: " + loraConfig.username, changeLoRaUsername});
 

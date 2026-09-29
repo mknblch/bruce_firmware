@@ -563,17 +563,33 @@ uint32_t rtl433HopCallback(cmd *c) {
     int totalDurationSec = totalTimeArg.isSet() ? totalTimeArg.getValue().toInt() : 120;
     if (totalDurationSec < 1) totalDurationSec = 120;
 
-    int group = RTL433_HOP_433_ALL;
+    int group = RTL433_HOP_400_BAND_ALL;
     if (groupArg.isSet()) {
         String g = groupArg.getValue();
         g.toLowerCase();
-        if (g == "all" || g == "all_presets") group = RTL433_HOP_ALL_PRESETS;
-        else if (g == "weather" || g == "wx") group = RTL433_HOP_WEATHER;
-        else if (g == "tpms") group = RTL433_HOP_TPMS;
-        else if (g == "meters" || g == "wmbus" || g == "smartmeters") group = RTL433_HOP_METERS;
-        else if (g == "868") group = RTL433_HOP_868_ALL;
-        else if (g == "315") group = RTL433_HOP_315_ALL;
-        else if (g.toInt() >= 0 && g.toInt() < RTL433_HOP_GROUP_COUNT) group = g.toInt();
+        if (g == "all" || g == "all_presets" || g == "all_bands") group = RTL433_HOP_ALL_BANDS_ALL;
+        else if (g == "300" || g == "300_all" || g == "300band") group = RTL433_HOP_300_BAND_ALL;
+        else if (g == "315" || g == "315_all") group = RTL433_HOP_300_315_ALL;
+        else if (g == "345" || g == "345_all") group = RTL433_HOP_300_345_ALL;
+        else if (g == "300_ook") group = RTL433_HOP_300_BAND_OOK;
+        else if (g == "300_fsk") group = RTL433_HOP_300_BAND_FSK;
+        else if (g == "300_gfsk") group = RTL433_HOP_300_BAND_GFSK;
+        else if (g == "400" || g == "400_all" || g == "400band" || g == "weather" || g == "wx") group = RTL433_HOP_400_BAND_ALL;
+        else if (g == "433" || g == "433_all") group = RTL433_HOP_400_433_ALL;
+        else if (g == "434" || g == "434_all") group = RTL433_HOP_400_434_ALL;
+        else if (g == "400_ook") group = RTL433_HOP_400_BAND_OOK;
+        else if (g == "400_fsk") group = RTL433_HOP_400_BAND_FSK;
+        else if (g == "400_gfsk") group = RTL433_HOP_400_BAND_GFSK;
+        else if (g == "400_msk") group = RTL433_HOP_400_BAND_MSK;
+        else if (g == "800" || g == "800_all" || g == "800band") group = RTL433_HOP_800_BAND_ALL;
+        else if (g == "868" || g == "868_all") group = RTL433_HOP_800_868_ALL;
+        else if (g == "915" || g == "915_all") group = RTL433_HOP_800_915_ALL;
+        else if (g == "800_ook") group = RTL433_HOP_800_BAND_OOK;
+        else if (g == "800_fsk") group = RTL433_HOP_800_BAND_FSK;
+        else if (g == "800_gfsk") group = RTL433_HOP_800_BAND_GFSK;
+        else if (g == "800_msk" || g == "meters" || g == "wmbus" || g == "smartmeters") group = RTL433_HOP_800_BAND_MSK;
+        else if (g == "tpms") group = RTL433_HOP_300_BAND_ALL;
+        else if (g.toInt() >= 0 && g.toInt() < RTL433_CHANGING_PRESET_COUNT) group = g.toInt();
     }
 
     std::vector<int> hopList = rtl433_get_hop_presets(group);

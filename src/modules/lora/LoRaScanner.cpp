@@ -3,6 +3,7 @@
 #include "LoRaConfig.h"
 #include "LoRaRadio.h"
 #include "LoRaSniffer.h"
+#include "LoRaScannerWorkflowHelpers.h"
 #include "LoRaTracker.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
@@ -163,13 +164,10 @@ void runLoRaChannelDetector() {
     drainKeyboardInput();
 
     // Start Radio
-    LoRaConfigData scanCfg = loraConfig;
-    scanCfg.freqMHz = channels[0].freqMHz;
-    scanCfg.sf = channels[0].sf;
-    scanCfg.bwKHz = channels[0].bwKHz;
-    scanCfg.cr = channels[0].hasRadioParams ? channels[0].cr : scanCr;
-    scanCfg.syncWord = channels[0].syncWord;
-    scanCfg.preambleLen = channels[0].hasRadioParams ? channels[0].preambleLen : scanPreambleLen;
+    const LoRaConfigData preLockConfig = loraConfig;
+    const LoRaConfigData scanCfg = LoRaScannerWorkflowHelpers::configForChannel(
+        preLockConfig, channels[0], scanCr, scanPreambleLen
+    );
 
     if (!initLoRaRadio(scanCfg, true)) {
         displayError("LoRa Radio Init Failed", true);
@@ -414,38 +412,51 @@ void runLoRaChannelDetector() {
             // Lock onto selected channel and tune radio to it
             if (selectedIdx >= 0 && selectedIdx < (int)channels.size()) {
                 const auto selCh = channels[selectedIdx];
-                loraConfig.freqMHz = selCh.freqMHz;
-                loraConfig.sf = selCh.sf;
-                loraConfig.bwKHz = selCh.bwKHz;
-                loraConfig.cr = selCh.hasRadioParams ? selCh.cr : scanCr;
-                loraConfig.syncWord = selCh.syncWord;
-                loraConfig.preambleLen = selCh.hasRadioParams ? selCh.preambleLen : scanPreambleLen;
-                saveLoRaConfig();
+                const LoRaConfigData selectedConfig = LoRaScannerWorkflowHelpers::configForChannel(
+                    preLockConfig, selCh, scanCr, scanPreambleLen
+                );
+                const LoRaConfigData resumeConfig = LoRaScannerWorkflowHelpers::configForChannel(
+                    preLockConfig, channels[currentChIdx], scanCr, scanPreambleLen
+                );
                 stopLoRaRadio();
 
                 // Clear input and wait for key release before opening submenu
                 drainKeyboardInput();
 
+                bool applySelectedConfig = false;
                 std::vector<Option> actionOpts = {
-                    {"Start Sniffer on " + String(selCh.freqMHz, 3) + "MHz", runLoRaSniffer},
-                    {"Start Signal Tracker", []() { runLoRaTrackerMenu(); }},
-                    {"Apply Freq to Config", []() { displaySuccess("Config Updated"); }},
+                    {"Start Sniffer on " + String(selCh.freqMHz, 3) + "MHz", [selectedConfig]() {
+                        runLoRaSnifferWithConfig(selectedConfig);
+                    }},
+                    {"Start Signal Tracker", [selectedConfig]() {
+                        runLoRaTrackerMenuWithConfig(selectedConfig);
+                    }},
+                    {"Apply Freq to Config", [&applySelectedConfig]() { applySelectedConfig = true; }},
                     {"Resume Detector", []() {}}
                 };
-                int a = loopOptions(actionOpts, MENU_TYPE_SUBMENU, "Channel Selected");
-                if (a == 0 || a == 1) return;
+                const int actionIndex = loopOptions(actionOpts, MENU_TYPE_SUBMENU, "Channel Selected");
+                if (actionIndex == 0 || actionIndex == 1) {
+                    loraConfig = preLockConfig;
+                    return;
+                }
+
+                if (LoRaScannerWorkflowHelpers::shouldPersistSelectedChannel(actionIndex) && applySelectedConfig) {
+                    loraConfig = selectedConfig;
+                    saveLoRaConfig();
+                    displaySuccess("Config Updated");
+                } else {
+                    loraConfig = preLockConfig;
+                }
 
                 // Clear input before returning to detector
                 drainKeyboardInput();
 
-                scanCfg.freqMHz = channels[currentChIdx].freqMHz;
-                scanCfg.sf = channels[currentChIdx].sf;
-                scanCfg.bwKHz = channels[currentChIdx].bwKHz;
-                scanCfg.cr = channels[currentChIdx].hasRadioParams ? channels[currentChIdx].cr : scanCr;
-                scanCfg.syncWord = channels[currentChIdx].syncWord;
-                scanCfg.preambleLen = channels[currentChIdx].hasRadioParams ? channels[currentChIdx].preambleLen
-                                                                            : scanPreambleLen;
-                initLoRaRadio(scanCfg, true);
+                const bool resumed = initLoRaRadio(resumeConfig, true);
+                if (!LoRaScannerWorkflowHelpers::shouldContinueAfterRadioTransition(resumed)) {
+                    displayError("Detector Resume Failed", true);
+                    goto exit_detector;
+                }
+                lastHopTime = LoRaScannerWorkflowHelpers::restartDwellTimer(millis());
                 drawMainBorder(true);
                 drawFullUI();
             }
@@ -529,18 +540,19 @@ void runLoRaChannelDetector() {
         }
 
         // Dwell on current channel before hopping to next
-        if (!isPaused && channels.size() > 1 && (millis() - lastHopTime >= loraConfig.scanDwellMs)) {
+        if (!isPaused && channels.size() > 1 && (millis() - lastHopTime >= preLockConfig.scanDwellMs)) {
             lastHopTime = millis();
             currentChIdx = (currentChIdx + 1) % channels.size();
             auto &ch = channels[currentChIdx];
-            LoRaConfigData channelCfg = loraConfig;
-            channelCfg.freqMHz = ch.freqMHz;
-            channelCfg.sf = ch.sf;
-            channelCfg.bwKHz = ch.bwKHz;
-            channelCfg.cr = ch.hasRadioParams ? ch.cr : scanCr;
-            channelCfg.syncWord = ch.syncWord;
-            channelCfg.preambleLen = ch.hasRadioParams ? ch.preambleLen : scanPreambleLen;
-            configureLoRaRadioForReceive(channelCfg);
+            const LoRaConfigData channelCfg = LoRaScannerWorkflowHelpers::configForChannel(
+                preLockConfig, ch, scanCr, scanPreambleLen
+            );
+            const bool changed = configureLoRaRadioForReceive(channelCfg);
+            if (!LoRaScannerWorkflowHelpers::shouldContinueAfterRadioTransition(changed)) {
+                displayError("Detector Channel Change Failed", true);
+                stopLoRaRadio();
+                goto exit_detector;
+            }
             drawStatus();
         }
 

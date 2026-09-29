@@ -21,104 +21,104 @@ String rf_subghz_header(float frequencyMHz) {
            String(int(frequencyMHz * 1000000)) + "\n";
 }
 const float subghz_frequency_list[] = {
-    /* 300 - 348 MHz Frequency Range */
-    300.000f,
-    302.757f,
-    303.000f,
-    303.500f,
-    303.875f,
-    303.900f,
-    304.250f,
-    307.000f,
-    307.500f,
-    307.800f,
-    309.000f,
-    310.000f,
-    312.000f,
-    312.100f,
-    312.200f,
-    313.000f,
-    313.850f,
-    314.000f,
-    314.350f,
-    314.980f,
-    315.000f,
-    315.150f,
-    318.000f,
-    319.500f,
-    320.000f,
-    320.150f,
-    330.000f,
-    340.000f,
-    345.000f,
-    348.000f,
-    350.000f,
+    /* --- 300 - 348 MHz Range (Car Fobs, Garage Doors, Security) --- */
+    300.000f, // NATO Military / General Sub-GHz start
+    302.757f, // Proprietary remote controls / Gate openers
+    303.000f, // Older wireless security systems / Key fobs
+    303.500f, // Legacy automotive keyless entry
+    303.875f, // Proprietary US garage door controls
+    303.900f, // US Automotive / Garage door openers
+    304.250f, // Wireless remote switches
+    307.000f, // Medical telemetry / Proprietary short-range devices
+    307.500f, // Short-range radio controls
+    307.800f, // Wireless alarm systems
+    309.000f, // US Military / Federal tactical communication
+    310.000f, // Older US Linear/Multi-Code garage door openers
+    312.000f, // US Military land mobile / Wireless links
+    312.100f, // Fixed satellite / UHF tactical links
+    312.200f, // Fixed/Mobile radio links
+    313.000f, // Proprietary remote control applications
+    313.850f, // Automotive tire pressure monitoring (TPMS) / Fobs
+    314.000f, // European/Asian automotive remote keyless entry
+    314.350f, // Specialized car alarm fobs
+    314.980f, // Custom remote control / IoT device link
+    315.000f, // Standard North American / Asian Automotive Key Fobs & TPMS
+    315.150f, // US Garage door openers / Weather stations
+    318.000f, // Older remote keyless entry (RKE) systems
+    319.500f, // Interlogix / GE Wireless Home Security Sensors
+    320.000f, // US Military / Land mobile communications
+    320.150f, // Special short-range telemetry
+    330.000f, // ILS Glide Path (Aviation navigation - monitoring only)
+    340.000f, // US Military / Fixed tactical communication
+    345.000f, // Honeywell / Ademco Wireless Home Security Sensors
+    348.000f, // Legacy security links / Wireless automation
+    350.000f, // US Military UHF / Industrial telemetry
 
-    /* 387 - 464 MHz Frequency Range */
-    387.000f,
-    390.000f,
-    418.000f,
-    419.000f,
-    426.000f,
-    430.000f,
-    430.500f,
-    431.000f,
-    431.500f,
-    433.075f,
-    433.220f,
-    433.420f,
-    433.657f,
-    433.800f,
-    433.889f,
-    433.920f,
-    434.075f,
-    434.177f,
-    434.190f,
-    434.300f,
-    434.390f,
-    434.420f,
-    434.620f,
-    434.700f,
-    434.775f,
-    438.900f,
-    440.175f,
-    446.000f,
-    446.100f,
-    462.750f,
-    464.000f,
-    467.750f,
+    /* --- 387 - 464 MHz Range (Amateur Radio, LPD433, PMR446, FRS/GMRS) --- */
+    387.000f, // Space research / UHF telemetry link
+    390.000f, // US Military land mobile / TETRA emergency (EU)
+    418.000f, // Legacy UK/European short-range wireless telemetry
+    419.000f, // Land mobile radio / Telecommand
+    426.000f, // Japanese Low Power Radio (Telemetry/Alarms)
+    430.000f, // Amateur Radio (70cm Band) - Start
+    430.500f, // Amateur Radio 70cm digital voice / Repeaters
+    431.000f, // Amateur Radio 70cm links
+    431.500f, // Amateur Radio 70cm repeaters
+    433.075f, // LPD433 Band Channel 01 (Low Power Device EU/Global)
+    433.220f, // LPD433 Band Channel 07 (Weather stations / Thermometers)
+    433.420f, // LPD433 Band Channel 15 (Wireless doorbells / Plugs)
+    433.657f, // LPD433 Band Channel 24 (Smart meters / Car fobs)
+    433.800f, // LPD433 Band Channel 30 (TPMS / Wireless keys)
+    433.889f, // LPD433 Band Channel 34 (Energy monitors)
+    433.920f, // Main Global ISM Frequency (Car Fobs, Weather Stations, Garage Doors)
+    434.075f, // LPD433 Band Channel 41 (Smart home sensors)
+    434.177f, // LPD433 Band Channel 45 (Proprietary RF links)
+    434.190f, // LPD433 Band Channel 46 (Short range data telemetry)
+    434.300f, // LPD433 Band Channel 50 (Car alarms / Remote controls)
+    434.390f, // LPD433 Band Channel 54 (Commercial telemetry)
+    434.420f, // LPD433 Band Channel 55 (Wireless automation)
+    434.620f, // LPD433 Band Channel 63 (Industrial remote links)
+    434.700f, // LPD433 Band Channel 66 (Short-range devices)
+    434.775f, // LPD433 Band Channel 69 (LPD Upper limit)
+    438.900f, // Amateur Radio 70cm repeaters / Links
+    440.175f, // Amateur Radio / Land mobile links
+    446.000f, // PMR446 Analog walkie-talkies (EU License-Free) - Channel 1
+    446.100f, // PMR446 Digital / dPMR walkie-talkies (EU)
+    462.750f, // FRS / GMRS Main Channel 22 (US License-Free Walkie-Talkies)
+    464.000f, // Business Band Radio (US Industrial/Business Land Mobile)
+    467.750f, // FRS / GMRS Interstitial Channel 7 (US Walkie-Talkies)
 
-    /* 779 - 928 MHz Frequency Range */
-    779.000f,
-    787.000f,
-    868.000f,
-    868.100f,
-    868.300f,
-    868.350f,
-    868.400f,
-    868.460f,
-    868.500f,
-    868.800f,
-    868.850f,
-    868.950f,
-    869.525f,
-    869.850f,
-    902.000f,
-    903.000f,
-    904.000f,
-    906.400f,
-    908.400f,
-    910.000f,
-    912.000f,
-    915.000f,
-    916.000f,
-    918.000f,
-    920.000f,
-    921.400f,
-    922.000f,
-    923.000f,
-    925.000f,
-    928.000f
+    /* --- 779 - 928 MHz Range (Sub-GHz IoT, SRD868, Sub-GHz ISM US) --- */
+    779.000f, // Chinese SRD / IoT Band - Start
+    787.000f, // Chinese SRD / Smart metering allocation
+    868.000f, // EU SRD Band (Short Range Devices) - Start
+    868.100f, // LoRaWAN EU868 / Sigfox default channel
+    868.300f, // LoRaWAN EU868 / EnOcean wireless switches
+    868.350f, // European wireless alarm systems / Smart home
+    868.400f, // Z-Wave Europe home automation
+    868.460f, // European smart meters / Heat allocators
+    868.500f, // European short-range data links
+    868.800f, // EU SRD high duty cycle devices
+    868.850f, // LoRaWAN EU868 additional channel
+    868.950f, // Wireless M-Bus (Smart metering EU)
+    869.525f, // EU SRD 500mW high-power alarms / LoRaWAN
+    869.850f, // European wireless security / Key fobs
+    902.000f, // US ISM Band (902-928 MHz) - Start boundary
+    903.000f, // LoRaWAN US915 / Smart metering uplink
+    904.000f, // LoRaWAN US915 channel
+    906.400f, // Proprietary US smart home devices
+    908.400f, // Z-Wave North America home automation
+    910.000f, // US RFID / Industrial asset tracking
+    912.000f, // Wireless security / Video senders (US)
+    915.000f, // Center of North American ISM Band (LoRa, Zigbee, NeoPixel)
+    916.000f, // US Smart meters / Automated utility reading
+    918.000f, // Australian / North American IoT mesh networks
+    920.000f, // Japanese / Asian Sub-GHz IoT band allocation
+    921.400f, // Z-Wave Australia/New Zealand home automation
+    922.000f, // Taiwanese / Korean Sub-GHz allocation
+    923.000f, // LoRaWAN AS923 (Asia-Pacific / Japan / international)
+    925.000f, // Asian ISM / Smart grid applications
+    928.000f  // US ISM Band / Australian IoT - End boundary
 };
 
 void cc1101WaitForIdle() {

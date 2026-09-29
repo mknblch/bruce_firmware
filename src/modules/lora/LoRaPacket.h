@@ -13,6 +13,7 @@ enum class LoRaProtocol : uint8_t {
 };
 
 struct LoRaPacket {
+    uint32_t captureId = 0;
     uint32_t timestampMs = 0;
     float freqMHz = 0;
     float rssi = 0;

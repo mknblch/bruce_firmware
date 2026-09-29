@@ -1,5 +1,6 @@
 #if !defined(LITE_VERSION)
 #include "LoRaPacket.h"
+#include "LoRaPacketParseHelpers.h"
 
 static const char *getMeshtasticPortName(uint32_t portNum) {
     switch (portNum) {
@@ -68,12 +69,12 @@ String formatHexDump(const uint8_t *data, size_t len, size_t maxBytes) {
 
 static bool isPrintableAsciiString(const uint8_t *data, size_t len) {
     if (len == 0) return false;
-    size_t printable = 0;
     for (size_t i = 0; i < len; i++) {
-        if (data[i] >= 32 && data[i] <= 126) printable++;
-        else if (data[i] == '\r' || data[i] == '\n' || data[i] == '\t') printable++;
+        if ((data[i] < 32 || data[i] > 126) && data[i] != '\r' && data[i] != '\n' && data[i] != '\t') {
+            return false;
+        }
     }
-    return ((float)printable / (float)len) >= 0.85f;
+    return true;
 }
 
 static String extractAscii(const uint8_t *data, size_t len) {
@@ -90,7 +91,7 @@ static String extractAscii(const uint8_t *data, size_t len) {
 
 static bool parseMeshtastic(LoRaPacket &pkt) {
     const size_t len = pkt.raw.size();
-    if (len < 16) return false;
+    if (pkt.syncWord != 0x2B || len < 16) return false;
 
     // Meshtastic Header: 16 bytes
     // [0..3]: to (uint32_t LE)
@@ -137,50 +138,13 @@ static bool parseMeshtastic(LoRaPacket &pkt) {
     const uint8_t *payload = p + 16;
 
     if (payloadLen > 0) {
-        size_t idx = 0;
-        uint32_t portNum = 0;
-        bool foundPort = false;
-
-        while (idx < payloadLen) {
-            uint8_t tag = payload[idx++];
-            uint8_t wireType = tag & 0x07;
-            uint32_t fieldNum = tag >> 3;
-
-            if (fieldNum == 1 && wireType == 0) { // portnum (varint)
-                uint32_t val = 0;
-                int shift = 0;
-                while (idx < payloadLen) {
-                    uint8_t b = payload[idx++];
-                    val |= (b & 0x7F) << shift;
-                    if (!(b & 0x80)) break;
-                    shift += 7;
-                }
-                portNum = val;
-                foundPort = true;
-                appStr = getMeshtasticPortName(portNum);
-            } else if (fieldNum == 2 && wireType == 2) { // payload (bytes)
-                uint32_t strLen = 0;
-                int shift = 0;
-                while (idx < payloadLen) {
-                    uint8_t b = payload[idx++];
-                    strLen |= (b & 0x7F) << shift;
-                    if (!(b & 0x80)) break;
-                    shift += 7;
-                }
-                if (idx + strLen <= payloadLen) {
-                    if (portNum == 1 || portNum == 0) { // TEXT_MESSAGE_APP
-                        textMsg = extractAscii(payload + idx, strLen);
-                    }
-                    idx += strLen;
-                }
-            } else {
-                break;
+        LoRaPacketParseHelpers::MeshtasticDataFields fields;
+        if (LoRaPacketParseHelpers::parseMeshtasticDataFields(payload, payloadLen, fields) && fields.hasPort) {
+            appStr = getMeshtasticPortName(fields.port);
+            if (fields.port == 1 && fields.hasPayload &&
+                isPrintableAsciiString(payload + fields.payloadOffset, fields.payloadLength)) {
+                textMsg = extractAscii(payload + fields.payloadOffset, fields.payloadLength);
             }
-        }
-
-        if (!foundPort && isPrintableAsciiString(payload, payloadLen)) {
-            textMsg = extractAscii(payload, payloadLen);
-            appStr = "TEXT_RAW";
         }
     }
 
@@ -289,19 +253,23 @@ static bool parseLoRaWAN(LoRaPacket &pkt) {
 
 static bool parseBruceChat(LoRaPacket &pkt) {
     const size_t len = pkt.raw.size();
-    if (len < 3) return false;
+    if (len < 3 || !isPrintableAsciiString(pkt.raw.data(), len)) return false;
 
     String ascii = extractAscii(pkt.raw.data(), len);
     int colonPos = ascii.indexOf(':');
 
     if (colonPos > 0 && colonPos < 24) {
+        String sender = ascii.substring(0, colonPos);
+        String message = ascii.substring(colonPos + 1);
+        sender.trim();
+        message.trim();
+        if (sender.isEmpty() || message.isEmpty()) return false;
+
         pkt.protocol = LoRaProtocol::BRUCE_CHAT;
         pkt.protocolName = "Bruce Chat";
-        pkt.sender = ascii.substring(0, colonPos);
-        pkt.sender.trim();
+        pkt.sender = sender;
         pkt.destination = "Broadcast";
-        pkt.payloadAscii = ascii.substring(colonPos + 1);
-        pkt.payloadAscii.trim();
+        pkt.payloadAscii = message;
         pkt.appName = "CHAT";
 
         pkt.summary = "[Chat] " + pkt.sender + ": " + pkt.payloadAscii;
@@ -311,36 +279,41 @@ static bool parseBruceChat(LoRaPacket &pkt) {
         return true;
     }
 
-    if (isPrintableAsciiString(pkt.raw.data(), len)) {
-        pkt.protocol = LoRaProtocol::BRUCE_CHAT;
-        pkt.protocolName = "ASCII Text";
-        pkt.sender = "Node";
-        pkt.destination = "Broadcast";
-        pkt.payloadAscii = ascii;
-        pkt.appName = "TEXT";
+    pkt.protocol = LoRaProtocol::BRUCE_CHAT;
+    pkt.protocolName = "ASCII Text";
+    pkt.sender = "Node";
+    pkt.destination = "Broadcast";
+    pkt.payloadAscii = ascii;
+    pkt.appName = "TEXT";
 
-        pkt.summary = "[ASCII] " + ascii.substring(0, 24);
-        pkt.details = "Proto: Plain ASCII\n";
-        pkt.details += "Data:  " + ascii + "\n";
-        return true;
-    }
-
-    return false;
+    pkt.summary = "[ASCII] " + ascii.substring(0, 24);
+    pkt.details = "Proto: Plain ASCII\n";
+    pkt.details += "Data:  " + ascii + "\n";
+    return true;
 }
 
 void parseLoRaPacket(LoRaPacket &pkt) {
+    pkt.protocol = LoRaProtocol::RAW;
+    pkt.protocolName = "RAW";
+    pkt.sender = "";
+    pkt.destination = "";
+    pkt.summary = "";
+    pkt.details = "";
+    pkt.payloadAscii = "";
+    pkt.appName = "";
+    pkt.packetId = 0;
+    pkt.frameCount = 0;
+    pkt.fPort = 0;
+    pkt.hopLimit = -1;
+    pkt.hopStart = -1;
+    pkt.wantAck = false;
+    pkt.viaMqtt = false;
+    pkt.channelHash = 0;
+    pkt.mType = 0;
     if (pkt.raw.empty()) return;
 
-    // Check Sync Word hints first
-    if (pkt.syncWord == 0x2B) { // Meshtastic sync word
-        if (parseMeshtastic(pkt)) return;
-    } else if (pkt.syncWord == 0x34) { // LoRaWAN sync word
-        if (parseLoRaWAN(pkt)) return;
-    }
-
-    // Try all parsers heuristically
-    if (parseMeshtastic(pkt)) return;
-    if (parseLoRaWAN(pkt)) return;
+    if (pkt.syncWord == 0x2B && parseMeshtastic(pkt)) return;
+    if (pkt.syncWord == 0x34 && parseLoRaWAN(pkt)) return;
     if (parseBruceChat(pkt)) return;
 
     // Fallback: Generic RAW packet

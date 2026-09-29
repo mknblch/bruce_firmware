@@ -14,47 +14,123 @@
 // on CC1101 (and single-pin receivers) over OOK and 2-FSK modulations.
 // ===========================================================================
 
+enum Rtl433Band {
+    RTL433_BAND_300 = 0, // 300 - 348 MHz
+    RTL433_BAND_400,     // 387 - 464 MHz
+    RTL433_BAND_800,     // 779 - 928 MHz
+    RTL433_BAND_COUNT
+};
+
 enum Rtl433Preset {
-    RTL433_PRESET_OOK_433 = 0,    // 433.92 MHz OOK (Nexus, Acurite, Oregon, Kerui, Proove, DSC, Schrader)
-    RTL433_PRESET_FSK_433_17K,    // 433.92 MHz 2-FSK 17.24kbps (Fine Offset WH65/WH24/WS1000, LaCrosse)
-    RTL433_PRESET_FSK_433_19K,    // 433.92 MHz 2-FSK 19.2kbps (Toyota TPMS, FSK TPMS)
-    RTL433_PRESET_GFSK_433_17K,   // 433.92 MHz GFSK 17.24kbps (Bresser 5-in-1 / Weather GFSK)
-    RTL433_PRESET_MSK_433_100K,   // 433.92 MHz MSK 100kbps (433M MSK / Telemetry)
-    RTL433_PRESET_OOK_868,        // 868.35 MHz OOK (EU Weather OOK)
-    RTL433_PRESET_FSK_868_17K,    // 868.35 MHz 2-FSK 17.24kbps (EU Fine Offset, LaCrosse)
-    RTL433_PRESET_GFSK_868_17K,   // 868.35 MHz GFSK 17.24kbps (EU Bresser 5/6/7-in-1 Weather)
-    RTL433_PRESET_MSK_868_T,      // 868.95 MHz MSK 100kbps (Wireless M-Bus Mode T Smart Meters)
-    RTL433_PRESET_MSK_868_S,      // 868.30 MHz MSK 32.768kbps (Wireless M-Bus Mode S Smart Meters)
-    RTL433_PRESET_OOK_345,        // 345.00 MHz OOK (Honeywell / Ademco 5800)
-    RTL433_PRESET_OOK_315,        // 315.00 MHz OOK (US TPMS, Security)
-    RTL433_PRESET_FSK_315_19K,    // 315.00 MHz 2-FSK 19.2kbps (US Toyota TPMS)
-    RTL433_PRESET_GFSK_315_19K,   // 315.00 MHz GFSK 19.2kbps (US TPMS GFSK)
-    RTL433_PRESET_COUNT
+    // 300 Band (300 - 348 MHz)
+    RTL433_PRESET_300_OOK_315 = 0,    // 315.00 MHz OOK (US TPMS, Security, Remotes)
+    RTL433_PRESET_300_FSK_315_19K,    // 315.00 MHz 2-FSK 19.2kbps (US Toyota TPMS)
+    RTL433_PRESET_300_GFSK_315_19K,   // 315.00 MHz GFSK 19.2kbps (US TPMS GFSK)
+    RTL433_PRESET_300_FSK_315_17K,    // 315.00 MHz 2-FSK 17.24kbps (Fine Offset 315M FSK)
+    RTL433_PRESET_300_OOK_345,        // 345.00 MHz OOK (Honeywell / Ademco 5800 / 2GIG)
+    RTL433_PRESET_300_FSK_345_17K,    // 345.00 MHz 2-FSK 17.24kbps (345M FSK Sensors)
+    RTL433_PRESET_300_OOK_310,        // 310.00 MHz OOK (Linear / Multi-Code)
+    RTL433_PRESET_300_OOK_318,        // 318.00 MHz OOK (MegaCode Remotes)
+    RTL433_PRESET_300_OOK_303,        // 303.875 MHz OOK (Garage / Gate Remotes)
+    RTL433_PRESET_300_OOK_300,        // 300.00 MHz OOK (300M Band Base)
+
+    // 400 Band (387 - 464 MHz)
+    RTL433_PRESET_400_OOK_433,        // 433.92 MHz OOK (Nexus, Acurite, Oregon, Kerui, Proove, DSC, Schrader)
+    RTL433_PRESET_400_FSK_433_17K,    // 433.92 MHz 2-FSK 17.24kbps (Fine Offset WH65/WH24/WS1000, LaCrosse)
+    RTL433_PRESET_400_FSK_433_19K,    // 433.92 MHz 2-FSK 19.2kbps (Toyota TPMS, FSK TPMS)
+    RTL433_PRESET_400_GFSK_433_17K,   // 433.92 MHz GFSK 17.24kbps (Bresser 5-in-1 / Weather GFSK)
+    RTL433_PRESET_400_MSK_433_100K,   // 433.92 MHz MSK 100kbps (433M MSK / Telemetry)
+    RTL433_PRESET_400_OOK_434,        // 434.42 MHz OOK (434M Weather OOK)
+    RTL433_PRESET_400_FSK_434_17K,    // 434.42 MHz 2-FSK 17.24kbps (Fine Offset secondary FSK)
+    RTL433_PRESET_400_GFSK_434_17K,   // 434.42 MHz GFSK 17.24kbps (Bresser secondary GFSK)
+    RTL433_PRESET_400_OOK_418,        // 418.00 MHz OOK (UK / US 418M Remotes)
+    RTL433_PRESET_400_OOK_390,        // 390.00 MHz OOK (Chamberlain / LiftMaster)
+
+    // 800 Band (779 - 928 MHz)
+    RTL433_PRESET_800_OOK_868,        // 868.35 MHz OOK (EU Weather & Security OOK)
+    RTL433_PRESET_800_FSK_868_17K,    // 868.35 MHz 2-FSK 17.24kbps (EU Fine Offset, LaCrosse)
+    RTL433_PRESET_800_GFSK_868_17K,   // 868.35 MHz GFSK 17.24kbps (EU Bresser 5/6/7-in-1 Weather)
+    RTL433_PRESET_800_MSK_868_T,      // 868.95 MHz MSK 100kbps (Wireless M-Bus Mode T Smart Meters)
+    RTL433_PRESET_800_MSK_868_S,      // 868.30 MHz MSK 32.768kbps (Wireless M-Bus Mode S Smart Meters)
+    RTL433_PRESET_800_OOK_915,        // 915.00 MHz OOK (US 915M ISM / Sensors OOK)
+    RTL433_PRESET_800_FSK_915_17K,    // 915.00 MHz 2-FSK 17.24kbps (US 915M Weather / Sensors FSK)
+    RTL433_PRESET_800_GFSK_915_17K,   // 915.00 MHz GFSK 17.24kbps (US 915M Weather / Sensors GFSK)
+
+    RTL433_PRESET_COUNT,
+
+    // Backward compatibility aliases
+    RTL433_PRESET_OOK_433 = RTL433_PRESET_400_OOK_433,
+    RTL433_PRESET_FSK_433_17K = RTL433_PRESET_400_FSK_433_17K,
+    RTL433_PRESET_FSK_433_19K = RTL433_PRESET_400_FSK_433_19K,
+    RTL433_PRESET_GFSK_433_17K = RTL433_PRESET_400_GFSK_433_17K,
+    RTL433_PRESET_MSK_433_100K = RTL433_PRESET_400_MSK_433_100K,
+    RTL433_PRESET_OOK_868 = RTL433_PRESET_800_OOK_868,
+    RTL433_PRESET_FSK_868_17K = RTL433_PRESET_800_FSK_868_17K,
+    RTL433_PRESET_GFSK_868_17K = RTL433_PRESET_800_GFSK_868_17K,
+    RTL433_PRESET_MSK_868_T = RTL433_PRESET_800_MSK_868_T,
+    RTL433_PRESET_MSK_868_S = RTL433_PRESET_800_MSK_868_S,
+    RTL433_PRESET_OOK_345 = RTL433_PRESET_300_OOK_345,
+    RTL433_PRESET_OOK_315 = RTL433_PRESET_300_OOK_315,
+    RTL433_PRESET_FSK_315_19K = RTL433_PRESET_300_FSK_315_19K,
+    RTL433_PRESET_GFSK_315_19K = RTL433_PRESET_300_GFSK_315_19K
 };
 
 enum Rtl433ChangingPreset {
-    RTL433_CHANGING_433_ALL = 0,       // 433.92 MHz: OOK + 2-FSK + GFSK + MSK
-    RTL433_CHANGING_868_ALL,           // 868 MHz: OOK + 2-FSK + GFSK + MSK Mode T/S
-    RTL433_CHANGING_ALL_PRESETS,       // All Presets across all bands and modulations
-    RTL433_CHANGING_WEATHER,           // Weather: 433 OOK, 433 FSK, 433 GFSK, 868 OOK, 868 FSK, 868 GFSK
-    RTL433_CHANGING_TPMS,              // TPMS: 433 OOK, 433 FSK, 315 OOK, 315 FSK, 315 GFSK
-    RTL433_CHANGING_METERS,            // Smart Meters (wM-Bus): 868 MSK Mode T, 868 MSK Mode S, 433 MSK
-    RTL433_CHANGING_315_ALL,           // 315.00 MHz: OOK + 2-FSK + GFSK
-    RTL433_CHANGING_PRESET_COUNT
+    // 300 Band Hopping Profiles
+    RTL433_HOP_300_315_ALL = 0,    // 1 Freq + All Modes (315.00 MHz)
+    RTL433_HOP_300_345_ALL,        // 1 Freq + All Modes (345.00 MHz)
+    RTL433_HOP_300_BAND_OOK,       // Freq Range + 1 Mode (300 Band OOK)
+    RTL433_HOP_300_BAND_FSK,       // Freq Range + 1 Mode (300 Band 2-FSK)
+    RTL433_HOP_300_BAND_GFSK,      // Freq Range + 1 Mode (300 Band GFSK)
+    RTL433_HOP_300_BAND_ALL,       // Freq Range + All Modes (300 Band All)
+
+    // 400 Band Hopping Profiles
+    RTL433_HOP_400_433_ALL,        // 1 Freq + All Modes (433.92 MHz)
+    RTL433_HOP_400_434_ALL,        // 1 Freq + All Modes (434.42 MHz)
+    RTL433_HOP_400_BAND_OOK,       // Freq Range + 1 Mode (400 Band OOK)
+    RTL433_HOP_400_BAND_FSK,       // Freq Range + 1 Mode (400 Band 2-FSK)
+    RTL433_HOP_400_BAND_GFSK,      // Freq Range + 1 Mode (400 Band GFSK)
+    RTL433_HOP_400_BAND_MSK,       // Freq Range + 1 Mode (400 Band MSK)
+    RTL433_HOP_400_BAND_ALL,       // Freq Range + All Modes (400 Band All)
+
+    // 800 Band Hopping Profiles
+    RTL433_HOP_800_868_ALL,        // 1 Freq + All Modes (868.35 MHz)
+    RTL433_HOP_800_915_ALL,        // 1 Freq + All Modes (915.00 MHz)
+    RTL433_HOP_800_BAND_OOK,       // Freq Range + 1 Mode (800 Band OOK)
+    RTL433_HOP_800_BAND_FSK,       // Freq Range + 1 Mode (800 Band 2-FSK)
+    RTL433_HOP_800_BAND_GFSK,      // Freq Range + 1 Mode (800 Band GFSK)
+    RTL433_HOP_800_BAND_MSK,       // Freq Range + 1 Mode (800 Band MSK)
+    RTL433_HOP_800_BAND_ALL,       // Freq Range + All Modes (800 Band All)
+
+    // All Bands Hopping Profile
+    RTL433_HOP_ALL_BANDS_ALL,      // All Bands (All Ranges & Modes)
+    RTL433_HOP_SINGLE_FREQ_ALL = -1, // One selected frequency, cycling through modes
+
+    RTL433_CHANGING_PRESET_COUNT = RTL433_HOP_ALL_BANDS_ALL + 1,
+
+    // Backward compatibility aliases
+    RTL433_CHANGING_433_ALL = RTL433_HOP_400_433_ALL,
+    RTL433_CHANGING_868_ALL = RTL433_HOP_800_868_ALL,
+    RTL433_CHANGING_315_ALL = RTL433_HOP_300_315_ALL,
+    RTL433_CHANGING_ALL_PRESETS = RTL433_HOP_ALL_BANDS_ALL,
+    RTL433_CHANGING_WEATHER = RTL433_HOP_400_BAND_ALL,
+    RTL433_CHANGING_TPMS = RTL433_HOP_300_BAND_ALL,
+    RTL433_CHANGING_METERS = RTL433_HOP_800_BAND_MSK,
+    RTL433_HOP_433_ALL = RTL433_HOP_400_433_ALL,
+    RTL433_HOP_868_ALL = RTL433_HOP_800_868_ALL,
+    RTL433_HOP_315_ALL = RTL433_HOP_300_315_ALL,
+    RTL433_HOP_ALL_PRESETS = RTL433_HOP_ALL_BANDS_ALL,
+    RTL433_HOP_WEATHER = RTL433_HOP_400_BAND_ALL,
+    RTL433_HOP_TPMS = RTL433_HOP_300_BAND_ALL,
+    RTL433_HOP_METERS = RTL433_HOP_800_BAND_MSK,
+    RTL433_HOP_GROUP_COUNT = RTL433_CHANGING_PRESET_COUNT
 };
 
 typedef Rtl433ChangingPreset Rtl433HopGroup;
-#define RTL433_HOP_433_ALL RTL433_CHANGING_433_ALL
-#define RTL433_HOP_868_ALL RTL433_CHANGING_868_ALL
-#define RTL433_HOP_ALL_PRESETS RTL433_CHANGING_ALL_PRESETS
-#define RTL433_HOP_WEATHER RTL433_CHANGING_WEATHER
-#define RTL433_HOP_TPMS RTL433_CHANGING_TPMS
-#define RTL433_HOP_METERS RTL433_CHANGING_METERS
-#define RTL433_HOP_315_ALL RTL433_CHANGING_315_ALL
-#define RTL433_HOP_GROUP_COUNT RTL433_CHANGING_PRESET_COUNT
 
 struct Rtl433PresetDef {
     const char *name;
+    Rtl433Band band;
     float default_freq;
     int modulation;     // 0 = 2-FSK, 1 = GFSK, 2 = ASK/OOK, 4 = MSK
     float deviation;    // kHz
@@ -65,8 +141,10 @@ struct Rtl433PresetDef {
 
 const Rtl433PresetDef *rtl433_get_preset_def(int preset);
 const char *rtl433_get_preset_name(int preset);
+std::vector<int> rtl433_get_band_presets(Rtl433Band band);
 std::vector<int> rtl433_get_changing_presets(int changingPreset);
 const char *rtl433_get_changing_preset_name(int changingPreset);
+const char *rtl433_get_band_name(Rtl433Band band);
 inline std::vector<int> rtl433_get_hop_presets(int hopGroup) { return rtl433_get_changing_presets(hopGroup); }
 inline const char *rtl433_get_hop_group_name(int hopGroup) { return rtl433_get_changing_preset_name(hopGroup); }
 
@@ -360,6 +438,8 @@ public:
     bool isChangingPreset = false;
     int changingPreset = RTL433_CHANGING_433_ALL;
     int hopGroup = RTL433_CHANGING_433_ALL;
+    Rtl433Band hopFrequencyBand = RTL433_BAND_400;
+    float hopFrequency = 433.92f;
     uint32_t hopTimeoutMs = 10000;
     bool hopStayOnSignal = true;
     bool sdLoggingEnabled = false;

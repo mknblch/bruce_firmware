@@ -4,6 +4,7 @@
 #include "LoRaPacket.h"
 #include "LoRaPcap.h"
 #include "LoRaRadio.h"
+#include "LoRaSnifferStorage.h"
 #include "LoRaTracker.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
@@ -13,31 +14,68 @@
 std::vector<LoRaPacket> gLoRaCapturedPackets;
 std::vector<LoRaNodeRecord> gLoRaNodes;
 static const size_t MAX_GLOBAL_PACKETS = 100;
-static const size_t MAX_NODE_PACKETS = 8;
+static uint32_t nextCaptureId = 1;
+static const LoRaConfigData *temporarySnifferConfig = nullptr;
+
+static uint32_t allocateCaptureId() {
+    while (true) {
+        const uint32_t candidate = nextCaptureId++;
+        if (nextCaptureId == 0) nextCaptureId = 1;
+        if (candidate != 0 && !LoRaSnifferStorage::findCaptureById(gLoRaCapturedPackets, candidate)) {
+            return candidate;
+        }
+    }
+}
+
+static const LoRaPacket *findCapturedPacketById(uint32_t captureId) {
+    return LoRaSnifferStorage::findCaptureById(gLoRaCapturedPackets, captureId);
+}
+
+static std::vector<LoRaPacket> getNodePacketHistory(const LoRaNodeRecord &node) {
+    std::vector<LoRaPacket> packets;
+    packets.reserve(node.packets.size());
+    for (uint32_t captureId : node.packets) {
+        const LoRaPacket *packet = findCapturedPacketById(captureId);
+        if (packet) packets.push_back(*packet);
+    }
+    return packets;
+}
 
 void addPacketToSniffer(const LoRaPacket &pkt) {
     // Determine address/node key
     String address = "";
-    if (pkt.sender.length() > 0) {
+    if (pkt.protocol == LoRaProtocol::MESHTASTIC && pkt.sender.length() > 0) {
         address = pkt.sender;
-    } else if (pkt.protocolName == "Meshtastic" && pkt.packetId > 0) {
+    } else if (pkt.protocol == LoRaProtocol::MESHTASTIC && pkt.packetId > 0) {
         char buf[20];
         snprintf(buf, sizeof(buf), "!%08X", (unsigned int)pkt.packetId);
         address = String(buf);
-    } else if (pkt.protocolName == "LoRaWAN" && pkt.destination.length() > 0) {
+    } else if (pkt.protocol == LoRaProtocol::LORAWAN && pkt.sender.length() > 0) {
+        address = pkt.sender;
+    } else if (pkt.protocol == LoRaProtocol::LORAWAN && pkt.destination.length() > 0) {
         address = pkt.destination;
-    } else if (pkt.protocolName == "Bruce" && pkt.sender.length() > 0) {
+    } else if (pkt.protocol == LoRaProtocol::BRUCE_CHAT && pkt.sender.length() > 0) {
+        address = pkt.sender;
+    } else if (pkt.sender.length() > 0) {
         address = pkt.sender;
     } else {
         address = "RAW_" + String(pkt.freqMHz, 2) + "M";
     }
 
     String displayName = address;
-    if (pkt.protocolName == "Meshtastic" && pkt.payloadAscii.length() > 0) {
+    if (pkt.protocol == LoRaProtocol::MESHTASTIC && pkt.payloadAscii.length() > 0) {
         displayName = address + " (" + pkt.appName + ")";
     }
 
+    LoRaPacket capturedPacket = pkt;
+    capturedPacket.captureId = allocateCaptureId();
+    if (gLoRaCapturedPackets.size() >= MAX_GLOBAL_PACKETS) {
+        gLoRaCapturedPackets.erase(gLoRaCapturedPackets.begin());
+    }
+    gLoRaCapturedPackets.push_back(capturedPacket);
+
     bool found = false;
+    const uint32_t nowMs = millis();
     for (size_t i = 0; i < gLoRaNodes.size(); i++) {
         if (gLoRaNodes[i].address == address) {
             auto &node = gLoRaNodes[i];
@@ -45,22 +83,24 @@ void addPacketToSniffer(const LoRaPacket &pkt) {
             node.lastRssi = pkt.rssi;
             if (pkt.rssi > node.peakRssi) node.peakRssi = pkt.rssi;
             node.lastSnr = pkt.snr;
-            node.lastSeenMs = millis();
+            node.lastSeenMs = nowMs;
             node.protocol = pkt.protocolName;
             if (displayName.length() > node.displayName.length()) {
                 node.displayName = displayName;
             }
 
-            if (node.packets.size() >= MAX_NODE_PACKETS) {
-                node.packets.erase(node.packets.begin());
-            }
-            node.packets.push_back(pkt);
+            LoRaSnifferStorage::appendRecentCaptureId(
+                node.packets, capturedPacket.captureId, LoRaSnifferStorage::MAX_NODE_PACKET_IDS
+            );
             found = true;
             break;
         }
     }
 
     if (!found) {
+        LoRaSnifferStorage::evictOldestIfAtCapacity(
+            gLoRaNodes, LoRaSnifferStorage::MAX_NODE_RECORDS, nowMs
+        );
         LoRaNodeRecord newNode;
         newNode.address = address;
         newNode.displayName = displayName;
@@ -69,15 +109,12 @@ void addPacketToSniffer(const LoRaPacket &pkt) {
         newNode.peakRssi = pkt.rssi;
         newNode.lastSnr = pkt.snr;
         newNode.packetCount = 1;
-        newNode.lastSeenMs = millis();
-        newNode.packets.push_back(pkt);
+        newNode.lastSeenMs = nowMs;
+        LoRaSnifferStorage::appendRecentCaptureId(
+            newNode.packets, capturedPacket.captureId, LoRaSnifferStorage::MAX_NODE_PACKET_IDS
+        );
         gLoRaNodes.push_back(newNode);
     }
-
-    if (gLoRaCapturedPackets.size() >= MAX_GLOBAL_PACKETS) {
-        gLoRaCapturedPackets.erase(gLoRaCapturedPackets.begin());
-    }
-    gLoRaCapturedPackets.push_back(pkt);
 }
 
 void showLoRaPacketInspector(const LoRaPacket &pkt) {
@@ -242,6 +279,7 @@ void showLoRaPacketInspector(const LoRaPacket &pkt) {
 }
 
 void showLoRaNodeInspector(LoRaNodeRecord &node) {
+    const std::vector<LoRaPacket> nodePackets = getNodePacketHistory(node);
     int selectedPktIdx = 0;
     int scrollOffset = 0;
     bool loop = true;
@@ -277,7 +315,7 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
                 encSteps--;
             }
             while (encSteps < 0) {
-                if (selectedPktIdx + 1 < (int)node.packets.size()) {
+                if (selectedPktIdx + 1 < (int)nodePackets.size()) {
                     selectedPktIdx++;
                     needsRedraw = true;
                 }
@@ -320,8 +358,12 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
                     needsRedraw = true;
                 } else if (lowerKey == 'e') {
                     String path = "";
-                    if (exportLoRaPacketsToPcap(node.packets, path)) {
+                    if (exportLoRaPacketsToPcap(nodePackets, path)) {
                         displaySuccess("PCAP: " + path);
+                        drawMainBorder(true);
+                        needsRedraw = true;
+                    } else {
+                        displayError("PCAP export failed or was truncated", true);
                         drawMainBorder(true);
                         needsRedraw = true;
                     }
@@ -330,16 +372,16 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
         }
         if (!loop || esc) break;
 
-        if (up && !node.packets.empty()) {
+        if (up && !nodePackets.empty()) {
             if (selectedPktIdx > 0) {
                 selectedPktIdx--;
             } else {
-                selectedPktIdx = (int)node.packets.size() - 1;
+                selectedPktIdx = (int)nodePackets.size() - 1;
             }
             needsRedraw = true;
         }
-        if (down && !node.packets.empty()) {
-            if (selectedPktIdx + 1 < (int)node.packets.size()) {
+        if (down && !nodePackets.empty()) {
+            if (selectedPktIdx + 1 < (int)nodePackets.size()) {
                 selectedPktIdx++;
             } else {
                 selectedPktIdx = 0;
@@ -348,10 +390,10 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
         }
 
         if (sel) {
-            if (!node.packets.empty() && selectedPktIdx >= 0 && selectedPktIdx < (int)node.packets.size()) {
+            if (!nodePackets.empty() && selectedPktIdx >= 0 && selectedPktIdx < (int)nodePackets.size()) {
                 // Show newest first in index mapping
-                size_t actualIdx = node.packets.size() - 1 - selectedPktIdx;
-                showLoRaPacketInspector(node.packets[actualIdx]);
+                size_t actualIdx = nodePackets.size() - 1 - selectedPktIdx;
+                showLoRaPacketInspector(nodePackets[actualIdx]);
                 drawMainBorder(true);
                 needsRedraw = true;
             }
@@ -380,7 +422,7 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
             int maxLines = (tftHeight - startY - 14) / lineH;
             if (maxLines < 1) maxLines = 1;
 
-            if (node.packets.empty()) {
+            if (nodePackets.empty()) {
                 tft.setTextColor(TFT_DARKGREY, bruceConfig.bgColor);
                 tft.drawString("No stored packets", 10, startY);
             } else {
@@ -392,9 +434,9 @@ void showLoRaNodeInspector(LoRaNodeRecord &node) {
                 for (int i = 0; i < maxLines; i++) {
                     int pIdx = scrollOffset + i;
                     int currentY = startY + i * lineH;
-                    if (pIdx < (int)node.packets.size()) {
-                        size_t actualIdx = node.packets.size() - 1 - pIdx;
-                        const auto &pkt = node.packets[actualIdx];
+                    if (pIdx < (int)nodePackets.size()) {
+                        size_t actualIdx = nodePackets.size() - 1 - pIdx;
+                        const auto &pkt = nodePackets[actualIdx];
                         bool isSel = (pIdx == selectedPktIdx);
 
                         if (isSel) {
@@ -434,8 +476,14 @@ void viewLoRaCapturedPackets() {
         size_t idx = gLoRaCapturedPackets.size() - 1 - i;
         const auto &pkt = gLoRaCapturedPackets[idx];
         String title = String(idx + 1) + ". " + pkt.summary + " (" + String((int)pkt.rssi) + "dBm)";
-        options.push_back({title, [idx]() {
-            showLoRaPacketInspector(gLoRaCapturedPackets[idx]);
+        const uint32_t captureId = pkt.captureId;
+        options.push_back({title, [captureId]() {
+            const LoRaPacket *captured = findCapturedPacketById(captureId);
+            if (captured) {
+                showLoRaPacketInspector(*captured);
+            } else {
+                displayError("Packet no longer captured", true);
+            }
         }});
     }
 
@@ -444,7 +492,7 @@ void viewLoRaCapturedPackets() {
         if (exportLoRaPacketsToPcap(gLoRaCapturedPackets, path)) {
             displaySuccess("Saved to " + path);
         } else {
-            displayError("Export failed");
+            displayError("PCAP export failed or was truncated");
         }
     }});
 
@@ -458,13 +506,17 @@ void viewLoRaCapturedPackets() {
 }
 
 void runLoRaSniffer() {
-    loadLoRaConfig();
+    if (temporarySnifferConfig) {
+        loraConfig = *temporarySnifferConfig;
+    } else {
+        loadLoRaConfig();
+    }
     if (!isLoraHardwareConfigured()) {
         displayError("LoRa pins not configured!", true);
         return;
     }
 
-    if (!selectLoRaPresetMenu()) return;
+    if (!temporarySnifferConfig && !selectLoRaPresetMenu()) return;
 
     displayTextLine("Starting LoRa Sniffer...");
     if (!initLoRaRadio(loraConfig, true)) {
@@ -476,6 +528,7 @@ void runLoRaSniffer() {
     bool pcapActive = false;
     if (loraConfig.enablePcap) {
         pcapActive = pcap.begin();
+        if (!pcapActive) displayError("PCAP capture could not be started", true);
     }
 
     bool isPaused = false;
@@ -573,10 +626,15 @@ void runLoRaSniffer() {
                         displaySuccess("PCAP: " + path);
                         drawMainBorder(true);
                         needsRedraw = true;
+                    } else {
+                        displayError("PCAP export failed or was truncated", true);
+                        drawMainBorder(true);
+                        needsRedraw = true;
                     }
                 } else if (lowerKey == 't' && !gLoRaNodes.empty()) {
                     if (selectedIdx >= 0 && selectedIdx < (int)gLoRaNodes.size()) {
-                        pcap.end();
+                        if (pcapActive && !pcap.end()) displayError("PCAP capture is truncated", true);
+                        pcapActive = false;
                         stopLoRaRadio();
                         trackLoRaTarget(gLoRaNodes[selectedIdx].address, gLoRaNodes[selectedIdx].displayName);
                         return;
@@ -650,7 +708,11 @@ void runLoRaSniffer() {
                 totalPackets++;
 
                 if (pcapActive) {
-                    pcap.writePacket(pkt);
+                    if (!pcap.writePacket(pkt)) {
+                        pcapActive = false;
+                        pcap.end();
+                        displayError("PCAP write failed; capture is truncated", true);
+                    }
                 }
 
                 statsChanged = true;
@@ -659,6 +721,15 @@ void runLoRaSniffer() {
             } else if (state != -1) {
                 Serial.printf("[LoRaSniffer] RX read error=%d len=%u\n", state, (unsigned)pktLen);
             }
+        }
+
+        if (gLoRaNodes.empty()) {
+            selectedIdx = 0;
+            scrollOffset = 0;
+        } else {
+            if (selectedIdx < 0) selectedIdx = 0;
+            if (selectedIdx >= (int)gLoRaNodes.size()) selectedIdx = (int)gLoRaNodes.size() - 1;
+            if (scrollOffset > selectedIdx) scrollOffset = selectedIdx;
         }
 
         // Render UI
@@ -725,9 +796,16 @@ void runLoRaSniffer() {
 
 exit_sniffer:
     if (pcapActive) {
-        pcap.end();
+        if (!pcap.end()) displayError("PCAP capture is truncated", true);
     }
     stopLoRaRadio();
+}
+
+void runLoRaSnifferWithConfig(const LoRaConfigData &config) {
+    const LoRaConfigData *previousOverride = temporarySnifferConfig;
+    temporarySnifferConfig = &config;
+    runLoRaSniffer();
+    temporarySnifferConfig = previousOverride;
 }
 
 #endif // !LITE_VERSION

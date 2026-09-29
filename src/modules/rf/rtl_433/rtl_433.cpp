@@ -5,25 +5,44 @@
 #include <cmath>
 
 static const Rtl433PresetDef rtl433_presets[] = {
-    // name                default_freq  mod  dev       rx_bw   d_rate   desc
-    {"OOK 433.92M",        433.92f,      2,   0.0f,     270.8f, 10.0f,   "Weather & Security OOK"},
-    {"2-FSK 433 17.2k",    433.92f,      0,   19.04f,   135.4f, 17.24f,  "Fine Offset / Ambient FSK"},
-    {"2-FSK 433 19.2k",    433.92f,      0,   47.60f,   200.0f, 19.20f,  "Toyota TPMS FSK"},
-    {"GFSK 433 17.2k",     433.92f,      1,   19.04f,   135.4f, 17.24f,  "Bresser / Weather GFSK"},
-    {"MSK 433 100k",       433.92f,      4,   0.0f,     270.8f, 100.0f,  "433M MSK / Telemetry"},
-    {"OOK 868.35M",        868.35f,      2,   0.0f,     270.8f, 10.0f,   "EU Weather OOK"},
-    {"2-FSK 868 17.2k",    868.35f,      0,   19.04f,   135.4f, 17.24f,  "EU Fine Offset / LaCrosse"},
-    {"GFSK 868 17.2k",     868.35f,      1,   19.04f,   135.4f, 17.24f,  "EU Bresser 5/6/7-in-1 Weather"},
-    {"MSK 868 wM-Bus T",   868.95f,      4,   0.0f,     270.8f, 100.0f,  "wM-Bus Mode T (Meters)"},
-    {"MSK 868 wM-Bus S",   868.30f,      4,   0.0f,     135.4f, 32.768f, "wM-Bus Mode S (Meters)"},
-    {"OOK 345.00M",        345.00f,      2,   0.0f,     270.8f, 10.0f,   "Honeywell / Ademco 5800"},
-    {"OOK 315.00M",        315.00f,      2,   0.0f,     270.8f, 10.0f,   "US TPMS & Security OOK"},
-    {"2-FSK 315 19.2k",    315.00f,      0,   47.60f,   200.0f, 19.20f,  "US Toyota TPMS FSK"},
-    {"GFSK 315 19.2k",     315.00f,      1,   47.60f,   200.0f, 19.20f,  "US TPMS GFSK"},
+    // 300 Band (300 - 348 MHz)
+    // name                  band              default_freq  mod  dev       rx_bw   d_rate   desc
+    {"OOK 315.00M",          RTL433_BAND_300,  315.00f,      2,   0.0f,     270.8f, 10.0f,   "US TPMS & Security OOK"},
+    {"2-FSK 315 19.2k",      RTL433_BAND_300,  315.00f,      0,   47.60f,   200.0f, 19.20f,  "US Toyota TPMS FSK"},
+    {"GFSK 315 19.2k",       RTL433_BAND_300,  315.00f,      1,   47.60f,   200.0f, 19.20f,  "US TPMS GFSK"},
+    {"2-FSK 315 17.2k",      RTL433_BAND_300,  315.00f,      0,   19.04f,   135.4f, 17.24f,  "315M Fine Offset FSK"},
+    {"OOK 345.00M",          RTL433_BAND_300,  345.00f,      2,   0.0f,     270.8f, 10.0f,   "Honeywell / Ademco 5800"},
+    {"2-FSK 345 17.2k",      RTL433_BAND_300,  345.00f,      0,   19.04f,   135.4f, 17.24f,  "345M FSK Sensors"},
+    {"OOK 310.00M",          RTL433_BAND_300,  310.00f,      2,   0.0f,     270.8f, 10.0f,   "Linear / Multi-Code"},
+    {"OOK 318.00M",          RTL433_BAND_300,  318.00f,      2,   0.0f,     270.8f, 10.0f,   "MegaCode Remotes"},
+    {"OOK 303.875M",         RTL433_BAND_300,  303.875f,     2,   0.0f,     270.8f, 10.0f,   "Garage / Gate Remotes"},
+    {"OOK 300.00M",          RTL433_BAND_300,  300.00f,      2,   0.0f,     270.8f, 10.0f,   "300M Band Base"},
+
+    // 400 Band (387 - 464 MHz)
+    {"OOK 433.92M",          RTL433_BAND_400,  433.92f,      2,   0.0f,     270.8f, 10.0f,   "Weather & Security OOK"},
+    {"2-FSK 433 17.2k",      RTL433_BAND_400,  433.92f,      0,   19.04f,   135.4f, 17.24f,  "Fine Offset / Ambient FSK"},
+    {"2-FSK 433 19.2k",      RTL433_BAND_400,  433.92f,      0,   47.60f,   200.0f, 19.20f,  "Toyota TPMS FSK"},
+    {"GFSK 433 17.2k",       RTL433_BAND_400,  433.92f,      1,   19.04f,   135.4f, 17.24f,  "Bresser / Weather GFSK"},
+    {"MSK 433 100k",         RTL433_BAND_400,  433.92f,      4,   0.0f,     270.8f, 100.0f,  "433M MSK / Telemetry"},
+    {"OOK 434.42M",          RTL433_BAND_400,  434.42f,      2,   0.0f,     270.8f, 10.0f,   "434M Weather OOK"},
+    {"2-FSK 434 17.2k",      RTL433_BAND_400,  434.42f,      0,   19.04f,   135.4f, 17.24f,  "Fine Offset 434M FSK"},
+    {"GFSK 434 17.2k",       RTL433_BAND_400,  434.42f,      1,   19.04f,   135.4f, 17.24f,  "Bresser 434M GFSK"},
+    {"OOK 418.00M",          RTL433_BAND_400,  418.00f,      2,   0.0f,     270.8f, 10.0f,   "UK / US 418M Remotes"},
+    {"OOK 390.00M",          RTL433_BAND_400,  390.00f,      2,   0.0f,     270.8f, 10.0f,   "Chamberlain / LiftMaster"},
+
+    // 800 Band (779 - 928 MHz)
+    {"OOK 868.35M",          RTL433_BAND_800,  868.35f,      2,   0.0f,     270.8f, 10.0f,   "EU Weather OOK"},
+    {"2-FSK 868 17.2k",      RTL433_BAND_800,  868.35f,      0,   19.04f,   135.4f, 17.24f,  "EU Fine Offset / LaCrosse"},
+    {"GFSK 868 17.2k",       RTL433_BAND_800,  868.35f,      1,   19.04f,   135.4f, 17.24f,  "EU Bresser Weather GFSK"},
+    {"MSK 868 wM-Bus T",     RTL433_BAND_800,  868.95f,      4,   0.0f,     270.8f, 100.0f,  "wM-Bus Mode T (Meters)"},
+    {"MSK 868 wM-Bus S",     RTL433_BAND_800,  868.30f,      4,   0.0f,     135.4f, 32.768f, "wM-Bus Mode S (Meters)"},
+    {"OOK 915.00M",          RTL433_BAND_800,  915.00f,      2,   0.0f,     270.8f, 10.0f,   "US 915M ISM / Sensors OOK"},
+    {"2-FSK 915 17.2k",      RTL433_BAND_800,  915.00f,      0,   19.04f,   135.4f, 17.24f,  "US 915M Weather FSK"},
+    {"GFSK 915 17.2k",       RTL433_BAND_800,  915.00f,      1,   19.04f,   135.4f, 17.24f,  "US 915M Weather GFSK"},
 };
 
 const Rtl433PresetDef *rtl433_get_preset_def(int preset) {
-    if (preset < 0 || preset >= RTL433_PRESET_COUNT) preset = RTL433_PRESET_OOK_433;
+    if (preset < 0 || preset >= RTL433_PRESET_COUNT) preset = RTL433_PRESET_400_OOK_433;
     return &rtl433_presets[preset];
 }
 
@@ -31,41 +50,126 @@ const char *rtl433_get_preset_name(int preset) {
     return rtl433_get_preset_def(preset)->name;
 }
 
+const char *rtl433_get_band_name(Rtl433Band band) {
+    switch (band) {
+        case RTL433_BAND_300: return "300 MHz (300-348M)";
+        case RTL433_BAND_400: return "400 MHz (387-464M)";
+        case RTL433_BAND_800: return "800 MHz (779-928M)";
+        default: return "300-928 MHz";
+    }
+}
+
+std::vector<int> rtl433_get_band_presets(Rtl433Band band) {
+    std::vector<int> list;
+    for (int p = 0; p < RTL433_PRESET_COUNT; p++) {
+        if (rtl433_get_preset_def(p)->band == band) {
+            list.push_back(p);
+        }
+    }
+    return list;
+}
+
 std::vector<int> rtl433_get_changing_presets(int changingPreset) {
     switch (changingPreset) {
-        case RTL433_CHANGING_433_ALL:
-            return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_FSK_433_19K, RTL433_PRESET_GFSK_433_17K, RTL433_PRESET_MSK_433_100K};
-        case RTL433_CHANGING_868_ALL:
-            return {RTL433_PRESET_OOK_868, RTL433_PRESET_FSK_868_17K, RTL433_PRESET_GFSK_868_17K, RTL433_PRESET_MSK_868_T, RTL433_PRESET_MSK_868_S};
-        case RTL433_CHANGING_ALL_PRESETS:
+        // 300 Band Hopping Profiles
+        case RTL433_HOP_300_315_ALL:
+            return {RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_GFSK_315_19K, RTL433_PRESET_300_FSK_315_17K};
+        case RTL433_HOP_300_345_ALL:
+            return {RTL433_PRESET_300_OOK_345, RTL433_PRESET_300_FSK_345_17K};
+        case RTL433_HOP_300_BAND_OOK:
+            return {RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_OOK_345, RTL433_PRESET_300_OOK_310, RTL433_PRESET_300_OOK_318, RTL433_PRESET_300_OOK_303, RTL433_PRESET_300_OOK_300};
+        case RTL433_HOP_300_BAND_FSK:
+            return {RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_FSK_315_17K, RTL433_PRESET_300_FSK_345_17K};
+        case RTL433_HOP_300_BAND_GFSK:
+            return {RTL433_PRESET_300_GFSK_315_19K};
+        case RTL433_HOP_300_BAND_ALL:
             return {
-                RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_FSK_433_19K, RTL433_PRESET_GFSK_433_17K, RTL433_PRESET_MSK_433_100K,
-                RTL433_PRESET_OOK_868, RTL433_PRESET_FSK_868_17K, RTL433_PRESET_GFSK_868_17K, RTL433_PRESET_MSK_868_T, RTL433_PRESET_MSK_868_S,
-                RTL433_PRESET_OOK_345, RTL433_PRESET_OOK_315, RTL433_PRESET_FSK_315_19K, RTL433_PRESET_GFSK_315_19K
+                RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_GFSK_315_19K,
+                RTL433_PRESET_300_OOK_345, RTL433_PRESET_300_FSK_345_17K,
+                RTL433_PRESET_300_OOK_310, RTL433_PRESET_300_OOK_318, RTL433_PRESET_300_OOK_303, RTL433_PRESET_300_OOK_300
             };
-        case RTL433_CHANGING_WEATHER:
-            return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_GFSK_433_17K, RTL433_PRESET_OOK_868, RTL433_PRESET_FSK_868_17K, RTL433_PRESET_GFSK_868_17K};
-        case RTL433_CHANGING_TPMS:
-            return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_19K, RTL433_PRESET_OOK_315, RTL433_PRESET_FSK_315_19K, RTL433_PRESET_GFSK_315_19K};
-        case RTL433_CHANGING_METERS:
-            return {RTL433_PRESET_MSK_868_T, RTL433_PRESET_MSK_868_S, RTL433_PRESET_MSK_433_100K};
-        case RTL433_CHANGING_315_ALL:
-            return {RTL433_PRESET_OOK_315, RTL433_PRESET_FSK_315_19K, RTL433_PRESET_GFSK_315_19K};
+
+        // 400 Band Hopping Profiles
+        case RTL433_HOP_400_433_ALL:
+            return {RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_FSK_433_19K, RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_MSK_433_100K};
+        case RTL433_HOP_400_434_ALL:
+            return {RTL433_PRESET_400_OOK_434, RTL433_PRESET_400_FSK_434_17K, RTL433_PRESET_400_GFSK_434_17K};
+        case RTL433_HOP_400_BAND_OOK:
+            return {RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_OOK_434, RTL433_PRESET_400_OOK_418, RTL433_PRESET_400_OOK_390};
+        case RTL433_HOP_400_BAND_FSK:
+            return {RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_FSK_433_19K, RTL433_PRESET_400_FSK_434_17K};
+        case RTL433_HOP_400_BAND_GFSK:
+            return {RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_GFSK_434_17K};
+        case RTL433_HOP_400_BAND_MSK:
+            return {RTL433_PRESET_400_MSK_433_100K};
+        case RTL433_HOP_400_BAND_ALL:
+            return {
+                RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_FSK_433_19K, RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_MSK_433_100K,
+                RTL433_PRESET_400_OOK_434, RTL433_PRESET_400_FSK_434_17K, RTL433_PRESET_400_GFSK_434_17K,
+                RTL433_PRESET_400_OOK_418, RTL433_PRESET_400_OOK_390
+            };
+
+        // 800 Band Hopping Profiles
+        case RTL433_HOP_800_868_ALL:
+            return {RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_MSK_868_T, RTL433_PRESET_800_MSK_868_S};
+        case RTL433_HOP_800_915_ALL:
+            return {RTL433_PRESET_800_OOK_915, RTL433_PRESET_800_FSK_915_17K, RTL433_PRESET_800_GFSK_915_17K};
+        case RTL433_HOP_800_BAND_OOK:
+            return {RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_OOK_915};
+        case RTL433_HOP_800_BAND_FSK:
+            return {RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_FSK_915_17K};
+        case RTL433_HOP_800_BAND_GFSK:
+            return {RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_GFSK_915_17K};
+        case RTL433_HOP_800_BAND_MSK:
+            return {RTL433_PRESET_800_MSK_868_T, RTL433_PRESET_800_MSK_868_S};
+        case RTL433_HOP_800_BAND_ALL:
+            return {
+                RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_MSK_868_T, RTL433_PRESET_800_MSK_868_S,
+                RTL433_PRESET_800_OOK_915, RTL433_PRESET_800_FSK_915_17K, RTL433_PRESET_800_GFSK_915_17K
+            };
+
+        // All Bands Hopping Profile
+        case RTL433_HOP_ALL_BANDS_ALL:
+            return {
+                RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_OOK_345,
+                RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_MSK_433_100K,
+                RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_MSK_868_T,
+                RTL433_PRESET_800_OOK_915, RTL433_PRESET_800_FSK_915_17K
+            };
+
         default:
-            return {RTL433_PRESET_OOK_433, RTL433_PRESET_FSK_433_17K, RTL433_PRESET_GFSK_433_17K};
+            return {RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_GFSK_433_17K};
     }
 }
 
 const char *rtl433_get_changing_preset_name(int changingPreset) {
     switch (changingPreset) {
-        case RTL433_CHANGING_433_ALL: return "433M (All Modes)";
-        case RTL433_CHANGING_868_ALL: return "868M (All Modes)";
-        case RTL433_CHANGING_ALL_PRESETS: return "All Presets";
-        case RTL433_CHANGING_WEATHER: return "Weather Sensors";
-        case RTL433_CHANGING_TPMS: return "TPMS Sensors";
-        case RTL433_CHANGING_METERS: return "Smart Meters / wM-Bus";
-        case RTL433_CHANGING_315_ALL: return "315M (All Modes)";
-        default: return "433M (All Modes)";
+        case RTL433_HOP_300_315_ALL:    return "315M (All Modes)";
+        case RTL433_HOP_300_345_ALL:    return "345M (All Modes)";
+        case RTL433_HOP_300_BAND_OOK:   return "300 Band (OOK)";
+        case RTL433_HOP_300_BAND_FSK:   return "300 Band (2-FSK)";
+        case RTL433_HOP_300_BAND_GFSK:  return "300 Band (GFSK)";
+        case RTL433_HOP_300_BAND_ALL:   return "300 Band (All Modes)";
+
+        case RTL433_HOP_400_433_ALL:    return "433.92M (All Modes)";
+        case RTL433_HOP_400_434_ALL:    return "434.42M (All Modes)";
+        case RTL433_HOP_400_BAND_OOK:   return "400 Band (OOK)";
+        case RTL433_HOP_400_BAND_FSK:   return "400 Band (2-FSK)";
+        case RTL433_HOP_400_BAND_GFSK:  return "400 Band (GFSK)";
+        case RTL433_HOP_400_BAND_MSK:   return "400 Band (MSK)";
+        case RTL433_HOP_400_BAND_ALL:   return "400 Band (All Modes)";
+
+        case RTL433_HOP_800_868_ALL:    return "868.35M (All Modes)";
+        case RTL433_HOP_800_915_ALL:    return "915.00M (All Modes)";
+        case RTL433_HOP_800_BAND_OOK:   return "800 Band (OOK)";
+        case RTL433_HOP_800_BAND_FSK:   return "800 Band (2-FSK)";
+        case RTL433_HOP_800_BAND_GFSK:  return "800 Band (GFSK)";
+        case RTL433_HOP_800_BAND_MSK:   return "800 Band (MSK)";
+        case RTL433_HOP_800_BAND_ALL:   return "800 Band (All Modes)";
+
+        case RTL433_HOP_ALL_BANDS_ALL:  return "All Bands (All Modes)";
+        case RTL433_HOP_SINGLE_FREQ_ALL:return "Single Frequency (All Modes)";
+        default:                        return "400 Band (All Modes)";
     }
 }
 
