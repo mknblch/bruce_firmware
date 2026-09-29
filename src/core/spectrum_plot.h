@@ -24,7 +24,7 @@
 //     plot.end();
 class SpectrumPlot {
 public:
-    bool begin(const String &title);
+    bool begin(const String &title, bool sdrWaterfall = false);
     void redraw(const String &title);
     void end();
     bool ready() const { return _ok; }
@@ -60,6 +60,7 @@ private:
     void drawWaterfall();
 
     bool _ok = false;
+    bool _sdr = false; // waterfall uses the SDR colourmap instead of the theme ramp
 
     int _plotL = 0, _plotW = 0;
     int _specTop = 0, _specBot = 0, _specH = 0;

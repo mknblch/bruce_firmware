@@ -52,6 +52,7 @@ INCLUDES = [
     'serial_js',
     'storage_js',
     'subghz_js',
+    'uart_js',
     'wifi_js',
 ]
 

@@ -12,6 +12,7 @@ extern "C" {
 #include "globals_js.h"
 
 char *script = NULL;
+size_t scriptSize = 0;
 char *scriptDirpath = NULL;
 char *scriptName = NULL;
 static FS *pendingScriptFs = NULL;
@@ -100,6 +101,20 @@ void interpreterHandler(void *pvParameters) {
     JSContext *ctx = JS_NewContext(mem_buf, mem_size, &js_stdlib);
     JS_SetLogFunc(ctx, js_log_func);
 
+    log_d("Script length: %zu\n", scriptSize);
+
+    // JS_LoadBytecode requires no atoms to have been defined in RAM yet, so bytecode
+    // must be loaded before any global variables/functions are registered below.
+    bool isBytecode = JS_IsBytecode((const uint8_t *)script, scriptSize);
+    JSValue val = JS_UNDEFINED;
+    if (isBytecode) {
+        if (JS_RelocateBytecode(ctx, (uint8_t *)script, scriptSize) != 0) {
+            print_errorMessage("Invalid or incompatible bytecode file");
+        } else {
+            val = JS_LoadBytecode(ctx, (const uint8_t *)script);
+        }
+    }
+
     js_timers_init(ctx);
 
     // Set global variables
@@ -127,8 +142,12 @@ void interpreterHandler(void *pvParameters) {
     size_t scriptSize = strlen(script);
     log_d("Script length: %zu\n", scriptSize);
 
-    // Parse and execute script with JS_EVAL_STRIP_COL to omit column debug tables and save JS heap
-    JSValue val = JS_Eval(ctx, (const char *)script, scriptSize, scriptName, JS_EVAL_STRIP_COL);
+    if (isBytecode) {
+        if (!JS_IsException(val)) { val = JS_Run(ctx, val); }
+    } else {
+        // Parse and execute script with JS_EVAL_STRIP_COL to omit column debug tables and save JS heap
+        val = JS_Eval(ctx, (const char *)script, scriptSize, scriptName, JS_EVAL_STRIP_COL);
+    }
 
     // Free script source buffer immediately after execution starts to release system heap
     free((char *)script);
@@ -185,7 +204,7 @@ void run_bjs_script() {
         };
         loopOptions(options);
     }
-    filename = loopSD(*fs, true, "BJS|JS");
+    filename = loopSD(*fs, true, "BJS|JS|BIN");
     vTaskDelay(pdMS_TO_TICKS(200));
     if (filename == "") { return; }
     run_bjs_script_headless(*fs, filename);
@@ -293,7 +312,7 @@ getScriptsOptionsList(const String &currentPath, bool saveStartupScript, int rem
             int dotIndex = nameOnly.lastIndexOf(".");
             String ext = dotIndex >= 0 ? nameOnly.substring(dotIndex + 1) : "";
             ext.toUpperCase();
-            if (ext != "JS" && ext != "BJS") continue;
+            if (ext != "JS" && ext != "BJS" && ext != "BIN") continue;
 
             String entry_title = nameOnly.substring(0, nameOnly.lastIndexOf(".")); // remove the extension
             opt.push_back({entry_title.c_str(), [=]() {
