@@ -4,6 +4,8 @@
 #include <NimBLEDevice.h>
 #include <vector>
 #include <functional>
+#include <algorithm>
+#include <atomic>
 
 #if !defined(LITE_VERSION)
 
@@ -36,6 +38,12 @@
 #define RACE_CMD_FOTA_START_TRANS   0x1C0A
 #define RACE_CMD_GET_BUILD_VERSION  0x1E08
 
+// Safety and reassembly limits
+static constexpr size_t RACE_MAX_RX_BUFFER_SIZE = 4096;
+static constexpr size_t RACE_MAX_RAM_READ_SIZE   = 64 * 1024;   // 64 KB
+static constexpr size_t RACE_MAX_FLASH_READ_SIZE = 1024 * 1024; // 1 MB
+static constexpr size_t RACE_HEADER_SIZE         = 6;
+
 // Known RACE GATT Service & Characteristic UUIDs
 #define RACE_UUID_AIROHA_SERVICE    "5052494D-2DAB-0341-6972-6F6861424C45"
 #define RACE_UUID_AIROHA_TX         "43484152-2DAB-3241-6972-6F6861424C45"
@@ -62,8 +70,8 @@
 
 #pragma pack(push, 1)
 struct RaceHeader {
-    uint8_t  head;      // 0x05 or 0x15
-    uint8_t  type;      // 0x5A (Req), 0x5B (Rsp), etc.
+    uint8_t  head;      // 0x05 (STD) or 0x15 (EXT)
+    uint8_t  type;      // 0x5A (Req), 0x5B (Rsp), 0x5D (Ind), etc.
     uint16_t length;    // Payload length + 2 (includes cmdId)
     uint16_t cmdId;     // Command ID
 };
@@ -96,7 +104,7 @@ enum RaceVulnStatus {
 
 struct RaceVulnerabilityReport {
     RaceVulnStatus cve2025_20700 = RACE_VULN_UNKNOWN; // Missing GATT authentication
-    RaceVulnStatus cve2025_20701 = RACE_VULN_UNKNOWN; // Missing Classic BR/EDR pairing
+    RaceVulnStatus cve2025_20701 = RACE_VULN_UNKNOWN; // Memory access / unauthenticated extraction
     RaceVulnStatus raceOverBle   = RACE_VULN_UNKNOWN; // RACE exposed over BLE
     String details;
 };
@@ -109,6 +117,12 @@ class RaceClient {
 public:
     RaceClient();
     ~RaceClient();
+
+    // Non-copyable, non-movable to prevent semaphore/resource double-free
+    RaceClient(const RaceClient&) = delete;
+    RaceClient& operator=(const RaceClient&) = delete;
+    RaceClient(RaceClient&&) = delete;
+    RaceClient& operator=(RaceClient&&) = delete;
 
     // Connection Lifecycle
     bool connect(const NimBLEAddress &address, uint32_t timeoutMs = 8000);

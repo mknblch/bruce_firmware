@@ -12,7 +12,7 @@ void gattExplorerMenu();
 bool gattConnectCli(const String &macStr, uint8_t addrType = 0);
 void gattScanCli(int timeoutSec = 5);
 
-bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError = nullptr, bool *outUserCancelled = nullptr);
+bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError = nullptr, bool *outUserCancelled = nullptr, uint32_t timeoutMs = 0);
 String gattFitText(const String &src, int maxPx);
 void gattDrawRssi(int x, int y, int rssi, uint16_t color);
 int gattListLoop(

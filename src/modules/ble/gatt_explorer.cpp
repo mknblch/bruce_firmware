@@ -1101,7 +1101,7 @@ static void runContinuousScan(GattFilterMode filterMode) {
 // Robust Multi-Strategy GATT Connection
 //=============================================================================
 
-bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError, bool *outUserCancelled) {
+bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError, bool *outUserCancelled, uint32_t timeoutMs) {
     if (outError) *outError = 0;
     if (outUserCancelled) *outUserCancelled = false;
     g_lastBleDisconnectReason = 0;
@@ -1203,7 +1203,7 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
 
         g_gattClientCallbacks.reset();
         pClient->setClientCallbacks(&g_gattClientCallbacks, false);
-        uint32_t perStratTimeoutMs = (g_gattSettings.timeoutSec > 0 ? g_gattSettings.timeoutSec : 5) * 1000;
+        uint32_t perStratTimeoutMs = (timeoutMs > 0) ? timeoutMs : ((g_gattSettings.timeoutSec > 0 ? g_gattSettings.timeoutSec : 5) * 1000);
         pClient->setConnectTimeout(perStratTimeoutMs);
 
         if (strat.useCustomParams) {
