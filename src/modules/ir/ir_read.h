@@ -3,7 +3,7 @@
 
 class IrRead {
 public:
-    IRrecv irrecv = IRrecv(bruceConfigPins.irRx, SAFE_STACK_BUFFER_SIZE / 2, 50);
+    IRrecv irrecv = IRrecv(bruceConfigPins.IR_Pins.rx, SAFE_STACK_BUFFER_SIZE / 2, 50);
 
     IrRead(bool headless_mode = false, bool raw_mode = false);
 

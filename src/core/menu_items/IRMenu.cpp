@@ -24,7 +24,7 @@ void IRMenu::optionsMenu() {
     addOptionToMainMenu();
 
     String txt = "Infrared";
-    txt += " Tx: " + String(bruceConfigPins.irTx) + " Rx: " + String(bruceConfigPins.irRx) +
+    txt += " Tx: " + String(bruceConfigPins.IR_Pins.tx) + " Rx: " + String(bruceConfigPins.IR_Pins.rx) +
            " Rpts: " + String(bruceConfigPins.irTxRepeats);
     loopOptions(options, MENU_TYPE_SUBMENU, txt.c_str());
 #if defined(ARDUINO_M5STICK_S3)

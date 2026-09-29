@@ -19,6 +19,7 @@ private:
     void audioMenu(void);
     void systemMenu(void);
     void advancedMenu(void);
+    void pinProfilesMenu(void);
     void powerMenu(void);
     void pinsMenu(void);
     void devMenu(void);

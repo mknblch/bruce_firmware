@@ -1124,7 +1124,7 @@ void runClockLoop(bool showMenuHint) {
 **  get or set IR Tx Pin
 **********************************************************************/
 int gsetIrTxPin(bool set) {
-    int result = bruceConfigPins.irTx;
+    int result = bruceConfigPins.IR_Pins.tx;
 
     if (result > 50) bruceConfigPins.setIrTxPin(TXLED);
     if (set) {
@@ -1134,7 +1134,7 @@ int gsetIrTxPin(bool set) {
         int idx = 100;
         int j = 0;
         for (auto pin : pins) {
-            if (pin.second == bruceConfigPins.irTx && idx == 100) idx = j;
+            if (pin.second == bruceConfigPins.IR_Pins.tx && idx == 100) idx = j;
             j++;
 #ifdef ALLOW_ALL_GPIO_FOR_IR_RF
             int i = pin.second;
@@ -1144,18 +1144,18 @@ int gsetIrTxPin(bool set) {
                 options.push_back(
                     {pin.first,
                      [=]() { bruceConfigPins.setIrTxPin(pin.second); },
-                     pin.second == bruceConfigPins.irTx}
+                     pin.second == bruceConfigPins.IR_Pins.tx}
                 );
         }
 
         loopOptions(options, idx);
         options.clear();
 
-        Serial.println("Saved pin: " + String(bruceConfigPins.irTx));
+        Serial.println("Saved pin: " + String(bruceConfigPins.IR_Pins.tx));
     }
 
     returnToMenu = true;
-    return bruceConfigPins.irTx;
+    return bruceConfigPins.IR_Pins.tx;
 }
 
 void setIrTxRepeats() {
@@ -1185,7 +1185,7 @@ void setIrTxRepeats() {
 **  get or set IR Rx Pin
 **********************************************************************/
 int gsetIrRxPin(bool set) {
-    int result = bruceConfigPins.irRx;
+    int result = bruceConfigPins.IR_Pins.rx;
 
     if (result > 45) bruceConfigPins.setIrRxPin(GROVE_SCL);
     if (set) {
@@ -1195,7 +1195,7 @@ int gsetIrRxPin(bool set) {
         int idx = -1;
         int j = 0;
         for (auto pin : pins) {
-            if (pin.second == bruceConfigPins.irRx && idx < 0) idx = j;
+            if (pin.second == bruceConfigPins.IR_Pins.rx && idx < 0) idx = j;
             j++;
 #ifdef ALLOW_ALL_GPIO_FOR_IR_RF
             int i = pin.second;
@@ -1205,7 +1205,7 @@ int gsetIrRxPin(bool set) {
                 options.push_back(
                     {pin.first,
                      [=]() { bruceConfigPins.setIrRxPin(pin.second); },
-                     pin.second == bruceConfigPins.irRx}
+                     pin.second == bruceConfigPins.IR_Pins.rx}
                 );
         }
 
@@ -1213,7 +1213,7 @@ int gsetIrRxPin(bool set) {
     }
 
     returnToMenu = true;
-    return bruceConfigPins.irRx;
+    return bruceConfigPins.IR_Pins.rx;
 }
 
 /*********************************************************************

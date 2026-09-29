@@ -85,11 +85,11 @@ void IrRead::setup() {
     const std::vector<std::pair<String, int>> pins = IR_RX_PINS;
     int count = 0;
     for (auto pin : pins) {
-        if (pin.second == bruceConfigPins.irRx) count++;
+        if (pin.second == bruceConfigPins.IR_Pins.rx) count++;
     }
     if (count == 0) gsetIrRxPin(true);
 
-    setup_ir_pin(bruceConfigPins.irRx, INPUT);
+    setup_ir_pin(bruceConfigPins.IR_Pins.rx, INPUT);
     if (headless) return;
     returnToMenu = true;
     std::vector<Option> quickRemoteOptions = {

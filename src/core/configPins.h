@@ -5,6 +5,9 @@
 #include <ArduinoJson.h>
 #include <precompiler_flags.h>
 #include <set>
+
+String getMacAddress();
+
 #ifndef CC1101_GDO2_PIN
 #define CC1101_GDO2_PIN -1
 #endif
@@ -73,6 +76,21 @@ public:
             gpio_num_t pin = (gpio_num_t)p;
             if (sda == pin || scl == pin) return true;
             return false;
+        }
+    };
+
+    struct IRPins {
+        int tx = TXLED;
+        int rx = RXLED;
+
+        void fromJson(JsonObject obj) {
+            tx = obj["tx"] | tx;
+            rx = obj["rx"] | rx;
+        }
+
+        void toJson(JsonObject obj) const {
+            obj["tx"] = tx;
+            obj["rx"] = rx;
         }
     };
 
@@ -236,9 +254,8 @@ public:
     String bleName = String("Keyboard_" + String((uint8_t)(ESP.getEfuseMac() >> 32), HEX));
 
     // IR
-    int irTx = TXLED;
+    IRPins IR_Pins;
     uint8_t irTxRepeats = 0;
-    int irRx = RXLED;
 
     // RF
     int rfTx = GROVE_SDA;

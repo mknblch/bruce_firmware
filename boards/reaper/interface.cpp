@@ -51,8 +51,8 @@ void _setup_gpio() {
     digitalWrite(SDCARD_CS, HIGH);
 
     bruceConfigPins.rfModule = CC1101_SPI_MODULE;
-    bruceConfigPins.irRx = RXLED;
-    bruceConfigPins.irTx = TXLED;
+    bruceConfigPins.IR_Pins.rx = RXLED;
+    bruceConfigPins.IR_Pins.tx = TXLED;
     bruceConfigPins.rfidModule = ST25R3916_SPI_MODULE;
 
     bool pmu_ret = false;

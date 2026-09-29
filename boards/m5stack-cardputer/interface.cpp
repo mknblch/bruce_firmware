@@ -301,11 +301,13 @@ void _post_setup_gpio() {
         if (bruceConfigPins.CC1101_bus.io0 == 5 || bruceConfigPins.CC1101_bus.io0 == 13 || bruceConfigPins.CC1101_bus.io0 == 15) {
             bruceConfigPins.CC1101_bus.io0 = GPIO_NUM_NC;
         }
-        if (bruceConfigPins.irTx == 5 || bruceConfigPins.irTx == 6 || bruceConfigPins.irTx == 3 || bruceConfigPins.irTx == 4) {
-            bruceConfigPins.irTx = 44;
+        if (bruceConfigPins.IR_Pins.tx == 5 || bruceConfigPins.IR_Pins.tx == 6 || bruceConfigPins.IR_Pins.tx == 3 ||
+            bruceConfigPins.IR_Pins.tx == 4) {
+            bruceConfigPins.IR_Pins.tx = 44;
         }
-        if (bruceConfigPins.irRx == 5 || bruceConfigPins.irRx == 6 || bruceConfigPins.irRx == 3 || bruceConfigPins.irRx == 4) {
-            bruceConfigPins.irRx = -1;
+        if (bruceConfigPins.IR_Pins.rx == 5 || bruceConfigPins.IR_Pins.rx == 6 || bruceConfigPins.IR_Pins.rx == 3 ||
+            bruceConfigPins.IR_Pins.rx == 4) {
+            bruceConfigPins.IR_Pins.rx = -1;
         }
 
         // Populate LoRa pins if unconfigured (-1) or ensure correct Cap LoRa-1262 pins

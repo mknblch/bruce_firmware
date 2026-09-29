@@ -255,8 +255,7 @@ Maintain the persistent configuration schema. Populating both modules allows sea
 {
   "AC:A7:04:02:BE:DC": {
     "rot": 1,
-    "irTx": 44,
-    "irRx": -1,
+    "IR_Pins": {"tx": 44, "rx": -1},
     "CC1101_Pins": {
       "sck": 40,
       "miso": 39,

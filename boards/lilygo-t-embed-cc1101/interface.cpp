@@ -80,8 +80,8 @@ void _setup_gpio() {
     // Start with default IR, RF and RFID Configs, replace old
     bruceConfigPins.rfModule = CC1101_SPI_MODULE;
     bruceConfigPins.rfidModule = PN532_I2C_MODULE;
-    bruceConfigPins.irRx = 1;
-    bruceConfigPins.irTx = 2;
+    bruceConfigPins.IR_Pins.rx = 1;
+    bruceConfigPins.IR_Pins.tx = 2;
 #else
     Wire.begin(SYS_I2C_SDA, SYS_I2C_SCL);
     Wire.beginTransmission(0x40);
