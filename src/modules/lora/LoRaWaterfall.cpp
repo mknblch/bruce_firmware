@@ -3,15 +3,147 @@
 #include "LoRaConfig.h"
 #include "LoRaConfigHelpers.h"
 #include "LoRaRadio.h"
+#include "core/configPins.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
 #include "core/spectrum_plot.h"
 #include "core/utils.h"
+#include "core/wifi/wifi_common.h"
+#include "esp_wifi.h"
+#include "globals.h"
+#include "modules/ble/ble_common.h"
+#if !defined(LITE_VERSION)
+#include "modules/ble/BLE_Suite.h"
+#endif
 #include <Arduino.h>
+#include <HardwareSerial.h>
+#include <WiFi.h>
+#if defined(CONFIG_BT_ENABLED)
+#include <esp_bt.h>
+#endif
 #include <math.h>
 
 float gLoraWaterfallStartFreq = 863.0f;
 float gLoraWaterfallEndFreq = 870.0f;
+
+static bool gLoraWaterfallGpsSleep = true;
+static bool gLoraWaterfallWifiBtSleep = true;
+
+static struct {
+    bool inQuietMode = false;
+    bool gpsSleeping = false;
+    bool wifiBtSleeping = false;
+    bool wifiWasConnected = false;
+    wifi_mode_t prevWifiMode = WIFI_OFF;
+    bool bleWasActive = false;
+} s_wfQuietState;
+
+static void gpsEnterSleep() {
+    if ((int)bruceConfigPins.gps_bus.tx >= 0 && (int)bruceConfigPins.gps_bus.rx >= 0) {
+        pinMode(bruceConfigPins.gps_bus.rx, INPUT);
+        HardwareSerial gpsUart(2);
+        gpsUart.begin(
+            bruceConfigPins.gpsBaudrate, SERIAL_8N1, bruceConfigPins.gps_bus.rx, bruceConfigPins.gps_bus.tx
+        );
+        delay(20);
+        // 1.A optional: Silence NMEA periodic sentence output
+        gpsUart.print("$PCAS03,0,0,0,0,0,0,0,0,0,0,,,0,0*03\r\n");
+        gpsUart.flush();
+        delay(20);
+        // 1.A: Put CASIC GPS (AT6558/ATGM336H) into Standby/Sleep mode
+        gpsUart.print("$PCAS12,1*1F\r\n");
+        gpsUart.flush();
+        delay(20);
+        gpsUart.end();
+        pinMode(bruceConfigPins.gps_bus.tx, INPUT);
+    }
+}
+
+static void gpsWakeup() {
+    if ((int)bruceConfigPins.gps_bus.tx >= 0 && (int)bruceConfigPins.gps_bus.rx >= 0) {
+        pinMode(bruceConfigPins.gps_bus.rx, INPUT);
+        HardwareSerial gpsUart(2);
+        gpsUart.begin(
+            bruceConfigPins.gpsBaudrate, SERIAL_8N1, bruceConfigPins.gps_bus.rx, bruceConfigPins.gps_bus.tx
+        );
+        delay(20);
+        // 1.B: Wake up CASIC GPS with dummy characters & Normal mode command ($PCAS12,0)
+        gpsUart.print("\r\n\r\n$PCAS12,0*1E\r\n");
+        gpsUart.flush();
+        delay(20);
+        // Restore standard NMEA sentences (GGA, GLL, GSA, GSV, RMC, VTG)
+        gpsUart.print("$PCAS03,1,1,1,1,1,1,0,0,0,0,,,0,0*03\r\n");
+        gpsUart.flush();
+        delay(20);
+        gpsUart.end();
+    }
+}
+
+static void enterQuietMode() {
+    if (s_wfQuietState.inQuietMode) return;
+    s_wfQuietState.inQuietMode = true;
+
+    if (gLoraWaterfallGpsSleep) {
+        gpsEnterSleep();
+        s_wfQuietState.gpsSleeping = true;
+    } else {
+        s_wfQuietState.gpsSleeping = false;
+    }
+
+    if (gLoraWaterfallWifiBtSleep) {
+        s_wfQuietState.wifiBtSleeping = true;
+        s_wfQuietState.wifiWasConnected = WiFi.isConnected() || wifiConnected;
+        s_wfQuietState.prevWifiMode = WiFi.getMode();
+#if !defined(LITE_VERSION)
+        s_wfQuietState.bleWasActive = BLEStateManager::isBLEActive() || BLEConnected;
+#else
+        s_wfQuietState.bleWasActive = BLEConnected;
+#endif
+
+        if (s_wfQuietState.prevWifiMode != WIFI_MODE_NULL && s_wfQuietState.prevWifiMode != WIFI_OFF) {
+            wifiDisconnect();
+        } else {
+            WiFi.mode(WIFI_OFF);
+        }
+        stopBLEStack();
+#if defined(CONFIG_BT_ENABLED)
+        btStop();
+#endif
+    } else {
+        s_wfQuietState.wifiBtSleeping = false;
+    }
+}
+
+static void exitQuietMode() {
+    if (!s_wfQuietState.inQuietMode) return;
+
+    if (s_wfQuietState.gpsSleeping) {
+        gpsWakeup();
+        s_wfQuietState.gpsSleeping = false;
+    }
+
+    if (s_wfQuietState.wifiBtSleeping) {
+#if defined(CONFIG_BT_ENABLED)
+        if (s_wfQuietState.bleWasActive) {
+            btStart();
+        }
+#endif
+        if (s_wfQuietState.prevWifiMode != WIFI_MODE_NULL && s_wfQuietState.prevWifiMode != WIFI_OFF) {
+            WiFi.mode(s_wfQuietState.prevWifiMode);
+            if (s_wfQuietState.wifiWasConnected) {
+                xTaskCreate(wifiConnectTask, "wifiConnectTask", 4096, NULL, 1, NULL);
+            }
+        }
+        s_wfQuietState.wifiBtSleeping = false;
+    }
+
+    s_wfQuietState.inQuietMode = false;
+}
+
+struct QuietModeGuard {
+    QuietModeGuard() { enterQuietMode(); }
+    ~QuietModeGuard() { exitQuietMode(); }
+};
 
 #define WF_BINS 64
 
@@ -111,13 +243,19 @@ select_menu:
         {"Presets / Bands", [&]() { option = 2; }},
         {"Start Freq: " + String(gLoraWaterfallStartFreq, 2) + "M", [&]() { option = 3; }},
         {"End Freq: " + String(gLoraWaterfallEndFreq, 2) + "M", [&]() { option = 4; }},
+        {String("GPS Sleep: ") + (gLoraWaterfallGpsSleep ? "[ON]" : "[OFF]"), [&]() {
+            gLoraWaterfallGpsSleep = !gLoraWaterfallGpsSleep;
+        }},
+        {String("WiFi/BT Sleep: ") + (gLoraWaterfallWifiBtSleep ? "[ON]" : "[OFF]"), [&]() {
+            gLoraWaterfallWifiBtSleep = !gLoraWaterfallWifiBtSleep;
+        }},
         {"Main Menu", [&]() { option = 5; }},
     };
 
     idx = loopOptions(menuOpts, MENU_TYPE_SUBMENU, "LoRa Waterfall", idx);
     tft.fillScreen(bruceConfig.bgColor);
 
-    if (option == 5 || option == 0) {
+    if (idx < 0 || option == 5) {
         return;
     } else if (option == 1) {
         runLoRaWaterfall();
@@ -130,6 +268,8 @@ select_menu:
         goto select_menu;
     } else if (option == 4) {
         promptCustomFrequency("End Freq (MHz):", gLoraWaterfallEndFreq);
+        goto select_menu;
+    } else {
         goto select_menu;
     }
 }
@@ -174,6 +314,8 @@ void runLoRaWaterfall() {
     memset(env, 0, plotW);
     memset(disp, 0, plotW);
     memset(envPeak, 0, plotW);
+
+    QuietModeGuard quietGuard;
 
     float f_start = gLoraWaterfallStartFreq;
     float f_end = gLoraWaterfallEndFreq;
@@ -264,7 +406,7 @@ void runLoRaWaterfall() {
         for (int b = 0; b < WF_BINS; b++) {
             float f = f_start + (f_end - f_start) * b / (WF_BINS - 1);
             setLoRaFrequency(f);
-            delayMicroseconds(900);
+            delayMicroseconds(1000);
             float rssi = getLoRaMedianRSSI();
 
             rawRssi[b] = rssi;
@@ -272,7 +414,7 @@ void runLoRaWaterfall() {
         }
         if (xHandle) vTaskResume(xHandle);
         tft.drawPixel(0, 0, 0); // Keep shared SPI display bus happy once per frame before display updates
-        delay(2); // yield to allow input handler to process any pending keys
+        delay(8); // yield to allow input handler to process any pending keys
 
         // Spatial 3-point median filter across frequency bins to completely eliminate
         // isolated 1-bin impulse noise spikes (EMI/clock glitch beating)
