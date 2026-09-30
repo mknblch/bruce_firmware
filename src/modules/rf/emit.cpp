@@ -3,6 +3,8 @@
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+
+#include "rf_utils.h"
 // Global variables for shared state
 volatile bool outputState = false;
 volatile uint16_t rssiCount = 0;

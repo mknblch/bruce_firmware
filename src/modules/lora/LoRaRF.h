@@ -9,6 +9,7 @@
 #include "LoRaScanner.h"
 #include "LoRaSniffer.h"
 #include "LoRaTracker.h"
+#include "LoRaWaterfall.h"
 
 void lorachat();
 void changeusername();

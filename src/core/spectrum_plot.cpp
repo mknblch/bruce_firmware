@@ -32,8 +32,8 @@ void SpectrumPlot::buildGeometry() {
         _plotW = tftWidth - 4;
     }
 
-    int top = BORDER_PAD_Y + 8 * FM + 2; // just below the title
-    _footY = tftHeight - 8 * FP - 8;
+    int top = _hasTitle ? (BORDER_PAD_Y + 8 * FM + 2) : 3;
+    _footY = tftHeight - 8 * FP - (_hasTitle ? 8 : 4);
     _lblY = _footY - 8 * FP - 2;
 
     int avail = _lblY - top - 2;
@@ -43,14 +43,20 @@ void SpectrumPlot::buildGeometry() {
     }
     if (avail < 14) { // no room for the status line either
         _footY = -1;
-        avail = tftHeight - 6 - top;
+        avail = tftHeight - (_hasTitle ? 6 : 2) - top;
     }
     if (avail < 8) avail = 8;
 
     _wfRows = 0;
     if (avail >= 36) {
-        _wfRows = avail / 3;
-        if (_wfRows > 24) _wfRows = 24;
+        if (_waterfallPriority) {
+            int traceH = max(20, min(28, avail / 4));
+            _wfRows = avail - traceH - 2;
+            if (_wfRows < 0) _wfRows = 0;
+        } else {
+            _wfRows = avail / 3;
+            if (_wfRows > 24) _wfRows = 24;
+        }
     }
     _specTop = top;
     _specH = avail - _wfRows - (_wfRows ? 2 : 0);
@@ -95,8 +101,10 @@ void SpectrumPlot::buildPalette() {
     else buildHeatPalette(sp_heat, SP_HEAT_N);
 }
 
-bool SpectrumPlot::begin(const String &title, bool sdrWaterfall) {
+bool SpectrumPlot::begin(const String &title, bool sdrWaterfall, bool waterfallPriority) {
     _sdr = sdrWaterfall;
+    _hasTitle = (title.length() > 0);
+    _waterfallPriority = waterfallPriority;
     buildGeometry();
     buildPalette();
 
@@ -115,8 +123,13 @@ bool SpectrumPlot::begin(const String &title, bool sdrWaterfall) {
 
 void SpectrumPlot::redraw(const String &title) {
     if (!_ok) return;
-    drawMainBorderWithTitle(title);
-    tft.fillRect(_plotL, _specTop, _plotW, tftHeight - BORDER_PAD_Y - _specTop, _bg);
+    if (_hasTitle && title.length() > 0) {
+        drawMainBorderWithTitle(title);
+    } else {
+        tft.drawPixel(0, 0, 0);
+        tft.fillScreen(_bg);
+    }
+    tft.fillRect(_plotL, _specTop, _plotW, tftHeight - (_hasTitle ? BORDER_PAD_Y : 2) - _specTop, _bg);
     if (_wfRows > 0) {
         tft.drawFastHLine(_plotL, _specBot + 1, _plotW, _grid);
         tft.drawFastHLine(_plotL, _specBot + 2, _plotW, _bg);
@@ -213,7 +226,7 @@ void SpectrumPlot::ruler(const int *cols, const String *labels, int count, int h
     if (!_ok || _lblY < 0 || !cols || !labels) return;
 
     int topY = _wfRows ? (_wfTop + _wfRows) : (_specBot + 1);
-    int botY = (_footY >= 0) ? (_footY - 1) : (tftHeight - BORDER_PAD_Y);
+    int botY = (_footY >= 0) ? (_footY - 1) : (tftHeight - (_hasTitle ? BORDER_PAD_Y : 2));
     int h = botY - topY + 1;
     if (h > 0) {
         tft.fillRect(_plotL, topY, _plotW, h, _bg);
@@ -240,7 +253,7 @@ void SpectrumPlot::ruler(const int *cols, const String *labels, int count, int h
 void SpectrumPlot::status(const String &text, bool alert) {
     if (!_ok || _footY < 0) return;
 
-    int botY = tftHeight - BORDER_PAD_Y;
+    int botY = tftHeight - (_hasTitle ? BORDER_PAD_Y : 2);
     int h = botY - _footY + 1;
     tft.fillRect(_plotL, _footY, _plotW, max(h, 8 * FP), _bg);
     tft.setTextSize(FP);

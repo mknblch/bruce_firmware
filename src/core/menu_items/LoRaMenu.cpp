@@ -39,6 +39,10 @@ void LoRaMenu::optionsMenu() {
         if (verifyLoRaModuleGuard()) runLoRaTrackerMenu();
     }});
 
+    options.push_back({"Waterfall", []() {
+        if (verifyLoRaModuleGuard()) runLoRaWaterfallMenu();
+    }});
+
     options.push_back({"Chat", []() {
         if (verifyLoRaModuleGuard()) lorachat();
     }});

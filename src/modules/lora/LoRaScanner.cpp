@@ -5,6 +5,7 @@
 #include "LoRaSniffer.h"
 #include "LoRaScannerWorkflowHelpers.h"
 #include "LoRaTracker.h"
+#include "LoRaWaterfall.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
 #include "core/utils.h"
@@ -431,11 +432,14 @@ void runLoRaChannelDetector() {
                     {"Start Signal Tracker", [selectedConfig]() {
                         runLoRaTrackerMenuWithConfig(selectedConfig);
                     }},
+                    {"Start Waterfall", [selCh]() {
+                        runLoRaWaterfallWithSpan(max(100.0f, selCh.freqMHz - 1.0f), min(1050.0f, selCh.freqMHz + 1.0f));
+                    }},
                     {"Apply Freq to Config", [&applySelectedConfig]() { applySelectedConfig = true; }},
                     {"Resume Detector", []() {}}
                 };
                 const int actionIndex = loopOptions(actionOpts, MENU_TYPE_SUBMENU, "Channel Selected");
-                if (actionIndex == 0 || actionIndex == 1) {
+                if (actionIndex >= 0 && actionIndex <= 2) {
                     loraConfig = preLockConfig;
                     return;
                 }

@@ -1,4 +1,5 @@
 #include "rf_waterfall.h"
+#include "core/mykeyboard.h"
 #include "core/spectrum_plot.h"
 float m_rf_waterfall_start_freq = 433.0;
 float m_rf_waterfall_end_freq = 435.0;
@@ -66,11 +67,29 @@ void rf_waterfall_boundary_freq(float &boundary) {
 // read the noise floor. We sample WF_BINS points with a real settle and then
 // interpolate the envelope across the plot columns for a continuous trace.
 #define WF_BINS 64
-#define WF_SETTLE_MS 3
+
+static inline int getMedianRssi() {
+    int r1 = ELECHOUSE_cc1101.getRssi();
+    delayMicroseconds(60);
+    int r2 = ELECHOUSE_cc1101.getRssi();
+    delayMicroseconds(60);
+    int r3 = ELECHOUSE_cc1101.getRssi();
+    if ((r1 <= r2 && r2 <= r3) || (r3 <= r2 && r2 <= r1)) return r2;
+    if ((r2 <= r1 && r1 <= r3) || (r3 <= r1 && r1 <= r2)) return r1;
+    return r3;
+}
+
+enum AgcMode {
+    AGC_AUTO = 0,
+    AGC_GAIN_1X, // Normal -95 .. -35 dBm
+    AGC_GAIN_2X, // Boost -100 .. -50 dBm
+    AGC_GAIN_3X, // Max -105 .. -65 dBm
+    AGC_MODE_COUNT
+};
 
 void rf_waterfall_run() {
     SpectrumPlot plot;
-    if (!plot.begin("RF Waterfall", /*sdrWaterfall=*/true)) { // SDR colourmap below
+    if (!plot.begin("", /*sdrWaterfall=*/true, /*waterfallPriority=*/true)) { // SDR colourmap, no title bar to maximize waterfall room
         displayError("Out of memory", true);
         return;
     }
@@ -126,29 +145,127 @@ void rf_waterfall_run() {
     else if (range > 0.1f) step = 0.01f;
     else step = 0.001f;
 
+    AgcMode agcMode = AGC_AUTO;
+    float agcFloor = -105.0f;
+    float agcPeak = -45.0f;
+    int rawRssi[WF_BINS];
     uint8_t bins[WF_BINS];
 
     uint32_t lastStatus = 0;
     while (!check(EscPress)) {
+        // Toggle AGC / gain mode on Select press or 'g' / 'a' / 's' key
+        bool modeChanged = false;
+        if (check(SelPress)) {
+            modeChanged = true;
+        }
+
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            for (auto ch : k.word) {
+                char lowerKey = tolower(ch);
+                if (lowerKey == 'g' || lowerKey == 'a' || lowerKey == 's') {
+                    modeChanged = true;
+                }
+            }
+        }
+
+        if (modeChanged) {
+            agcMode = (AgcMode)((agcMode + 1) % AGC_MODE_COUNT);
+            memset(envPeak, 0, plotW);
+            memset(disp, 0, plotW);
+        }
+
         // Sweep the band once — WF_BINS RSSI samples with a real settle so the
         // reading reflects the tuned frequency instead of the noise floor.
+        // Suspend the background input handler task during the sweep to eliminate
+        // periodic I2C matrix scan EMI and context-switch noise spikes.
         int maxBin = 0;
         int maxRssi = -128;
+        int minRssi = 127;
+        if (xHandle) vTaskSuspend(xHandle);
         for (int b = 0; b < WF_BINS; b++) {
             float f = f_start + (f_end - f_start) * b / (WF_BINS - 1);
             setMHZ(f);
-            delay(WF_SETTLE_MS); // let the PLL/RSSI settle
-            int rssi = ELECHOUSE_cc1101.getRssi();
-            tft.drawPixel(0, 0, 0); // keep CC1101/TFT shared SPI happy
+            delayMicroseconds(900); // let the PLL/RSSI settle
+            int rssi = getMedianRssi();
+            tft.drawPixel(0, 0, 0); // keep CC1101/TFT shared SPI happy on each step
 
-            int v = map(rssi, -100, -30, 0, 100);
-            v = constrain(v, 0, 100);
-            bins[b] = (uint8_t)v;
-            if (rssi > maxRssi) {
-                maxRssi = rssi;
+            rawRssi[b] = rssi;
+            if (EscPress) break;
+        }
+        if (xHandle) vTaskResume(xHandle);
+        delay(2); // yield to allow input handler to process any pending keys
+
+        // Spatial 3-point median filter across frequency bins to completely eliminate
+        // isolated 1-bin impulse noise spikes (EMI/clock glitch beating)
+        int cleanRssi[WF_BINS];
+        for (int b = 0; b < WF_BINS; b++) {
+            int prev = (b > 0) ? rawRssi[b - 1] : rawRssi[b];
+            int curr = rawRssi[b];
+            int next = (b < WF_BINS - 1) ? rawRssi[b + 1] : rawRssi[b];
+            int med = curr;
+            if ((prev <= curr && curr <= next) || (next <= curr && curr <= prev)) med = curr;
+            else if ((curr <= prev && prev <= next) || (next <= prev && prev <= curr)) med = prev;
+            else med = next;
+            cleanRssi[b] = med;
+
+            if (med > maxRssi) {
+                maxRssi = med;
                 maxBin = b;
             }
-            if (check(EscPress)) break;
+            if (med < minRssi) {
+                minRssi = med;
+            }
+        }
+
+        if (agcMode == AGC_AUTO) {
+            // Adaptive Noise Floor: fast track down, slow drift up
+            if ((float)minRssi < agcFloor) {
+                agcFloor = agcFloor * 0.7f + (float)minRssi * 0.3f;
+            } else {
+                agcFloor = agcFloor * 0.96f + (float)minRssi * 0.04f;
+            }
+            agcFloor = constrain(agcFloor, -115.0f, -50.0f);
+
+            // Adaptive Peak Tracker: fast attack on peaks, smooth decay
+            if ((float)maxRssi > agcPeak) {
+                agcPeak = agcPeak * 0.6f + (float)maxRssi * 0.4f;
+            } else {
+                agcPeak = agcPeak * 0.97f + (float)maxRssi * 0.03f;
+            }
+            agcPeak = constrain(agcPeak, -90.0f, -15.0f);
+
+            // Maintain at least 30 dB dynamic range headroom to prevent thermal noise amplification
+            if (agcPeak - agcFloor < 30.0f) {
+                agcPeak = agcFloor + 30.0f;
+            }
+        }
+
+        int floorDbm, peakDbm;
+        switch (agcMode) {
+            case AGC_GAIN_1X:
+                floorDbm = -95;
+                peakDbm = -35;
+                break;
+            case AGC_GAIN_2X:
+                floorDbm = -100;
+                peakDbm = -50;
+                break;
+            case AGC_GAIN_3X:
+                floorDbm = -105;
+                peakDbm = -65;
+                break;
+            case AGC_AUTO:
+            default:
+                floorDbm = (int)roundf(agcFloor);
+                peakDbm = (int)roundf(agcPeak);
+                break;
+        }
+
+        for (int b = 0; b < WF_BINS; b++) {
+            int v = map(cleanRssi[b], floorDbm, peakDbm, 0, 100);
+            v = constrain(v, 0, 100);
+            bins[b] = (uint8_t)v;
         }
 
         // Interpolate the bins across the plot columns for a continuous trace,
@@ -177,10 +294,11 @@ void rf_waterfall_run() {
         plot.trace(disp, envPeak, maxCol - hlSpan, maxCol + hlSpan); // eased trace on top
         plot.pushRow(env); // waterfall shows the true measurement
 
-        if (millis() - lastStatus >= 350) {
+        if (millis() - lastStatus >= 300) {
             lastStatus = millis();
             float peakFreq = f_start + (f_end - f_start) * maxBin / (WF_BINS - 1);
-            plot.status(String(maxRssi) + "dBm @" + String(peakFreq, 3) + "MHz  UP/DN pan");
+            const char *modeNames[] = {"AGC", "1x", "2x", "3x"};
+            plot.status(String(maxRssi) + "dBm @" + String(peakFreq, 2) + "M [" + modeNames[agcMode] + "] SEL/G:gain");
         }
 
         // Pan the whole window and refresh the ruler + peak history.
@@ -199,6 +317,7 @@ void rf_waterfall_run() {
         }
     }
 
+    if (xHandle) vTaskResume(xHandle);
     free(env);
     free(disp);
     free(envPeak);
