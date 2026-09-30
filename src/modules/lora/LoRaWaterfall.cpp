@@ -406,7 +406,7 @@ void runLoRaWaterfall() {
         for (int b = 0; b < WF_BINS; b++) {
             float f = f_start + (f_end - f_start) * b / (WF_BINS - 1);
             setLoRaFrequency(f);
-            delayMicroseconds(1000);
+            delayMicroseconds(500);
             float rssi = getLoRaMedianRSSI();
 
             rawRssi[b] = rssi;
