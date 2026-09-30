@@ -188,12 +188,12 @@ void rf_waterfall_run() {
             setMHZ(f);
             delayMicroseconds(900); // let the PLL/RSSI settle
             int rssi = getMedianRssi();
-            tft.drawPixel(0, 0, 0); // keep CC1101/TFT shared SPI happy on each step
 
             rawRssi[b] = rssi;
             if (EscPress) break;
         }
         if (xHandle) vTaskResume(xHandle);
+        tft.drawPixel(0, 0, 0); // Keep CC1101/TFT shared SPI happy once per frame before display updates
         delay(2); // yield to allow input handler to process any pending keys
 
         // Spatial 3-point median filter across frequency bins to completely eliminate

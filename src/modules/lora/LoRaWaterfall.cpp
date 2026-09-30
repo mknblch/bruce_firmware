@@ -266,12 +266,12 @@ void runLoRaWaterfall() {
             setLoRaFrequency(f);
             delayMicroseconds(900);
             float rssi = getLoRaMedianRSSI();
-            tft.drawPixel(0, 0, 0); // Keep shared SPI display bus happy on each step
 
             rawRssi[b] = rssi;
             if (EscPress) break;
         }
         if (xHandle) vTaskResume(xHandle);
+        tft.drawPixel(0, 0, 0); // Keep shared SPI display bus happy once per frame before display updates
         delay(2); // yield to allow input handler to process any pending keys
 
         // Spatial 3-point median filter across frequency bins to completely eliminate
