@@ -1359,24 +1359,51 @@ bool rtl433_selftest(String &report) {
         }
     }
 
-    // Test 7: Wireless M-Bus Mode T (MSK PCM)
+    // Test 7: Wireless M-Bus Mode T & Mode S (MSK PCM / Manchester)
     {
         total++;
-        BitBuffer b;
-        // Sync word 0x543D
-        for (int i = 15; i >= 0; i--) b.push_bit((0x543D >> i) & 1);
         // L=0x1E, C=0x44 (SND_NR), Manuf=0x2D2C (KAM), ID=0x78563412 (12345678), Ver=0x01, Type=0x07 (Water)
-        uint8_t wmbus_hdr[] = {0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07};
-        for (size_t i = 0; i < sizeof(wmbus_hdr); i++) {
-            for (int bit = 7; bit >= 0; bit--) b.push_bit((wmbus_hdr[i] >> bit) & 1);
+        // Full 37-byte telegram with Block 1, Block 2, Block 3 and EN 13757-4 CRC16 per block
+        uint8_t wmbus_t_data[] = {
+            0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xED, 0x56,
+            0x7A, 0x20, 0x00, 0x00, 0x00, 0x04, 0x13, 0x56, 0x34, 0x12, 0x00, 0x42, 0x6C, 0xBF, 0x2C, 0x2F, 0x9C, 0x09,
+            0x01, 0xFD, 0x17, 0x00, 0x00, 0x81, 0x87
+        };
+        uint8_t wmbus_s_data[] = {
+            0x09, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xB1, 0x30
+        };
+        uint8_t bad_b1_crc[] = {
+            0x09, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xB1, 0x31
+        };
+        uint8_t bad_b2_crc[sizeof(wmbus_t_data)];
+        memcpy(bad_b2_crc, wmbus_t_data, sizeof(wmbus_t_data));
+        bad_b2_crc[28] ^= 0x01; // Corrupt Block 2 CRC
+
+        BitBuffer bt;
+        for (int i = 15; i >= 0; i--) bt.push_bit((0x543D >> i) & 1);
+        for (size_t i = 0; i < sizeof(wmbus_t_data); i++) {
+            for (int bit = 7; bit >= 0; bit--) bt.push_bit((wmbus_t_data[i] >> bit) & 1);
         }
-        std::vector<int> durs = build_pcm_pulses(b.data, b.num_bits, 10);
-        Rtl433Reading r;
-        if (decode_wmbus(durs, r) && r.device_id == 0x12345678 && r.channel == 0x07) {
-            report += "[PASS] Wireless M-Bus Mode T MSK (Water Meter 12345678)\n";
+        std::vector<int> durs_t = build_pcm_pulses(bt.data, bt.num_bits, 10);
+
+        BitBuffer bs;
+        for (int i = 15; i >= 0; i--) bs.push_bit((0x5476 >> i) & 1);
+        for (size_t i = 0; i < sizeof(wmbus_s_data); i++) {
+            for (int bit = 7; bit >= 0; bit--) bs.push_bit((wmbus_s_data[i] >> bit) & 1);
+        }
+        std::vector<int> durs_s = build_pcm_pulses(bs.data, bs.num_bits, 30);
+
+        Rtl433Reading r_t, r_s, r_bad;
+        if (decode_wmbus(durs_t, r_t) && r_t.device_id == 0x12345678 && r_t.channel == 0x07 &&
+                r_t.status_str.indexOf("KAM") >= 0 &&
+                decode_wmbus(durs_s, r_s) && r_s.device_id == 0x12345678 &&
+                !decode_wmbus_payload(bad_b1_crc, sizeof(bad_b1_crc), r_bad) &&
+                !decode_wmbus_payload(bad_b2_crc, sizeof(bad_b2_crc), r_bad) &&
+                !decode_wmbus_payload(wmbus_s_data, 10, r_bad)) {
+            report += "[PASS] Wireless M-Bus Mode T / Mode S MSK with CRC-16\n";
             passed++;
         } else {
-            report += "[FAIL] Wireless M-Bus Mode T MSK (id=" + String(r.device_id, HEX) + " type=" + String(r.channel) + ")\n";
+            report += "[FAIL] Wireless M-Bus Mode T / Mode S MSK with CRC-16 (id=" + String(r_t.device_id, HEX) + " type=" + String(r_t.channel) + ")\n";
         }
     }
 
@@ -1517,11 +1544,15 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         }
         return replayReading(r, repeats);
     } else if (st == "wmbus" || st == "msk" || st == "mskt" || st == "wmbust") {
-        uint8_t wmbus_hdr[] = {0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07};
+        uint8_t wmbus_pkt[] = {
+            0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xED, 0x56,
+            0x7A, 0x20, 0x00, 0x00, 0x00, 0x04, 0x13, 0x56, 0x34, 0x12, 0x00, 0x42, 0x6C, 0xBF, 0x2C, 0x2F, 0x9C, 0x09,
+            0x01, 0xFD, 0x17, 0x00, 0x00, 0x81, 0x87
+        };
         BitBuffer b;
         for (int i = 15; i >= 0; i--) b.push_bit((0x543D >> i) & 1);
-        for (size_t i = 0; i < sizeof(wmbus_hdr); i++) {
-            for (int bit = 7; bit >= 0; bit--) b.push_bit((wmbus_hdr[i] >> bit) & 1);
+        for (size_t i = 0; i < sizeof(wmbus_pkt); i++) {
+            for (int bit = 7; bit >= 0; bit--) b.push_bit((wmbus_pkt[i] >> bit) & 1);
         }
         r.raw_durations = build_pcm_pulses(b.data, b.num_bits, 10);
         r.protocol = "Wireless-MBus";
@@ -1537,7 +1568,7 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.preset_idx = presetIdx;
 
         if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
-            return rtl433_transmit_fsk_packet(defFreq, presetIdx, wmbus_hdr, sizeof(wmbus_hdr), 0x543D, repeats);
+            return rtl433_transmit_fsk_packet(defFreq, presetIdx, wmbus_pkt, sizeof(wmbus_pkt), 0x543D, repeats);
         }
         return replayReading(r, repeats);
     } else {

@@ -981,13 +981,59 @@ bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out) 
 // Decodes smart utility meter telegrams (Water, Gas, Heat, Electricity meters)
 // Mode T: 868.95 MHz MSK 100 kbps (10µs bit period)
 // Mode S: 868.30 MHz MSK 32.768 kbps (30.5µs bit period Manchester)
+static uint16_t wmbus_crc16(const uint8_t *data, size_t len) {
+    uint16_t crc = 0;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            if (crc & 0x8000) crc = (crc << 1) ^ 0x3D65;
+            else crc <<= 1;
+        }
+    }
+    return (uint16_t)~crc;
+}
+
 bool decode_wmbus_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
-    if (!bytes || len < 10) return false;
+    if (!bytes || len < 12) return false;
     uint8_t length = bytes[0];
+    if (length < 9) return false;
+
+    // Validate CRC (Format A: Block 1 10 bytes + 2 bytes CRC; Format B: CRC at block end)
+    uint16_t b1_crc_calc = wmbus_crc16(bytes, 10);
+    uint16_t b1_crc_read = ((uint16_t)bytes[10] << 8) | bytes[11];
+    bool is_format_a = (b1_crc_calc == b1_crc_read);
+    bool is_format_b = false;
+
+    if (is_format_a) {
+        // Validate any subsequent complete data blocks present in payload
+        unsigned num_data_blocks = (length - 9 + 15) / 16;
+        for (unsigned n = 0; n < num_data_blocks; ++n) {
+            size_t block_start = 12 + n * 18;
+            if (block_start >= len) break;
+            size_t block_data_len = (length - 9 - n * 16 < 16) ? (length - 9 - n * 16) : 16;
+            if (block_start + block_data_len + 2 > len) break;
+            uint16_t blk_crc_calc = wmbus_crc16(bytes + block_start, block_data_len);
+            uint16_t blk_crc_read = ((uint16_t)bytes[block_start + block_data_len] << 8) | bytes[block_start + block_data_len + 1];
+            if (blk_crc_calc != blk_crc_read) {
+                return false;
+            }
+        }
+    } else {
+        if (length >= 11) {
+            size_t crc_offset = (length - 1 < 126) ? (length - 1) : 126;
+            if (len >= crc_offset + 2) {
+                uint16_t fb_crc_calc = wmbus_crc16(bytes, crc_offset);
+                uint16_t fb_crc_read = ((uint16_t)bytes[crc_offset] << 8) | bytes[crc_offset + 1];
+                if (fb_crc_calc == fb_crc_read) {
+                    is_format_b = true;
+                }
+            }
+        }
+        if (!is_format_b) return false;
+    }
+
     uint8_t c_field = bytes[1];
-    uint16_t manuf = ((uint16_t)bytes[2] << 8) | bytes[3];
-    // Swap endianness for manufacturer code
-    manuf = ((manuf & 0xFF) << 8) | (manuf >> 8);
+    uint16_t manuf = ((uint16_t)bytes[3] << 8) | bytes[2];
 
     char c1 = ((manuf >> 10) & 0x1F) + '@';
     char c2 = ((manuf >> 5) & 0x1F) + '@';
@@ -998,12 +1044,8 @@ bool decode_wmbus_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) 
     if (c3 >= 'A' && c3 <= 'Z') manuf_str += c3;
     if (manuf_str.length() < 2) manuf_str = "UNK";
 
-    // 4-byte BCD Meter Serial Number (stored LSB first in standard wM-Bus)
+    // 4-byte Meter Identification / Serial Number (stored LSB first)
     uint32_t raw_id = ((uint32_t)bytes[7] << 24) | ((uint32_t)bytes[6] << 16) | ((uint32_t)bytes[5] << 8) | bytes[4];
-    uint32_t bcd_id = ((raw_id & 0x000000FF) << 24) |
-                      ((raw_id & 0x0000FF00) << 8)  |
-                      ((raw_id & 0x00FF0000) >> 8)  |
-                      ((raw_id & 0xFF000000) >> 24);
 
     uint8_t version = bytes[8];
     uint8_t dev_type = bytes[9];
@@ -1036,7 +1078,7 @@ bool decode_wmbus_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) 
     out.model = "wM-Bus " + type_str;
     out.decoder_name = "wM-Bus";
     out.decoder_id = 15;
-    out.device_id = bcd_id ? bcd_id : (uint32_t)raw_id;
+    out.device_id = raw_id;
     out.channel = dev_type;
     out.has_status = true;
     out.status_flags = (c_field << 8) | dev_type;
@@ -1062,27 +1104,29 @@ bool decode_wmbus(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     // Try Mode T (100 kbps -> 10µs bit period) first
     bool is_mode_t = demod_pcm_fsk(durations, 10, 45, buf, 0x543D, 16);
-    if (!is_mode_t || buf.num_bits < 80) {
+    if (!is_mode_t || buf.num_bits < 96) {
         is_mode_t = demod_pcm_fsk(durations, 10, 45, buf, 0x3D54, 16);
     }
-    if (!is_mode_t || buf.num_bits < 80) {
+    if (!is_mode_t || buf.num_bits < 96) {
         is_mode_t = demod_pcm_fsk(durations, 10, 45, buf);
     }
-    if (!is_mode_t || buf.num_bits < 80) {
+    if (!is_mode_t || buf.num_bits < 96) {
         // Try Mode S (32.768 kbps -> 30.5µs bit period or 15.25µs Manchester half clock)
         if (!demod_manchester(durations, 15, 45, buf, false)) {
             if (!demod_pcm_fsk(durations, 30, 45, buf, 0x543D, 16)) {
-                if (!demod_pcm_fsk(durations, 30, 45, buf)) return false;
+                if (!demod_pcm_fsk(durations, 30, 45, buf, 0x5476, 16)) {
+                    if (!demod_pcm_fsk(durations, 30, 45, buf)) return false;
+                }
             }
         }
     }
-    if (buf.num_bits < 80) return false;
+    if (buf.num_bits < 96) return false;
 
-    // Search for wM-Bus Sync Word (0x543D or 0x2DD4 or 0x5555)
+    // Search for wM-Bus Sync Word (0x543D, 0x5476, 0x2DD4 or 0xAA2D)
     int sync_idx = -1;
-    for (int i = 0; i <= (int)buf.num_bits - 80; i++) {
+    for (int i = 0; i <= (int)buf.num_bits - 96; i++) {
         uint16_t w = (uint16_t)buf.extract_bits(i, 16);
-        if (w == 0x543D || w == 0x2DD4 || w == 0xAA2D) {
+        if (w == 0x543D || w == 0x5476 || w == 0x2DD4 || w == 0xAA2D) {
             sync_idx = i + 16;
             break;
         }
@@ -1090,19 +1134,29 @@ bool decode_wmbus(const std::vector<int> &durations, Rtl433Reading &out) {
     if (sync_idx < 0) {
         // Try starting from offset 0 if length field looks valid
         uint8_t l0 = (uint8_t)buf.extract_bits(0, 8);
-        if (l0 >= 10 && l0 <= 64 && (l0 * 8 <= (int)buf.num_bits)) {
+        if (l0 >= 9 && l0 <= 250 && (l0 * 8 <= (int)buf.num_bits)) {
             sync_idx = 0;
         } else {
             return false;
         }
     }
-    if (sync_idx + 80 > (int)buf.num_bits) return false;
+    if (sync_idx + 96 > (int)buf.num_bits) return false;
 
-    uint8_t bytes[10];
-    for (int i = 0; i < 10; i++) {
+    uint8_t length = (uint8_t)buf.extract_bits(sync_idx, 8);
+    if (length < 9) return false;
+
+    unsigned num_blocks = (length - 9 + 15) / 16;
+    size_t total_expected = 12 + (length - 9) + num_blocks * 2;
+    size_t available_bytes = (buf.num_bits - sync_idx) / 8;
+    size_t extract_len = (available_bytes < total_expected) ? available_bytes : total_expected;
+    if (extract_len < 12) return false;
+    if (extract_len > 256) extract_len = 256;
+
+    uint8_t bytes[256];
+    for (size_t i = 0; i < extract_len; i++) {
         bytes[i] = (uint8_t)buf.extract_bits(sync_idx + i * 8, 8);
     }
-    bool ok = decode_wmbus_payload(bytes, 10, out);
+    bool ok = decode_wmbus_payload(bytes, extract_len, out);
     if (ok) {
         out.raw_durations = durations;
         out.bit_len = buf.num_bits;
