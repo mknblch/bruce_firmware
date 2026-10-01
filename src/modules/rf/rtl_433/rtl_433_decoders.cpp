@@ -2,6 +2,40 @@
 #include "rtl_433.h"
 #include <cmath>
 
+static uint8_t rtl433_lfsr_digest8(const uint8_t *bytes, size_t len, uint8_t gen, uint8_t key) {
+    uint8_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        for (int bit = 7; bit >= 0; bit--) {
+            if ((bytes[i] >> bit) & 1) sum ^= key;
+            key = (key & 1) ? ((key >> 1) ^ gen) : (key >> 1);
+        }
+    }
+    return sum;
+}
+
+static uint8_t rtl433_crc8(const uint8_t *bytes, size_t len, uint8_t poly, uint8_t init) {
+    uint8_t crc = init;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= bytes[i];
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc & 0x80) ? ((crc << 1) ^ poly) : (crc << 1);
+        }
+    }
+    return crc;
+}
+
+static bool rtl433_even_parity(const uint8_t *bytes, size_t len) {
+    uint8_t parity = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t value = bytes[i];
+        for (int bit = 0; bit < 8; bit++) {
+            parity ^= value & 1;
+            value >>= 1;
+        }
+    }
+    return parity == 0;
+}
+
 // ===========================================================================
 // Decoder 1: Nexus / Fine Offset / Rubicson / TFA (OOK PPM)
 // ===========================================================================
@@ -16,7 +50,8 @@ bool decode_nexus(const std::vector<int> &durations, Rtl433Reading &out) {
 
     // Byte 1: Battery (bit 7), TX (bit 6), Channel (bits 5..4), Temp MSB (bits 3..0)
     uint8_t b1 = buf.get_byte(1);
-    bool battery_low = (b1 & 0x80) != 0;
+    bool battery_low = (b1 & 0x80) == 0;
+    if ((b1 & 0x30) == 0x30) return false;
     uint8_t channel = ((b1 >> 4) & 0x03) + 1;
 
     // Byte 2: Temp LSB
@@ -30,14 +65,16 @@ bool decode_nexus(const std::vector<int> &durations, Rtl433Reading &out) {
     // Byte 3 & 4: Humidity & check
     uint8_t b3 = buf.get_byte(3);
     uint8_t b4 = buf.get_byte(4);
+    if ((b3 & 0xF0) != 0xF0) return false;
+
+    // Solight-TE44/EMOS frames can otherwise look like Nexus packets; their
+    // CRC is not a Nexus checksum, so reject matching CRC-bearing frames.
+    uint8_t crc_in[] = {id, b1, b2, (uint8_t)(b3 & 0xF0),
+                        (uint8_t)(((b3 & 0x0F) << 4) | (b4 >> 4))};
+    if (rtl433_crc8(crc_in, sizeof(crc_in), 0x31, 0x6C) == 0) return false;
+
     uint8_t humidity = ((b3 & 0x0F) << 4) | (b4 >> 4);
-    if (humidity > 100) {
-        humidity = b4;
-    }
-    if (humidity > 100) {
-        humidity = b3 & 0x7F;
-    }
-    if (humidity > 100) return false;
+    if (humidity != 0 && humidity > 100) return false;
 
     out.protocol = "FineOffset-WH2";
     out.model = "WH2 / Rubicson / TFA";
@@ -70,18 +107,16 @@ bool decode_acurite_606tx(const std::vector<int> &durations, Rtl433Reading &out)
     uint8_t b2 = buf.get_byte(2);
     uint8_t b3 = buf.get_byte(3);
 
-    // Checksum: sum of first 3 bytes modulo 256
-    if (((b0 + b1 + b2) & 0xFF) != b3) return false;
+    uint8_t checksum_bytes[] = {b0, b1, b2};
+    if (rtl433_lfsr_digest8(checksum_bytes, sizeof(checksum_bytes), 0x98, 0xF1) != b3) return false;
 
     uint8_t id = b0;
-    bool battery_low = (b1 & 0x80) != 0;
-    uint8_t channel = ((b1 >> 4) & 0x07);
+    bool battery_low = (b1 & 0x80) == 0;
+    uint8_t channel = ((b1 >> 4) & 0x03);
 
     int16_t temp_raw = ((b1 & 0x0F) << 8) | b2;
-    float temp_c = (temp_raw - 1000) / 10.0f;
-    if (temp_c < -40.0f || temp_c > 70.0f) {
-        temp_c = (temp_raw - 1024) / 10.0f;
-    }
+    if (temp_raw & 0x0800) temp_raw |= 0xF000;
+    float temp_c = temp_raw / 10.0f;
     if (temp_c < -40.0f || temp_c > 70.0f) return false;
 
     out.protocol = "Acurite-606TX";
@@ -117,26 +152,20 @@ bool decode_acurite_tower(const std::vector<int> &durations, Rtl433Reading &out)
     uint8_t b6 = buf.get_byte(6);
 
     uint8_t sum = (b0 + b1 + b2 + b3 + b4 + b5) & 0xFF;
-    uint8_t crc = buf.crc8(0x07, 0x00, 0, 48);
-    if (sum != b6 && crc != b6) {
-        // try 7-bit parity checksum
-        uint8_t sum7 = (b0 + b1 + b2 + b3 + b4 + b5) & 0x7F;
-        if (sum7 != (b6 & 0x7F)) return false;
-    }
+    uint8_t parity_bytes[] = {b2, b3, b4, b5};
+    if (sum != b6 || !rtl433_even_parity(parity_bytes, sizeof(parity_bytes))) return false;
 
     uint16_t id = ((b0 & 0x3F) << 8) | b1;
     uint8_t ch_code = (b0 >> 6) & 0x03;
+    if (ch_code == 1) return false;
     uint8_t channel = (ch_code == 3) ? 1 : (ch_code == 2 ? 2 : 3);
     bool battery_low = (b2 & 0x40) == 0; // In 592TXR bit 6 is bat ok
 
     uint8_t humidity = b3 & 0x7F;
     int16_t temp_raw = ((b4 & 0x7F) << 7) | (b5 & 0x7F);
     float temp_c = (temp_raw - 1000) / 10.0f;
-    if (temp_c < -40.0f || temp_c > 70.0f) {
-        temp_c = ((temp_raw - 1000) * 0.1f - 32.0f) / 1.8f; // if sent in F
-    }
     if (temp_c < -40.0f || temp_c > 70.0f) return false;
-    if (humidity > 100) return false;
+    if (humidity > 100 && humidity != 127) return false;
 
     out.protocol = "Acurite-Tower";
     out.model = "592TXR / Tower";
@@ -147,8 +176,8 @@ bool decode_acurite_tower(const std::vector<int> &durations, Rtl433Reading &out)
     out.has_temp = true;
     out.temp_c = temp_c;
     out.temp_f = temp_c * 1.8f + 32.0f;
-    out.has_humidity = (humidity > 0);
-    out.humidity = (float)humidity;
+    out.has_humidity = (humidity > 0 && humidity <= 100);
+    out.humidity = out.has_humidity ? (float)humidity : 0.0f;
     out.has_battery = true;
     out.battery_ok = !battery_low;
     out.bit_len = buf.num_bits;
@@ -255,11 +284,7 @@ bool decode_fineoffset_fsk_payload(const uint8_t *bytes, size_t len, Rtl433Readi
             else crc <<= 1;
         }
     }
-    if (crc != crc_rx) {
-        if (b0 != 0x24 && b0 != 0x48 && b0 != 0x2B && b0 != 0x5B && b0 != 0x1B) {
-            return false;
-        }
-    }
+    if (crc != crc_rx) return false;
 
     uint16_t id = ((uint16_t)b1 << 8) | b2;
     int16_t temp_raw = ((b3 & 0x07) << 8) | b4;
@@ -347,30 +372,53 @@ bool decode_fineoffset_fsk(const std::vector<int> &durations, Rtl433Reading &out
 }
 
 // ===========================================================================
-// Decoder 6: LaCrosse TX29 / TX35 (2-FSK / OOK)
+// Decoder 6: LaCrosse TX (OOK PWM)
 // ===========================================================================
 bool decode_lacrosse_tx_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
-    if (!bytes || len < 4) return false;
-    uint8_t id = bytes[0] >> 1;
-    if (id == 0 || id == 0x7F) return false;
+    if (!bytes || len != 6 || (bytes[5] & 0x0F) != 0) return false;
 
-    uint8_t type = (bytes[0] & 0x01) << 4 | (bytes[1] >> 4);
-    uint16_t temp_raw = ((bytes[1] & 0x0F) << 8) | bytes[2];
-    float temp_c = (temp_raw - 500) / 10.0f;
-    if (temp_c < -40.0f || temp_c > 70.0f) return false;
+    uint8_t nibbles[11];
+    for (int i = 0; i < 11; i++) {
+        nibbles[i] = (bytes[i / 2] >> ((i & 1) ? 0 : 4)) & 0x0F;
+    }
+    if (nibbles[0] != 0 || nibbles[1] != 0x0A) return false;
+
+    uint8_t checksum = 0;
+    for (int i = 0; i < 10; i++) checksum = (checksum + nibbles[i]) & 0x0F;
+    if (checksum != nibbles[10]) return false;
+
+    uint8_t parity = nibbles[4] & 0x01;
+    for (int i = 5; i < 8; i++) {
+        uint8_t value = nibbles[i];
+        while (value) {
+            parity ^= value & 0x01;
+            value >>= 1;
+        }
+    }
+    if (parity != 0) return false;
+
+    uint8_t type = nibbles[2];
+    uint16_t value_raw = (nibbles[5] << 8) | (nibbles[6] << 4) | nibbles[7];
+    if (nibbles[5] != nibbles[8] || nibbles[6] != nibbles[9]) return false;
+    if (type != 0x00 && type != 0x0E) return false;
+    if (value_raw != 0x0FF && (nibbles[5] > 9 || nibbles[6] > 9 || nibbles[7] > 9)) return false;
+
+    uint8_t id = (nibbles[3] << 3) | (nibbles[4] >> 1);
+    float value = nibbles[5] * 10.0f + nibbles[6] + nibbles[7] * 0.1f;
 
     out.protocol = "LaCrosse-TX";
-    out.model = "LaCrosse TX29/TX35";
+    out.model = "LaCrosse TX";
     out.decoder_name = "LaCrosse";
     out.decoder_id = 6;
     out.device_id = id;
-    out.channel = 1;
-    out.has_temp = true;
-    out.temp_c = temp_c;
-    out.temp_f = temp_c * 1.8f + 32.0f;
-    out.has_battery = true;
-    out.battery_ok = (type != 0);
-    out.bit_len = len * 8;
+    out.has_temp = (type == 0x00);
+    out.has_humidity = (type == 0x0E && value_raw != 0x0FF);
+    if (out.has_temp) {
+        out.temp_c = value - 50.0f;
+        out.temp_f = out.temp_c * 1.8f + 32.0f;
+    }
+    if (out.has_humidity) out.humidity = value;
+    out.bit_len = 44;
     out.payload_hex = "";
     for (size_t i = 0; i < len; i++) {
         char h[3];
@@ -382,37 +430,14 @@ bool decode_lacrosse_tx_payload(const uint8_t *bytes, size_t len, Rtl433Reading 
 
 bool decode_lacrosse_tx(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
-    if (!demod_pcm_fsk(durations, 104, 45, buf, 0x0A, 4)) {
-        if (!demod_pcm_fsk(durations, 104, 45, buf)) return false;
+    if (!demod_pwm(durations, 1400, 550, 1000, 45, buf) || buf.num_bits != 44) return false;
+
+    bool ok = decode_lacrosse_tx_payload(buf.data, 6, out);
+    if (ok) {
+        out.raw_durations = durations;
+        out.bit_len = buf.num_bits;
     }
-    if (buf.num_bits < 40) return false;
-
-    int sync_idx = buf.search_sync(0x0A, 4);
-    if (sync_idx < 0 || sync_idx + 36 > buf.num_bits) return false;
-
-    uint16_t start = sync_idx + 4;
-    uint8_t id = (uint8_t)buf.extract_bits(start, 7);
-    if (id == 0 || id == 0x7F) return false;
-
-    uint8_t type = (uint8_t)buf.extract_bits(start + 7, 5);
-    uint16_t temp_raw = (uint16_t)buf.extract_bits(start + 12, 12);
-    float temp_c = (temp_raw - 500) / 10.0f;
-    if (temp_c < -40.0f || temp_c > 70.0f) return false;
-
-    out.protocol = "LaCrosse-TX";
-    out.model = "LaCrosse TX29/TX35";
-    out.decoder_name = "LaCrosse";
-    out.decoder_id = 6;
-    out.device_id = id;
-    out.channel = 1;
-    out.has_temp = true;
-    out.temp_c = temp_c;
-    out.temp_f = temp_c * 1.8f + 32.0f;
-    out.has_battery = true;
-    out.battery_ok = (type != 0);
-    out.bit_len = buf.num_bits;
-    out.payload_hex = buf.to_hex();
-    return true;
+    return ok;
 }
 
 // ===========================================================================
@@ -513,19 +538,23 @@ bool decode_schrader_tpms(const std::vector<int> &durations, Rtl433Reading &out)
 // Decoder 9: Toyota TPMS (2-FSK Manchester)
 // ===========================================================================
 bool decode_toyota_tpms_payload(const uint8_t *bytes, size_t len, Rtl433Reading &out) {
-    if (!bytes || len < 7) return false;
+    if (!bytes || len != 9) return false;
+    if (rtl433_crc8(bytes, 8, 0x07, 0x80) != bytes[8]) return false;
+
     uint32_t id = ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | bytes[3];
     if (id == 0 || id == 0xFFFFFFFF) return false;
 
-    uint8_t pressure_raw = bytes[4];
-    uint8_t temp_raw = bytes[5];
-    uint8_t status = bytes[6];
+    uint8_t pressure_raw = ((bytes[4] & 0x7F) << 1) | (bytes[5] >> 7);
+    uint8_t temp_raw = ((bytes[5] & 0x7F) << 1) | (bytes[6] >> 7);
+    uint8_t status = (bytes[4] & 0x80) | (bytes[6] & 0x7F);
+    uint8_t pressure_check = bytes[7] ^ 0xFF;
+    if (pressure_raw != pressure_check) return false;
 
-    float psi = (pressure_raw * 0.25f);
+    float psi = (pressure_raw * 0.25f) - 7.0f;
     float kpa = psi * 6.89476f;
     float temp_c = (float)temp_raw - 40.0f;
 
-    if (psi > 100.0f || temp_c < -40.0f || temp_c > 125.0f) return false;
+    if (psi < 0.0f || psi > 60.0f || temp_c < -40.0f || temp_c > 125.0f) return false;
 
     out.protocol = "Toyota-TPMS";
     out.model = "Toyota / Lexus TPMS";
@@ -558,7 +587,7 @@ bool decode_toyota_tpms(const std::vector<int> &durations, Rtl433Reading &out) {
     if (!demod_manchester(durations, 104, 45, buf, false)) {
         if (!demod_manchester(durations, 104, 45, buf, true)) return false;
     }
-    if (buf.num_bits < 64) return false;
+    if (buf.num_bits < 72) return false;
 
     // Search sync 0x0155 or 0x0255
     int sync_idx = buf.search_sync(0x0155, 16);
@@ -566,40 +595,19 @@ bool decode_toyota_tpms(const std::vector<int> &durations, Rtl433Reading &out) {
     if (sync_idx < 0) sync_idx = 0;
 
     uint16_t start = sync_idx;
-    if (start + 56 > buf.num_bits) return false;
+    if (start + 72 > buf.num_bits) return false;
 
-    uint32_t id = buf.extract_bits(start, 32);
-    if (id == 0 || id == 0xFFFFFFFF) return false;
-
-    uint8_t pressure_raw = (uint8_t)buf.extract_bits(start + 32, 8);
-    uint8_t temp_raw = (uint8_t)buf.extract_bits(start + 40, 8);
-    uint8_t status = (uint8_t)buf.extract_bits(start + 48, 8);
-
-    float psi = (pressure_raw * 0.25f);
-    float kpa = psi * 6.89476f;
-    float temp_c = (float)temp_raw - 40.0f;
-
-    if (psi > 100.0f || temp_c < -40.0f || temp_c > 125.0f) return false;
-
-    out.protocol = "Toyota-TPMS";
-    out.model = "Toyota / Lexus TPMS";
-    out.decoder_name = "Toyota-TPMS";
-    out.decoder_id = 9;
-    out.device_id = id;
-    out.has_pressure = true;
-    out.pressure_kpa = kpa;
-    out.pressure_psi = psi;
-    out.has_temp = true;
-    out.temp_c = temp_c;
-    out.temp_f = temp_c * 1.8f + 32.0f;
-    out.has_status = true;
-    out.status_flags = status;
-    out.status_str = "TIRE OK";
-    out.has_battery = true;
-    out.battery_ok = true;
-    out.bit_len = buf.num_bits;
-    out.payload_hex = buf.to_hex();
-    return true;
+    uint8_t bytes[9];
+    for (int i = 0; i < 9; i++) {
+        bytes[i] = (uint8_t)buf.extract_bits(start + i * 8, 8);
+    }
+    bool ok = decode_toyota_tpms_payload(bytes, sizeof(bytes), out);
+    if (ok) {
+        out.raw_durations = durations;
+        out.bit_len = buf.num_bits;
+        out.payload_hex = buf.to_hex();
+    }
+    return ok;
 }
 
 // ===========================================================================
@@ -757,9 +765,7 @@ bool decode_bresser_5in1_payload(const uint8_t *bytes, size_t len, Rtl433Reading
                 else crc <<= 1;
             }
         }
-        if (crc != check) {
-            if (humidity == 0 || temp_c < -30.0f || temp_c > 65.0f) return false;
-        }
+        if (crc != check) return false;
     }
 
     out.protocol = "Bresser-5in1";

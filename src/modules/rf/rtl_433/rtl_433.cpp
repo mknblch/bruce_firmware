@@ -683,7 +683,6 @@ bool Rtl433Engine::decodePayload(const uint8_t *payload, size_t len, float freq,
              decode_bresser_5in1_payload(payload, len, reading) ||
              decode_bresser_6in1_payload(payload, len, reading) ||
              decode_toyota_tpms_payload(payload, len, reading) ||
-             decode_lacrosse_tx_payload(payload, len, reading) ||
              decode_wmbus_payload(payload, len, reading);
     }
 
@@ -737,7 +736,6 @@ bool Rtl433Engine::decode(const std::vector<int> &durations, float freq, int pre
              decode_bresser_5in1(durations, reading) ||
              decode_bresser_6in1(durations, reading) ||
              decode_toyota_tpms(durations, reading) ||
-             decode_lacrosse_tx(durations, reading) ||
              decode_wmbus(durations, reading);
     } else {
         // OOK Decoders
@@ -1141,11 +1139,17 @@ bool rtl433_selftest(String &report) {
     // Test 1: Nexus (OOK PPM)
     {
         total++;
-        // ID=0x8E (142), Channel=1 (b1=0x00), Temp=25.4C (0x00FE=254), Hum=55% (0x37 -> b3=0xF3, b4=0x70)
+        // ID=0x8E (142), Channel=1, Temp=25.4C (0x00FE=254), Hum=55%.
         uint8_t nexus_data[] = {0x8E, 0x00, 0xFE, 0xF3, 0x70};
         std::vector<int> durs = build_ppm_pulses(nexus_data, 36, 500, 1000, 2000);
         Rtl433Reading r;
-        if (decode_nexus(durs, r) && r.device_id == 0x8E && abs(r.temp_c - 25.4f) < 0.2f && abs(r.humidity - 55.0f) < 0.2f) {
+        uint8_t invalid_nexus_data[] = {0x8E, 0x00, 0xFE, 0x03, 0x70};
+        std::vector<int> invalid_durs = build_ppm_pulses(invalid_nexus_data, 36, 500, 1000, 2000);
+        uint8_t invalid_humidity_data[] = {0x8E, 0x00, 0xFE, 0xF6, 0x50};
+        std::vector<int> invalid_humidity_durs = build_ppm_pulses(invalid_humidity_data, 36, 500, 1000, 2000);
+        if (decode_nexus(durs, r) && r.device_id == 0x8E && abs(r.temp_c - 25.4f) < 0.2f &&
+                abs(r.humidity - 55.0f) < 0.2f && !decode_nexus(invalid_durs, r) &&
+                !decode_nexus(invalid_humidity_durs, r)) {
             report += "[PASS] Nexus / Rubicson OOK PPM\n";
             passed++;
         } else {
@@ -1156,11 +1160,14 @@ bool rtl433_selftest(String &report) {
     // Test 2: Acurite 606TX (OOK PWM)
     {
         total++;
-        // ID=0x55, Ch=1 & TempMSB=4 (0x04), TempLSB=0xB0 (raw 1200 = 20.0C), Checksum = (0x55+0x04+0xB0)&0xFF = 0x09
-        uint8_t acurite_data[] = {0x55, 0x04, 0xB0, 0x09};
+        // ID=0x55, battery OK, channel 1, temperature 20.0C, LFSR checksum.
+        uint8_t acurite_data[] = {0x55, 0x80, 0xC8, 0x05};
         std::vector<int> durs = build_pwm_pulses(acurite_data, 32, 200, 600, 400);
+        uint8_t invalid_acurite_data[] = {0x55, 0x80, 0xC8, 0x04};
+        std::vector<int> invalid_durs = build_pwm_pulses(invalid_acurite_data, 32, 200, 600, 400);
         Rtl433Reading r;
-        if (decode_acurite_606tx(durs, r) && r.device_id == 0x55 && abs(r.temp_c - 20.0f) < 0.2f) {
+        if (decode_acurite_606tx(durs, r) && r.device_id == 0x55 && abs(r.temp_c - 20.0f) < 0.2f &&
+                !decode_acurite_606tx(invalid_durs, r)) {
             report += "[PASS] Acurite 606TX OOK PWM\n";
             passed++;
         } else {
@@ -1168,7 +1175,52 @@ bool rtl433_selftest(String &report) {
         }
     }
 
-    // Test 3: EV1527 Security (OOK PWM)
+    // Test 3: Acurite Tower additive checksum and parity (OOK PWM space)
+    {
+        total++;
+        uint8_t tower_data[] = {0xC1, 0x23, 0x40, 0x32, 0x09, 0x30, 0x8F};
+        auto make_tower_durations = [](const uint8_t *data) {
+            std::vector<int> durs;
+            for (size_t i = 0; i < 56; i++) {
+                uint8_t bit = (data[i / 8] >> (7 - (i % 8))) & 1;
+                durs.push_back(400);
+                durs.push_back(bit ? -400 : -200);
+            }
+            return durs;
+        };
+        Rtl433Reading r;
+        std::vector<int> durs = make_tower_durations(tower_data);
+        uint8_t bad_checksum[] = {0xC1, 0x23, 0x40, 0x32, 0x09, 0x30, 0x8E};
+        std::vector<int> bad_checksum_durs = make_tower_durations(bad_checksum);
+        uint8_t bad_parity[] = {0xC1, 0x23, 0x40, 0x33, 0x09, 0x30, 0x90};
+        std::vector<int> bad_parity_durs = make_tower_durations(bad_parity);
+        if (decode_acurite_tower(durs, r) && r.device_id == 0x0123 && abs(r.temp_c - 20.0f) < 0.2f &&
+                !decode_acurite_tower(bad_checksum_durs, r) && !decode_acurite_tower(bad_parity_durs, r)) {
+            report += "[PASS] Acurite Tower checksum and parity\n";
+            passed++;
+        } else {
+            report += "[FAIL] Acurite Tower checksum and parity\n";
+        }
+    }
+
+    // Test 4: Toyota TPMS CRC and inverted pressure cross-check
+    {
+        total++;
+        uint8_t toyota_data[] = {0x12, 0x34, 0x56, 0x78, 0x4E, 0x25, 0x92, 0x63, 0x09};
+        uint8_t invalid_toyota_data[] = {0x12, 0x34, 0x56, 0x78, 0x4E, 0x25, 0x92, 0x63, 0x08};
+        Rtl433Reading r;
+        if (decode_toyota_tpms_payload(toyota_data, sizeof(toyota_data), r) &&
+                r.device_id == 0x12345678 && abs(r.pressure_psi - 32.0f) < 0.2f &&
+                abs(r.temp_c - 35.0f) < 0.2f &&
+                !decode_toyota_tpms_payload(invalid_toyota_data, sizeof(invalid_toyota_data), r)) {
+            report += "[PASS] Toyota TPMS CRC and pressure check\n";
+            passed++;
+        } else {
+            report += "[FAIL] Toyota TPMS CRC and pressure check\n";
+        }
+    }
+
+    // Test 5: EV1527 Security (OOK PWM)
     {
         total++;
         // Addr=0x12345, Cmd=0x08 (DOOR OPEN / MOTION) -> bytes: 0x12, 0x34, 0x58
@@ -1188,7 +1240,7 @@ bool rtl433_selftest(String &report) {
         }
     }
 
-    // Test 4: Honeywell 5800 (OOK Manchester)
+    // Test 6: Honeywell 5800 (OOK Manchester)
     {
         total++;
         // Sync + 24-bit ID + status byte + parity
@@ -1203,7 +1255,7 @@ bool rtl433_selftest(String &report) {
         }
     }
 
-    // Test 5: Fine Offset WH65 FSK (2-FSK PCM)
+    // Test 7: Fine Offset WH65 FSK (2-FSK PCM)
     {
         total++;
         // Preamble + Sync 0x2DD4 + Family 0x48 (WH65B) + ID 0x1234 + Temp 615 (21.5C) + Hum 50%
@@ -1217,9 +1269,14 @@ bool rtl433_selftest(String &report) {
         uint8_t crc = b.crc8(0x31, 0x00, 16, 13 * 8);
         for (int bit = 7; bit >= 0; bit--) b.push_bit((crc >> bit) & 1);
 
+        uint8_t invalid_payload[14];
+        memcpy(invalid_payload, payload, 13);
+        invalid_payload[13] = crc ^ 0x01;
+
         std::vector<int> durs = build_pcm_pulses(b.data, b.num_bits, 58);
         Rtl433Reading r;
-        if (decode_fineoffset_fsk(durs, r) && r.device_id == 0x1234 && abs(r.temp_c - 21.5f) < 0.2f && r.humidity == 50.0f) {
+        if (decode_fineoffset_fsk(durs, r) && r.device_id == 0x1234 && abs(r.temp_c - 21.5f) < 0.2f &&
+                r.humidity == 50.0f && !decode_fineoffset_fsk_payload(invalid_payload, sizeof(invalid_payload), r)) {
             report += "[PASS] Fine Offset WH65 Weather 2-FSK\n";
             passed++;
         } else {
@@ -1227,7 +1284,7 @@ bool rtl433_selftest(String &report) {
         }
     }
 
-    // Test 6: Bresser 5-in-1 (GFSK PCM)
+    // Test 8: Bresser 5-in-1 (GFSK PCM)
     {
         total++;
         BitBuffer b;
@@ -1239,9 +1296,14 @@ bool rtl433_selftest(String &report) {
         for (int i = 0; i < 10; i++) {
             for (int bit = 7; bit >= 0; bit--) b.push_bit((payload[i] >> bit) & 1);
         }
+        uint8_t invalid_payload[10];
+        memcpy(invalid_payload, payload, sizeof(invalid_payload));
+        invalid_payload[9] ^= 0x01;
         std::vector<int> durs = build_pcm_pulses(b.data, b.num_bits, 122);
         Rtl433Reading r;
-        if (decode_bresser_5in1(durs, r) && (r.device_id == ((0x51 << 8) | 0x02)) && abs(r.temp_c - 22.2f) < 0.2f && r.humidity == 55.0f) {
+        if (decode_bresser_5in1(durs, r) && (r.device_id == ((0x51 << 8) | 0x02)) &&
+                abs(r.temp_c - 22.2f) < 0.2f && r.humidity == 55.0f &&
+                !decode_bresser_5in1_payload(invalid_payload, sizeof(invalid_payload), r)) {
             report += "[PASS] Bresser 5-in-1 Weather GFSK\n";
             passed++;
         } else {
@@ -1267,6 +1329,33 @@ bool rtl433_selftest(String &report) {
             passed++;
         } else {
             report += "[FAIL] Wireless M-Bus Mode T MSK (id=" + String(r.device_id, HEX) + " type=" + String(r.channel) + ")\n";
+        }
+    }
+
+    {
+        total++;
+        uint8_t temp_data[6] = {0x0A, 0x06, 0xA7, 0x23, 0x72, 0xF0};
+        uint8_t humidity_data[6] = {0x0A, 0xE6, 0xA5, 0x50, 0x55, 0xC0};
+        uint8_t bad_checksum[6] = {0x0A, 0x06, 0xA7, 0x23, 0x72, 0xE0};
+        uint8_t bad_parity[6] = {0x0A, 0x06, 0xB7, 0x23, 0x72, 0x00};
+        std::vector<int> temp_durs = build_pwm_pulses(temp_data, 44, 1400, 550, 1000);
+        std::vector<int> humidity_durs = build_pwm_pulses(humidity_data, 44, 1400, 550, 1000);
+        std::vector<int> bad_checksum_durs = build_pwm_pulses(bad_checksum, 44, 1400, 550, 1000);
+        std::vector<int> bad_parity_durs = build_pwm_pulses(bad_parity, 44, 1400, 550, 1000);
+        Rtl433Reading temp_reading;
+        Rtl433Reading humidity_reading;
+        if (decode_lacrosse_tx(temp_durs, temp_reading) && temp_reading.device_id == 53 &&
+                temp_reading.has_temp && abs(temp_reading.temp_c - 22.3f) < 0.2f &&
+                decode_lacrosse_tx(humidity_durs, humidity_reading) && humidity_reading.device_id == 53 &&
+                humidity_reading.has_humidity && abs(humidity_reading.humidity - 55.0f) < 0.2f &&
+                !decode_lacrosse_tx_payload(bad_checksum, sizeof(bad_checksum), temp_reading) &&
+                !decode_lacrosse_tx_payload(bad_parity, sizeof(bad_parity), temp_reading) &&
+                !decode_lacrosse_tx(bad_checksum_durs, temp_reading) &&
+                !decode_lacrosse_tx(bad_parity_durs, temp_reading)) {
+            report += "[PASS] LaCrosse TX OOK temperature, humidity, checksum and parity\n";
+            passed++;
+        } else {
+            report += "[FAIL] LaCrosse TX OOK temperature, humidity, checksum and parity\n";
         }
     }
 

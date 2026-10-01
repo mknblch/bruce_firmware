@@ -51,7 +51,7 @@ void LoRaMenu::optionsMenu() {
         viewLoRaCapturedPackets();
     }});
 
-    options.push_back({"Parameters / Config", []() {
+    options.push_back({"Config", []() {
         customLoRaConfigMenu();
     }});
 
