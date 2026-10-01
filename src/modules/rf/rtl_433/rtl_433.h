@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #pragma once
 
+#ifndef UNIT_TEST
 #include "../protocols/rf_decoder.h"
 #include "../protocols/rf_encoder.h"
 #include "../rf_utils.h"
 #include "../structs.h"
+#endif
 #include <Arduino.h>
 #include <vector>
 

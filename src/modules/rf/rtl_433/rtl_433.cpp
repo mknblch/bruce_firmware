@@ -1271,16 +1271,49 @@ bool rtl433_selftest(String &report) {
     // Test 5: EV1527 Security (OOK PWM)
     {
         total++;
-        // Addr=0x12345, Cmd=0x08 (DOOR OPEN / MOTION) -> bytes: 0x12, 0x34, 0x58
-        uint8_t ev_data[] = {0x12, 0x34, 0x58};
-        std::vector<int> durs;
+        // Standard EV1527 frame: Addr=0x12345, Cmd=0x0A (DOOR OPEN / MOTION)
+        // Bit 0 = {350, -1050}, Bit 1 = {1050, -350}, Sync gap = -10850
+        uint8_t ev_data_motion[] = {0x12, 0x34, 0x5A};
+        std::vector<int> durs_motion;
         for (size_t i = 0; i < 24; i++) {
-            uint8_t bit = (ev_data[i / 8] >> (7 - (i % 8))) & 1;
-            durs.push_back(350);
-            durs.push_back(bit ? -350 : -1050);
+            uint8_t bit = (ev_data_motion[i / 8] >> (7 - (i % 8))) & 1;
+            durs_motion.push_back(bit ? 1050 : 350);
+            durs_motion.push_back(bit ? -350 : -1050);
         }
-        Rtl433Reading r;
-        if (decode_kerui_ev1527(durs, r) && r.device_id == 0x12345 && r.status_flags == 0x08) {
+        durs_motion.push_back(350);
+        durs_motion.push_back(-10850); // sync gap
+
+        // Low battery event: Addr=0x12345, Cmd=0x09
+        uint8_t ev_data_lowbat[] = {0x12, 0x34, 0x59};
+        std::vector<int> durs_lowbat;
+        for (size_t i = 0; i < 24; i++) {
+            uint8_t bit = (ev_data_lowbat[i / 8] >> (7 - (i % 8))) & 1;
+            durs_lowbat.push_back(bit ? 1050 : 350);
+            durs_lowbat.push_back(bit ? -350 : -1050);
+        }
+
+        // Legacy / PWM-space pulse format: Addr=0x12345, Cmd=0x08
+        uint8_t ev_data_legacy[] = {0x12, 0x34, 0x58};
+        std::vector<int> durs_legacy;
+        for (size_t i = 0; i < 24; i++) {
+            uint8_t bit = (ev_data_legacy[i / 8] >> (7 - (i % 8))) & 1;
+            durs_legacy.push_back(350);
+            durs_legacy.push_back(bit ? -350 : -1050);
+        }
+
+        Rtl433Reading r_motion, r_lowbat, r_legacy;
+        bool ok_motion = decode_kerui_ev1527(durs_motion, r_motion) &&
+                         r_motion.device_id == 0x12345 && r_motion.status_flags == 0x0A &&
+                         r_motion.battery_ok && r_motion.status_str.indexOf("MOTION") >= 0;
+
+        bool ok_lowbat = decode_kerui_ev1527(durs_lowbat, r_lowbat) &&
+                         r_lowbat.device_id == 0x12345 && r_lowbat.status_flags == 0x09 &&
+                         !r_lowbat.battery_ok && r_lowbat.status_str.indexOf("LOW BATTERY") >= 0;
+
+        bool ok_legacy = decode_kerui_ev1527(durs_legacy, r_legacy) &&
+                         r_legacy.device_id == 0x12345 && r_legacy.status_flags == 0x08;
+
+        if (ok_motion && ok_lowbat && ok_legacy) {
             report += "[PASS] Kerui / EV1527 Alarm OOK PWM\n";
             passed++;
         } else {

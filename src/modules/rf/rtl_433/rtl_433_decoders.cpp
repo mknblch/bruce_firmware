@@ -633,24 +633,133 @@ bool decode_toyota_tpms(const std::vector<int> &durations, Rtl433Reading &out) {
 // Decoder 10: Kerui / EV1527 / PT2262 Security Sensors (OOK PWM)
 // ===========================================================================
 bool decode_kerui_ev1527(const std::vector<int> &durations, Rtl433Reading &out) {
-    BitBuffer buf;
-    if (!demod_pwm_space(durations, 350, 1050, 350, 45, buf)) {
-        if (!demod_pwm(durations, 350, 1050, 350, 45, buf)) return false;
+    if (durations.size() < 24) return false;
+
+    uint32_t decoded_frame = 0;
+    bool found_valid = false;
+
+    // Scan through duration pulse train for a 24-bit EV1527/Kerui PWM frame.
+    // Standard EV1527:
+    //   Bit 0: High ~1T (~350µs), Low ~3T (~1050µs)
+    //   Bit 1: High ~3T (~1050µs), Low ~1T (~350µs)
+    //   Sync gap: Low > 4000µs (~31T = ~10.5ms)
+    for (size_t start = 0; start + 24 <= durations.size(); start++) {
+        if (durations[start] <= 0) continue; // must start on a mark (HIGH)
+
+        uint32_t raw24 = 0;
+        bool valid_sequence = true;
+
+        for (size_t bit = 0; bit < 24; bit++) {
+            size_t idx = start + bit * 2;
+            if (idx + 1 >= durations.size()) {
+                valid_sequence = false;
+                break;
+            }
+            int mark = durations[idx];
+            int space = -durations[idx + 1];
+
+            if (mark <= 0 || space <= 0) {
+                valid_sequence = false;
+                break;
+            }
+
+            int bit_val = -1;
+
+            if (bit < 23) {
+                // Standard bit 0: short mark [120..700], long space [450..2500], space > mark
+                // Standard bit 1: long mark [450..2500], short space [120..700], mark > space
+                if (mark >= 120 && mark <= 700 && space >= 450 && space <= 2500 && space > mark) {
+                    bit_val = 0;
+                } else if (mark >= 450 && mark <= 2500 && space >= 120 && space <= 700 && mark > space) {
+                    bit_val = 1;
+                } else if (mark >= 120 && mark <= 700 && space >= 600 && space <= 2500) {
+                    // PWM space variant with fixed mark
+                    bit_val = 0;
+                } else if (mark >= 600 && mark <= 2500 && space >= 120 && space <= 700) {
+                    // PWM mark variant with fixed space
+                    bit_val = 1;
+                } else if (mark >= 120 && mark <= 700 && space >= 120 && space <= 700) {
+                    // Short mark and short space (PWM mark bit 0 / PWM space bit 1)
+                    bit_val = 0;
+                }
+            } else {
+                // Bit 23 (last bit): space may be normal or the sync gap (>4000µs)
+                if (mark >= 120 && mark <= 700) {
+                    bit_val = 0;
+                } else if (mark >= 450 && mark <= 2500) {
+                    bit_val = 1;
+                }
+            }
+
+            if (bit_val < 0) {
+                valid_sequence = false;
+                break;
+            }
+
+            raw24 = (raw24 << 1) | bit_val;
+        }
+
+        if (valid_sequence) {
+            uint32_t addr = (raw24 >> 4) & 0xFFFFF;
+            if (addr != 0 && addr != 0xFFFFF && raw24 != 0 && raw24 != 0xFFFFFF) {
+                decoded_frame = raw24;
+                found_valid = true;
+                break;
+            }
+        }
     }
-    if (buf.num_bits < 24) return false;
 
-    uint32_t raw24 = buf.extract_bits(0, 24);
-    uint32_t addr = (raw24 >> 4) & 0xFFFFF;
-    uint8_t cmd = raw24 & 0x0F;
+    // Fallback: Check if generic BitBuffer demodulators captured a 24-bit frame
+    if (!found_valid) {
+        BitBuffer buf;
+        if (demod_pwm_space(durations, 350, 1050, 350, 45, buf) || demod_pwm(durations, 350, 1050, 350, 45, buf)) {
+            if (buf.num_bits >= 24) {
+                uint32_t raw24 = buf.extract_bits(0, 24);
+                uint32_t addr = (raw24 >> 4) & 0xFFFFF;
+                if (addr != 0 && addr != 0xFFFFF && raw24 != 0 && raw24 != 0xFFFFFF) {
+                    decoded_frame = raw24;
+                    found_valid = true;
+                }
+            }
+        }
+    }
 
-    if (addr == 0 || addr == 0xFFFFF) return false;
+    if (!found_valid) return false;
+
+    uint32_t addr = (decoded_frame >> 4) & 0xFFFFF;
+    uint8_t cmd = decoded_frame & 0x0F;
 
     String state_str = "ALARM";
-    if (cmd == 0x01) state_str = "TAMPER";
-    else if (cmd == 0x02) state_str = "PANIC / SOS";
-    else if (cmd == 0x04) state_str = "DOOR CLOSED";
-    else if (cmd == 0x08) state_str = "DOOR OPEN / MOTION";
-    else if (cmd == 0x09 || cmd == 0x0A) state_str = "LOW BATTERY";
+    bool is_low_battery = false;
+
+    switch (cmd) {
+        case 0x01: state_str = "TAMPER / ARM"; break;
+        case 0x02: state_str = "PANIC / DISARM"; break;
+        case 0x04: state_str = "DOOR CLOSED / HOME"; break;
+        case 0x05: state_str = "WATER LEAK"; break;
+        case 0x06: state_str = "TAMPER"; break;
+        case 0x07: state_str = "DOOR CLOSED"; break;
+        case 0x08: state_str = "DOOR OPEN / MOTION"; break;
+        case 0x09:
+            state_str = "LOW BATTERY";
+            is_low_battery = true;
+            break;
+        case 0x0A: state_str = "DOOR OPEN / MOTION"; break;
+        case 0x0B: state_str = "TAMPER"; break;
+        case 0x0C:
+            state_str = "LOW BATTERY";
+            is_low_battery = true;
+            break;
+        case 0x0D: state_str = "WATER LEAK"; break;
+        case 0x0E: state_str = "DOOR OPEN"; break;
+        case 0x0F:
+            state_str = "LOW BATTERY";
+            is_low_battery = true;
+            break;
+        default:
+            state_str = "ALARM";
+            break;
+    }
 
     out.protocol = "EV1527-Security";
     out.model = "Kerui / EV1527 Sensor";
@@ -661,9 +770,13 @@ bool decode_kerui_ev1527(const std::vector<int> &durations, Rtl433Reading &out) 
     out.status_flags = cmd;
     out.status_str = state_str;
     out.has_battery = true;
-    out.battery_ok = (cmd != 0x09 && cmd != 0x0A);
+    out.battery_ok = !is_low_battery;
     out.bit_len = 24;
-    out.payload_hex = buf.to_hex();
+
+    char hex_buf[16];
+    snprintf(hex_buf, sizeof(hex_buf), "%06X", (unsigned int)(decoded_frame & 0xFFFFFF));
+    out.payload_hex = hex_buf;
+    out.raw_durations = durations;
     return true;
 }
 
