@@ -100,12 +100,25 @@ bool decode_nexus(const std::vector<int> &durations, Rtl433Reading &out) {
 bool decode_acurite_606tx(const std::vector<int> &durations, Rtl433Reading &out) {
     BitBuffer buf;
     if (!demod_pwm(durations, 200, 600, 400, 45, buf)) return false;
-    if (buf.num_bits < 32) return false;
+    if (buf.num_bits < 96) return false;
 
-    uint8_t b0 = buf.get_byte(0);
-    uint8_t b1 = buf.get_byte(1);
-    uint8_t b2 = buf.get_byte(2);
-    uint8_t b3 = buf.get_byte(3);
+    uint32_t frame = 0;
+    bool found_repeated_frame = false;
+    for (uint16_t start = 0; start + 96 <= buf.num_bits; start++) {
+        uint32_t candidate = buf.extract_bits(start, 32);
+        if (candidate == buf.extract_bits(start + 32, 32) &&
+                candidate == buf.extract_bits(start + 64, 32)) {
+            frame = candidate;
+            found_repeated_frame = true;
+            break;
+        }
+    }
+    if (!found_repeated_frame || frame == 0) return false;
+
+    uint8_t b0 = (uint8_t)(frame >> 24);
+    uint8_t b1 = (uint8_t)(frame >> 16);
+    uint8_t b2 = (uint8_t)(frame >> 8);
+    uint8_t b3 = (uint8_t)frame;
 
     uint8_t checksum_bytes[] = {b0, b1, b2};
     if (rtl433_lfsr_digest8(checksum_bytes, sizeof(checksum_bytes), 0x98, 0xF1) != b3) return false;
@@ -131,7 +144,13 @@ bool decode_acurite_606tx(const std::vector<int> &durations, Rtl433Reading &out)
     out.has_battery = true;
     out.battery_ok = !battery_low;
     out.bit_len = 32;
-    out.payload_hex = buf.to_hex();
+    out.payload_hex = "";
+    uint8_t payload[] = {b0, b1, b2, b3};
+    for (uint8_t byte : payload) {
+        char h[3];
+        snprintf(h, sizeof(h), "%02X", byte);
+        out.payload_hex += h;
+    }
     return true;
 }
 
@@ -685,33 +704,52 @@ bool decode_dsc_security(const std::vector<int> &durations, Rtl433Reading &out) 
 }
 
 // ===========================================================================
-// Decoder 12: Proove / Nexa / KlikAanKlikUit (OOK PWM)
+// Decoder 12: Nexa Security (OOK PPM)
 // ===========================================================================
 bool decode_proove_nexa(const std::vector<int> &durations, Rtl433Reading &out) {
+    size_t sync_index = durations.size();
+    for (size_t i = 0; i < durations.size(); i++) {
+        if (durations[i] >= 2120 && durations[i] <= 3180) {
+            sync_index = i;
+            break;
+        }
+    }
+    if (sync_index == durations.size() || sync_index + 1 >= durations.size() || durations[sync_index + 1] >= 0) return false;
+
+    std::vector<int> frame_durations(durations.begin() + sync_index + 1, durations.end());
     BitBuffer buf;
-    if (!demod_pwm(durations, 250, 1250, 250, 45, buf)) return false;
-    if (buf.num_bits < 32) return false;
+    if (!demod_pwm(frame_durations, 270, 1300, 270, 20, buf)) return false;
+    if (buf.num_bits != 64 && buf.num_bits != 72) return false;
 
-    uint32_t raw = buf.extract_bits(0, 32);
-    uint32_t tx_id = (raw >> 6) & 0x03FFFFFF;
-    if (tx_id == 0 || tx_id == 0x03FFFFFF) return false;
+    uint32_t raw = 0;
+    for (uint16_t i = 0; i < buf.num_bits; i += 2) {
+        uint8_t first = buf.get_bit(i);
+        uint8_t second = buf.get_bit(i + 1);
+        if (first == second) return false;
+        if (i < 64) raw = (raw << 1) | first;
+    }
 
+    uint32_t tx_id = raw >> 6;
     bool group = (raw >> 5) & 0x01;
     bool state = (raw >> 4) & 0x01;
-    uint8_t unit = raw & 0x0F;
+    uint8_t channel = ((raw >> 2) & 0x03) ^ 0x03;
+    uint8_t unit = (raw & 0x03) ^ 0x03;
 
-    out.protocol = "Proove-Nexa";
-    out.model = "Nexa / Proove Remote";
+    out.protocol = "Nexa";
+    out.model = "Nexa-Security";
     out.decoder_name = "Nexa";
     out.decoder_id = 12;
     out.device_id = tx_id;
-    out.channel = unit;
+    out.channel = channel;
     out.has_status = true;
-    out.status_flags = (group ? 0x80 : 0) | (state ? 0x01 : 0);
-    out.status_str = state ? "SWITCH ON" : "SWITCH OFF";
-    if (group) out.status_str += " (ALL)";
-    out.bit_len = 32;
+    out.status_flags = (group ? 0x80 : 0) | (state ? 0x40 : 0) | (channel << 2) | unit;
+    out.status_str = state ? "ON" : "OFF";
+    out.status_str += ", unit ";
+    out.status_str += String(unit);
+    if (group) out.status_str += " (group)";
+    out.bit_len = buf.num_bits;
     out.payload_hex = buf.to_hex();
+    out.raw_durations = durations;
     return true;
 }
 

@@ -740,7 +740,8 @@ bool Rtl433Engine::decode(const std::vector<int> &durations, float freq, int pre
     } else {
         // OOK Decoders
         modStr = "OOK";
-        ok = decode_nexus(durations, reading) ||
+        ok = decode_proove_nexa(durations, reading) ||
+             decode_nexus(durations, reading) ||
              decode_acurite_606tx(durations, reading) ||
              decode_acurite_tower(durations, reading) ||
              decode_oregon_scientific(durations, reading) ||
@@ -748,7 +749,6 @@ bool Rtl433Engine::decode(const std::vector<int> &durations, float freq, int pre
              decode_schrader_tpms(durations, reading) ||
              decode_kerui_ev1527(durations, reading) ||
              decode_dsc_security(durations, reading) ||
-             decode_proove_nexa(durations, reading) ||
              decode_lacrosse_tx(durations, reading);
     }
 
@@ -1162,12 +1162,28 @@ bool rtl433_selftest(String &report) {
         total++;
         // ID=0x55, battery OK, channel 1, temperature 20.0C, LFSR checksum.
         uint8_t acurite_data[] = {0x55, 0x80, 0xC8, 0x05};
-        std::vector<int> durs = build_pwm_pulses(acurite_data, 32, 200, 600, 400);
+        auto make_acurite_durations = [](const uint8_t *data, int frame_count) {
+            std::vector<int> durs;
+            for (int frame = 0; frame < frame_count; frame++) {
+                std::vector<int> frame_durs = build_pwm_pulses(data, 32, 200, 600, 400);
+                if (frame + 1 < frame_count) frame_durs.back() = -10000;
+                durs.insert(durs.end(), frame_durs.begin(), frame_durs.end());
+            }
+            return durs;
+        };
+        std::vector<int> durs = make_acurite_durations(acurite_data, 3);
+        std::vector<int> single_durs = make_acurite_durations(acurite_data, 1);
         uint8_t invalid_acurite_data[] = {0x55, 0x80, 0xC8, 0x04};
-        std::vector<int> invalid_durs = build_pwm_pulses(invalid_acurite_data, 32, 200, 600, 400);
+        std::vector<int> invalid_durs = make_acurite_durations(invalid_acurite_data, 3);
+        uint8_t zero_acurite_data[] = {0x00, 0x80, 0x00, 0xF1};
+        std::vector<int> zero_single_durs = make_acurite_durations(zero_acurite_data, 1);
+        std::vector<int> zero_repeated_durs = make_acurite_durations(zero_acurite_data, 3);
         Rtl433Reading r;
         if (decode_acurite_606tx(durs, r) && r.device_id == 0x55 && abs(r.temp_c - 20.0f) < 0.2f &&
-                !decode_acurite_606tx(invalid_durs, r)) {
+                !decode_acurite_606tx(single_durs, r) && !decode_acurite_606tx(invalid_durs, r) &&
+                !decode_acurite_606tx(zero_single_durs, r) &&
+                decode_acurite_606tx(zero_repeated_durs, r) && r.device_id == 0 && r.channel == 1 &&
+                abs(r.temp_c) < 0.2f) {
             report += "[PASS] Acurite 606TX OOK PWM\n";
             passed++;
         } else {
@@ -1217,6 +1233,38 @@ bool rtl433_selftest(String &report) {
             passed++;
         } else {
             report += "[FAIL] Toyota TPMS CRC and pressure check\n";
+        }
+    }
+
+    // Nexa Security (OOK PPM with Manchester-coded payload)
+    {
+        total++;
+        uint32_t payload = (0x01234567UL << 6) | 0x30 | (1UL << 2);
+        auto make_nexa_durations = [](uint32_t value, int extra_bits) {
+            std::vector<int> durs = {2650, -10000};
+            for (int bit_index = 0; bit_index < 32 + extra_bits; bit_index++) {
+                bool bit = bit_index < 32 && ((value >> (31 - bit_index)) & 1);
+                durs.push_back(bit ? 1300 : 270);
+                durs.push_back(-270);
+                durs.push_back(bit ? 270 : 1300);
+                durs.push_back(-270);
+            }
+            return durs;
+        };
+        std::vector<int> durs = make_nexa_durations(payload, 0);
+        std::vector<int> extended_durs = make_nexa_durations(payload, 4);
+        std::vector<int> invalid_pair_durs = durs;
+        invalid_pair_durs[4] = 270;
+        std::vector<int> missing_sync_durs(durs.begin() + 2, durs.end());
+        Rtl433Reading r;
+        if (decode_proove_nexa(durs, r) && r.device_id == 0x01234567 && r.channel == 2 &&
+                r.status_flags == 0xCB && r.status_str.startsWith("ON") &&
+                decode_proove_nexa(extended_durs, r) && r.device_id == 0x01234567 &&
+                !decode_proove_nexa(invalid_pair_durs, r) && !decode_proove_nexa(missing_sync_durs, r)) {
+            report += "[PASS] Nexa Security sync, Manchester and fields\n";
+            passed++;
+        } else {
+            report += "[FAIL] Nexa Security sync, Manchester and fields\n";
         }
     }
 
