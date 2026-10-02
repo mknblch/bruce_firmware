@@ -854,7 +854,7 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
     if (reading.raw_durations.empty() && reading.payload_hex.length() == 0) return false;
 
     float freqMhz = reading.frequency;
-    if (freqMhz < 280.0f || freqMhz > 928.0f) freqMhz = bruceConfigPins.rfFreq;
+    if (!CC1101Driver::isFrequencySupported(freqMhz)) freqMhz = bruceConfigPins.rfFreq;
 
     int presetIdx = reading.preset_idx;
     if (presetIdx < 0 || presetIdx >= RTL433_PRESET_COUNT || (reading.modulation != "" && reading.modulation != "OOK" && presetIdx == RTL433_PRESET_OOK_433)) {
@@ -939,13 +939,15 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
     }
 
     std::vector<int> transmitDurs;
-    transmitDurs.reserve(preambleDurs.size() * repeats + reading.raw_durations.size() * repeats + repeats);
+    size_t rawCount = reading.raw_durations.size();
+    if (rawCount > 2048) rawCount = 2048; // Bound max duration items per frame
+    transmitDurs.reserve(preambleDurs.size() * repeats + rawCount * repeats + repeats);
     for (int r = 0; r < repeats; r++) {
         if (!preambleDurs.empty()) {
             transmitDurs.insert(transmitDurs.end(), preambleDurs.begin(), preambleDurs.end());
         }
-        for (int d : reading.raw_durations) {
-            transmitDurs.push_back(d);
+        for (size_t d_idx = 0; d_idx < rawCount; d_idx++) {
+            transmitDurs.push_back(reading.raw_durations[d_idx]);
         }
         // Ensure silence gap between packet frames
         if (transmitDurs.empty() || transmitDurs.back() > 0) {
@@ -968,6 +970,7 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
     }
 
     for (size_t f_idx = 0; f_idx < targetFreqs.size(); f_idx++) {
+        if (check(EscPress)) break;
         float curFreq = targetFreqs[f_idx];
         // initRfModule() applies the correct modulation-specific register/AGC preset (OOK vs
         // FSK-family), deviation, data-rate and TX output pin configuration directly.
@@ -984,6 +987,7 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
         }
     }
 
+    deinitRfModule();
     return true;
 }
 

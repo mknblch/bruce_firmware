@@ -3,6 +3,7 @@
 #include "core/bus_HAL.h"
 #include "core/sd_functions.h"
 #include "core/settings.h"
+#include "soc/soc_caps.h"
 
 // CRC-64-ECMA constants
 const uint64_t CRC64_ECMA_POLY = 0x42F0E1EBA9EA3693; // Polynomial for CRC-64-ECMA
@@ -52,7 +53,7 @@ const float subghz_frequency_list[] = {
     340.000f, // US Military / Fixed tactical communication
     345.000f, // Honeywell / Ademco Wireless Home Security Sensors
     348.000f, // Legacy security links / Wireless automation
-    350.000f, // US Military UHF / Industrial telemetry
+    348.000f, // CC1101 upper limit of the 315 MHz band
 
     /* --- 387 - 464 MHz Range (Amateur Radio, LPD433, PMR446, FRS/GMRS) --- */
     387.000f, // Space research / UHF telemetry link
@@ -86,7 +87,7 @@ const float subghz_frequency_list[] = {
     446.100f, // PMR446 Digital / dPMR walkie-talkies (EU)
     462.750f, // FRS / GMRS Main Channel 22 (US License-Free Walkie-Talkies)
     464.000f, // Business Band Radio (US Industrial/Business Land Mobile)
-    467.750f, // FRS / GMRS Interstitial Channel 7 (US Walkie-Talkies)
+    464.000f, // CC1101 upper operating limit of the 433 MHz band
 
     /* --- 779 - 928 MHz Range (Sub-GHz IoT, SRD868, Sub-GHz ISM US) --- */
     779.000f, // Chinese SRD / IoT Band - Start
@@ -140,7 +141,7 @@ void cc1101ApplyPreciseCalibration(float frequency, bool isTx) {
     // frequency fell (e.g. transmitting on 433.92 MHz would actually radiate visibly above it).
     // TI's official per-band workaround for VCO selection only concerns TEST0/FSCAL2 below - it
     // never touches FSCTRL0 - so the old interpolation had no basis in the datasheet/errata.
-    if (frequency >= 280.0f && frequency <= 348.0f) {
+    if (frequency >= 300.0f && frequency <= 348.0f) {
         highVco = frequency >= 322.88f;
     } else if (frequency >= 387.0f && frequency <= 464.0f) {
         highVco = frequency >= 430.50f;
@@ -332,7 +333,10 @@ bool initRfModule(String mode, float frequency, int modulation, float deviation,
             ELECHOUSE_cc1101.setBeginEndLogic(true);
             initCC1101once(NULL);
         }
-        ELECHOUSE_cc1101.Init();
+        if (!ELECHOUSE_cc1101.Init()) {
+            displayError("CC1101 initialization failed");
+            return false;
+        }
         if (ELECHOUSE_cc1101.getCC1101()) { // Check the CC1101 Spi connection.
             Serial.println("cc1101 Connection OK");
         } else {
@@ -349,8 +353,7 @@ bool initRfModule(String mode, float frequency, int modulation, float deviation,
         ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
         ELECHOUSE_cc1101.SpiStrobe(CC1101_SFRX);
 
-        if (!((frequency >= 280 && frequency <= 350) || (frequency >= 387 && frequency <= 468) ||
-              (frequency >= 779 && frequency <= 928))) {
+        if (!CC1101Driver::isFrequencySupported(frequency)) {
             Serial.println("Invalid Frequency, setting default");
             frequency = 433.92;
             displayWarning("Wrong freq, set to 433.92", true);
@@ -377,7 +380,7 @@ bool initRfModule(String mode, float frequency, int modulation, float deviation,
         ELECHOUSE_cc1101.setPktFormat(3);
         setMHZ(frequency);
         cc1101_mode_hint = 0;
-        Serial.println("cc1101 setMHZ(frequency);");
+        Serial.printf("cc1101 setMHZ(%.3f);", frequency);
         if (fixedFreq) {
             cc1101_mode_hint = (mode == "tx") ? 1 : ((mode == "rx") ? 2 : 0);
             if (effectiveModulation == 2) {
@@ -482,7 +485,7 @@ void initCC1101once(SPIClass *SSPI) {
 }
 
 void setMHZ(float frequency) {
-    if (frequency > 928 || frequency < 280) {
+    if (!CC1101Driver::isFrequencySupported(frequency)) {
         frequency = 433.92;
         Serial.println("Frequency out of band");
     }
@@ -502,16 +505,22 @@ void setMHZ(float frequency) {
         // SW1:0  SW0:1 --- 868/915MHz
         // SW1:1  SW0:1 --- 434MHz
         if (frequency <= 350 && antenna != 0 && change) {
+            pinMode(CC1101_SW1_PIN, OUTPUT);
+            pinMode(CC1101_SW0_PIN, OUTPUT);
             digitalWrite(CC1101_SW1_PIN, HIGH);
             digitalWrite(CC1101_SW0_PIN, LOW);
             antenna = 0;
             vTaskDelay(10 / portTICK_PERIOD_MS); // time to settle the antenna signal
         } else if (frequency > 350 && frequency < 700 && antenna != 1 && change) {
+            pinMode(CC1101_SW1_PIN, OUTPUT);
+            pinMode(CC1101_SW0_PIN, OUTPUT);
             digitalWrite(CC1101_SW1_PIN, HIGH);
             digitalWrite(CC1101_SW0_PIN, HIGH);
             antenna = 1;
             vTaskDelay(10 / portTICK_PERIOD_MS); // time to settle the antenna signal
         } else if (frequency >= 700 && antenna != 2 && change) {
+            pinMode(CC1101_SW1_PIN, OUTPUT);
+            pinMode(CC1101_SW0_PIN, OUTPUT);
             digitalWrite(CC1101_SW1_PIN, LOW);
             digitalWrite(CC1101_SW0_PIN, HIGH);
             antenna = 2;
@@ -662,7 +671,7 @@ rmt_channel_handle_t setup_rf_rx() {
                                   : gpio_num_t(bruceConfigPins.rfRx); // GPIO number
     rx_channel_cfg.clk_src = RMT_CLK_SRC_DEFAULT;                     // select source clock
     rx_channel_cfg.resolution_hz = 1 * 1000 * 1000; // 1 MHz tick resolution, i.e., 1 tick = 1 µs
-    rx_channel_cfg.mem_block_symbols = 64;          // memory block size, 64 * 4 = 256 Bytes
+    rx_channel_cfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL; // memory block size for current SoC
     rx_channel_cfg.intr_priority = 0;               // interrupt priority
     rx_channel_cfg.flags.invert_in = false;         // do not invert input signal
     rx_channel_cfg.flags.with_dma = false;          // do not need DMA backend

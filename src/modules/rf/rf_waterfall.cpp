@@ -5,6 +5,7 @@ float m_rf_waterfall_start_freq = 433.0;
 float m_rf_waterfall_end_freq = 435.0;
 
 void rf_waterfall() {
+    bruceConfigPins.rfFxdFreq = false;
     if (bruceConfigPins.rfModule != CC1101_SPI_MODULE) {
         displayError("Waterfall needs a CC1101!", true);
         return;
@@ -35,24 +36,74 @@ select:
         rf_waterfall_run();
         goto select;
     } else if (option == 1) {
-        rf_waterfall_boundary_freq(m_rf_waterfall_start_freq);
+        rf_waterfall_boundary_freq(m_rf_waterfall_start_freq, m_rf_waterfall_end_freq, true);
         goto select;
     } else if (option == 2) {
-        rf_waterfall_boundary_freq(m_rf_waterfall_end_freq);
+        rf_waterfall_boundary_freq(m_rf_waterfall_end_freq, m_rf_waterfall_start_freq, false);
         goto select;
     }
 }
-void rf_waterfall_boundary_freq(float &boundary) {
+
+struct WaterfallBand {
+    float low;
+    float high;
+};
+
+static const WaterfallBand waterfallBands[] = {
+    {300.0f, 348.0f},
+    {387.0f, 464.0f},
+    {779.0f, 928.0f},
+};
+
+static int getWaterfallBandIndex(float freq) {
+    const int bandCount = sizeof(waterfallBands) / sizeof(waterfallBands[0]);
+    for (int i = 0; i < bandCount; i++) {
+        if (freq >= waterfallBands[i].low && freq <= waterfallBands[i].high) {
+            return i;
+        }
+    }
+    int closest = 1;
+    float minDist = 9999.0f;
+    for (int i = 0; i < bandCount; i++) {
+        float dist = 0.0f;
+        if (freq < waterfallBands[i].low) dist = waterfallBands[i].low - freq;
+        else if (freq > waterfallBands[i].high) dist = freq - waterfallBands[i].high;
+        if (dist < minDist) {
+            minDist = dist;
+            closest = i;
+        }
+    }
+    return closest;
+}
+
+void rf_waterfall_boundary_freq(float &boundary, float &otherBoundary, bool isStart) {
     options = {};
     int ind = 0;
     int arraySize = sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]);
+    float minDiff = 9999.0f;
     for (int i = 0; i < arraySize; i++) {
-        if (subghz_frequency_list[i] - boundary < 0.1) ind = i;
+        float diff = fabsf(subghz_frequency_list[i] - boundary);
+        if (diff < minDiff) {
+            minDiff = diff;
+            ind = i;
+        }
         String tmp = String(subghz_frequency_list[i], 2) + "Mhz";
         options.push_back({tmp.c_str(), [&boundary, i]() { boundary = subghz_frequency_list[i]; }});
     }
     loopOptions(options, ind);
     options.clear();
+
+    int curBand = getWaterfallBandIndex(boundary);
+    int otherBand = getWaterfallBandIndex(otherBoundary);
+    if (curBand >= 0 && (otherBand != curBand || otherBoundary == boundary)) {
+        if (isStart) {
+            otherBoundary = min(waterfallBands[curBand].high, boundary + 2.0f);
+            if (otherBoundary <= boundary) otherBoundary = boundary + 0.5f;
+        } else {
+            otherBoundary = max(waterfallBands[curBand].low, boundary - 2.0f);
+            if (otherBoundary >= boundary) otherBoundary = boundary - 0.5f;
+        }
+    }
 }
 
 
@@ -66,24 +117,92 @@ void rf_waterfall_boundary_freq(float &boundary) {
 // (see rf_CC1101_rssi), so sampling every pixel with a sub-ms wait would just
 // read the noise floor. We sample WF_BINS points with a real settle and then
 // interpolate the envelope across the plot columns for a continuous trace.
-#define WF_BINS 64
+#define WF_BINS 32
 
-static inline int getMedianRssi() {
+// Keep the entire scan inside one CC1101-supported band while preserving span.
+static void clampWaterfallRange(float &start, float &end) {
+    if (end < start) {
+        float t = start;
+        start = end;
+        end = t;
+    }
+    float span = end - start;
+    if (span < 0.05f) span = 2.0f;
+
+    int bandIdx = getWaterfallBandIndex(start);
+    const WaterfallBand &band = waterfallBands[bandIdx];
+
+    if (span > (band.high - band.low)) {
+        span = band.high - band.low;
+    }
+
+    if (start < band.low) {
+        start = band.low;
+        end = start + span;
+    } else if (start + span > band.high) {
+        end = band.high;
+        start = end - span;
+    } else {
+        end = start + span;
+    }
+}
+
+static void panWaterfall(float &start, float &end, float step, bool up) {
+    float span = end - start;
+    if (span < 0.05f) span = 2.0f;
+
+    int bandIdx = getWaterfallBandIndex(start);
+    const int bandCount = sizeof(waterfallBands) / sizeof(waterfallBands[0]);
+
+    if (up) {
+        start += step;
+        end = start + span;
+        if (end > waterfallBands[bandIdx].high) {
+            if (bandIdx + 1 < bandCount) {
+                // Transition to next higher band
+                start = waterfallBands[bandIdx + 1].low;
+                end = start + span;
+                if (end > waterfallBands[bandIdx + 1].high) {
+                    end = waterfallBands[bandIdx + 1].high;
+                    start = end - span;
+                }
+            } else {
+                end = waterfallBands[bandIdx].high;
+                start = end - span;
+            }
+        }
+    } else {
+        start -= step;
+        end = start + span;
+        if (start < waterfallBands[bandIdx].low) {
+            if (bandIdx > 0) {
+                // Transition to next lower band
+                end = waterfallBands[bandIdx - 1].high;
+                start = end - span;
+                if (start < waterfallBands[bandIdx - 1].low) {
+                    start = waterfallBands[bandIdx - 1].low;
+                    end = start + span;
+                }
+            } else {
+                start = waterfallBands[bandIdx].low;
+                end = start + span;
+            }
+        }
+    }
+}
+
+static inline int samplePeakRssi() {
     int r1 = ELECHOUSE_cc1101.getRssi();
     delayMicroseconds(60);
     int r2 = ELECHOUSE_cc1101.getRssi();
-    delayMicroseconds(60);
-    int r3 = ELECHOUSE_cc1101.getRssi();
-    if ((r1 <= r2 && r2 <= r3) || (r3 <= r2 && r2 <= r1)) return r2;
-    if ((r2 <= r1 && r1 <= r3) || (r3 <= r1 && r1 <= r2)) return r1;
-    return r3;
+    return (r1 > r2) ? r1 : r2;
 }
 
 enum AgcMode {
     AGC_AUTO = 0,
-    AGC_GAIN_1X, // Normal -95 .. -35 dBm
-    AGC_GAIN_2X, // Boost -100 .. -50 dBm
-    AGC_GAIN_3X, // Max -105 .. -65 dBm
+    AGC_GAIN_1X, // Normal
+    AGC_GAIN_2X, // Boost
+    AGC_GAIN_3X, // Max
     AGC_MODE_COUNT
 };
 
@@ -110,6 +229,7 @@ void rf_waterfall_run() {
     memset(disp, 0, plotW);
     memset(envPeak, 0, plotW);
 
+    bruceConfigPins.rfFxdFreq = false;
     float f_start = m_rf_waterfall_start_freq;
     float f_end = m_rf_waterfall_end_freq;
     if (f_end < f_start) {
@@ -117,9 +237,10 @@ void rf_waterfall_run() {
         f_start = f_end;
         f_end = t;
     }
+    clampWaterfallRange(f_start, f_end);
 
     initRfModule("rx", f_start);
-    ELECHOUSE_cc1101.setRxBW(200);
+    ELECHOUSE_cc1101.setRxBW(256);
 
     // Five evenly spaced frequency ticks under the plot; redrawn when panning.
     const int tickCount = 5;
@@ -146,8 +267,8 @@ void rf_waterfall_run() {
     else step = 0.001f;
 
     AgcMode agcMode = AGC_AUTO;
-    float agcFloor = -105.0f;
-    float agcPeak = -45.0f;
+    float agcFloor = -110.0f;
+    float agcPeak = -30.0f;
     int rawRssi[WF_BINS];
     uint8_t bins[WF_BINS];
 
@@ -173,99 +294,77 @@ void rf_waterfall_run() {
             agcMode = (AgcMode)((agcMode + 1) % AGC_MODE_COUNT);
             memset(envPeak, 0, plotW);
             memset(disp, 0, plotW);
+            lastStatus = 0; // trigger immediate status display update
         }
 
         // Sweep the band once — WF_BINS RSSI samples with a real settle so the
         // reading reflects the tuned frequency instead of the noise floor.
-        // Suspend the background input handler task during the sweep to eliminate
-        // periodic I2C matrix scan EMI and context-switch noise spikes.
         int maxBin = 0;
         int maxRssi = -128;
         int minRssi = 127;
-        if (xHandle) vTaskSuspend(xHandle);
         for (int b = 0; b < WF_BINS; b++) {
             float f = f_start + (f_end - f_start) * b / (WF_BINS - 1);
             setMHZ(f);
-            delayMicroseconds(900); // let the PLL/RSSI settle
-            int rssi = getMedianRssi();
+            delayMicroseconds(850); // let the PLL/RSSI settle
+            int rssi = samplePeakRssi();
 
             rawRssi[b] = rssi;
-            if (EscPress) break;
-        }
-        if (xHandle) vTaskResume(xHandle);
-        tft.drawPixel(0, 0, 0); // Keep CC1101/TFT shared SPI happy once per frame before display updates
-        delay(2); // yield to allow input handler to process any pending keys
-
-        // Spatial 3-point median filter across frequency bins to completely eliminate
-        // isolated 1-bin impulse noise spikes (EMI/clock glitch beating)
-        int cleanRssi[WF_BINS];
-        for (int b = 0; b < WF_BINS; b++) {
-            int prev = (b > 0) ? rawRssi[b - 1] : rawRssi[b];
-            int curr = rawRssi[b];
-            int next = (b < WF_BINS - 1) ? rawRssi[b + 1] : rawRssi[b];
-            int med = curr;
-            if ((prev <= curr && curr <= next) || (next <= curr && curr <= prev)) med = curr;
-            else if ((curr <= prev && prev <= next) || (next <= prev && prev <= curr)) med = prev;
-            else med = next;
-            cleanRssi[b] = med;
-
-            if (med > maxRssi) {
-                maxRssi = med;
+            if (rssi > maxRssi) {
+                maxRssi = rssi;
                 maxBin = b;
             }
-            if (med < minRssi) {
-                minRssi = med;
+            if (rssi < minRssi) {
+                minRssi = rssi;
             }
+            if (EscPress) break;
         }
+        tft.drawPixel(0, 0, 0); // Keep CC1101/TFT shared SPI happy once per frame before display updates
+        delay(2); // yield briefly for input processing
 
-        if (agcMode == AGC_AUTO) {
-            // Adaptive Noise Floor: fast track down, slow drift up
-            if ((float)minRssi < agcFloor) {
-                agcFloor = agcFloor * 0.7f + (float)minRssi * 0.3f;
-            } else {
-                agcFloor = agcFloor * 0.96f + (float)minRssi * 0.04f;
-            }
-            agcFloor = constrain(agcFloor, -115.0f, -50.0f);
-
-            // Adaptive Peak Tracker: fast attack on peaks, smooth decay
-            if ((float)maxRssi > agcPeak) {
-                agcPeak = agcPeak * 0.6f + (float)maxRssi * 0.4f;
-            } else {
-                agcPeak = agcPeak * 0.97f + (float)maxRssi * 0.03f;
-            }
-            agcPeak = constrain(agcPeak, -90.0f, -15.0f);
-
-            // Maintain at least 30 dB dynamic range headroom to prevent thermal noise amplification
-            if (agcPeak - agcFloor < 30.0f) {
-                agcPeak = agcFloor + 30.0f;
-            }
+        // Adaptive Noise Floor: fast track down, slow drift up
+        if ((float)minRssi < agcFloor) {
+            agcFloor = agcFloor * 0.7f + (float)minRssi * 0.3f;
+        } else {
+            agcFloor = agcFloor * 0.95f + (float)minRssi * 0.05f;
         }
+        agcFloor = constrain(agcFloor, -125.0f, -40.0f);
 
-        int floorDbm, peakDbm;
+        // Adaptive Peak Tracker: fast attack on peaks, responsive decay so sensitivity recovers quickly
+        if ((float)maxRssi > agcPeak) {
+            agcPeak = agcPeak * 0.5f + (float)maxRssi * 0.5f;
+        } else {
+            agcPeak = agcPeak * 0.85f + (float)maxRssi * 0.15f;
+        }
+        agcPeak = constrain(agcPeak, -115.0f, -10.0f);
+
+        float floorDbm = agcFloor;
+        float peakDbm;
         switch (agcMode) {
             case AGC_GAIN_1X:
-                floorDbm = -95;
-                peakDbm = -35;
+                // Normal / Wide dynamic range: 28 dB span above noise floor
+                peakDbm = agcFloor + 28.0f;
                 break;
             case AGC_GAIN_2X:
-                floorDbm = -100;
-                peakDbm = -50;
+                // Boost / Medium dynamic range: 16 dB span above noise floor
+                peakDbm = agcFloor + 16.0f;
                 break;
             case AGC_GAIN_3X:
-                floorDbm = -105;
-                peakDbm = -65;
+                // Max Sensitivity / Zoom: 8 dB span above noise floor
+                peakDbm = agcFloor + 8.0f;
                 break;
             case AGC_AUTO:
             default:
-                floorDbm = (int)roundf(agcFloor);
-                peakDbm = (int)roundf(agcPeak);
+                // Adaptive Auto: dynamic contrast with 12 dB min headroom, capped at 25 dB max span
+                // so signals always produce vibrant colors and details aren't crushed
+                peakDbm = constrain(agcPeak, agcFloor + 12.0f, agcFloor + 25.0f);
                 break;
         }
 
+        float span = max(6.0f, peakDbm - floorDbm);
         for (int b = 0; b < WF_BINS; b++) {
-            int v = map(cleanRssi[b], floorDbm, peakDbm, 0, 100);
-            v = constrain(v, 0, 100);
-            bins[b] = (uint8_t)v;
+            float norm = ((float)rawRssi[b] - floorDbm) / span;
+            int v = (int)roundf(norm * 100.0f);
+            bins[b] = (uint8_t)constrain(v, 0, 100);
         }
 
         // Interpolate the bins across the plot columns for a continuous trace,
@@ -280,14 +379,21 @@ void rf_waterfall_run() {
                 frac = 256;
             }
             int v = bins[bi] + (bins[bi + 1] - bins[bi]) * frac / 256;
-            env[i] = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
-            if (env[i] > envPeak[i]) envPeak[i] = env[i];
-            else if (envPeak[i]) envPeak[i]--;
+            env[i] = (uint8_t)constrain(v, 0, 100);
 
-            // Ease the drawn trace toward the measurement so the top glides
-            // instead of snapping, matching Jam Detect's animated sweep.
-            int d = (int)env[i] - (int)disp[i];
-            if (d) disp[i] = (uint8_t)((int)disp[i] + (d > 0 ? max(1, d / 3) : min(-1, d / 3)));
+            if (env[i] >= envPeak[i]) {
+                envPeak[i] = env[i];
+            } else if (envPeak[i] > 0) {
+                envPeak[i]--;
+            }
+
+            // Fast attack on bursts so short transmissions hit full trace height, smooth decay on drop
+            if (env[i] > disp[i]) {
+                disp[i] = env[i];
+            } else if (disp[i] > env[i]) {
+                int drop = (disp[i] - env[i] > 6) ? 6 : (disp[i] - env[i]);
+                disp[i] -= drop;
+            }
         }
 
         int hlSpan = plotW / 40;
@@ -303,21 +409,34 @@ void rf_waterfall_run() {
 
         // Pan the whole window and refresh the ruler + peak history.
         if (check(UpPress) || check(NextPress)) {
-            f_start += step;
-            f_end += step;
+            int oldBand = getWaterfallBandIndex(f_start);
+            panWaterfall(f_start, f_end, step, true);
+            int newBand = getWaterfallBandIndex(f_start);
+            if (newBand != oldBand) {
+                agcFloor = -110.0f;
+                agcPeak = -50.0f;
+                memset(disp, 0, plotW);
+            }
             memset(envPeak, 0, plotW);
             drawRuler();
             delay(80);
         } else if (check(DownPress) || check(PrevPress)) {
-            f_start -= step;
-            f_end -= step;
+            int oldBand = getWaterfallBandIndex(f_start);
+            panWaterfall(f_start, f_end, step, false);
+            int newBand = getWaterfallBandIndex(f_start);
+            if (newBand != oldBand) {
+                agcFloor = -110.0f;
+                agcPeak = -50.0f;
+                memset(disp, 0, plotW);
+            }
             memset(envPeak, 0, plotW);
             drawRuler();
             delay(80);
         }
     }
 
-    if (xHandle) vTaskResume(xHandle);
+    m_rf_waterfall_start_freq = f_start;
+    m_rf_waterfall_end_freq = f_end;
     free(env);
     free(disp);
     free(envPeak);

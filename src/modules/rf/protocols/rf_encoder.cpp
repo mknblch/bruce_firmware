@@ -11,6 +11,7 @@
 #include "../rf_utils.h" // bruceConfigPins, RMT defines
 #include "rf_config.h"   // RF_DBG
 #include "rf_registry.h" // rf_find_protocol (self-test)
+#include "soc/soc_caps.h"
 #include <cstdlib>       // abs
 #include <driver/rmt_tx.h>
 
@@ -50,11 +51,16 @@ static void rf_push_half(std::vector<rmt_symbol_word_t> &syms, bool &pendingLow,
 bool rf_tx_durations(const std::vector<int> &durations) {
     if (durations.empty()) return false;
 
+    // Limit maximum durations per burst to protect against corrupted captures / RAM exhaustion
+    const size_t maxDurations = 8192;
+    size_t count = (durations.size() > maxDurations) ? maxDurations : durations.size();
+
     // Pack signed µs timings into RMT symbols (two half-pulses per symbol).
     std::vector<rmt_symbol_word_t> syms;
-    syms.reserve(durations.size() / 2 + 1);
+    syms.reserve(count / 2 + 1);
     bool pendingLow = false;
-    for (int d : durations) {
+    for (size_t i = 0; i < count; i++) {
+        int d = durations[i];
         if (d == 0) continue;
         uint8_t level = (d > 0) ? 1 : 0;
         long dur = (d > 0) ? d : -d;
@@ -62,7 +68,7 @@ bool rf_tx_durations(const std::vector<int> &durations) {
     }
     if (syms.empty()) return false;
 
-    RF_DBG("tx: %u durations -> %u symbols", (unsigned)durations.size(), (unsigned)syms.size());
+    RF_DBG("tx: %u durations -> %u symbols", (unsigned)count, (unsigned)syms.size());
 
     // Create the RMT TX channel on the RF output pin (1 MHz / 1 tick = 1 µs,
     // matching the RX side). The radio itself is already configured by the
@@ -71,7 +77,7 @@ bool rf_tx_durations(const std::vector<int> &durations) {
     tx_cfg.gpio_num = rf_tx_gpio();
     tx_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
     tx_cfg.resolution_hz = 1 * 1000 * 1000;
-    tx_cfg.mem_block_symbols = 64;
+    tx_cfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
     tx_cfg.trans_queue_depth = 4;
     tx_cfg.flags.invert_out = false;
     tx_cfg.flags.with_dma = false;
@@ -103,9 +109,10 @@ bool rf_tx_durations(const std::vector<int> &durations) {
             ok = false;
         } else {
             uint32_t totalUs = 0;
-            for (int d : durations) totalUs += abs(d);
-            int waitMs = (int)(totalUs / 1000) + 1000;
+            for (size_t i = 0; i < count; i++) totalUs += (uint32_t)abs(durations[i]);
+            int waitMs = (int)(totalUs / 1000) + 2000;
             if (waitMs < 2000) waitMs = 2000;
+            if (waitMs > 15000) waitMs = 15000; // Cap watchdog block
             err = rmt_tx_wait_all_done(ch, waitMs);
             if (err != ESP_OK) {
                 RF_DBG("rmt_tx_wait_all_done failed: %d", (int)err);

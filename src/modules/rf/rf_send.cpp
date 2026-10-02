@@ -429,7 +429,7 @@ void sendRfCommand(struct RfCodes rfcode, bool hideDefaultUI) {
     }
 
     float freqMhz = (frequency > 10000) ? (frequency / 1000000.0f) : (float)frequency;
-    if (freqMhz < 280.0f || freqMhz > 928.0f) {
+    if (!CC1101Driver::isFrequencySupported(freqMhz)) {
         freqMhz = bruceConfigPins.rfFreq;
     }
 
@@ -446,18 +446,16 @@ void sendRfCommand(struct RfCodes rfcode, bool hideDefaultUI) {
 
     if (protocol == "RAW") {
         std::vector<int> durs;
-        int startIndex = 0;
-        int len = data.length();
-        while (startIndex < len) {
-            int spaceIdx = data.indexOf(' ', startIndex);
-            String token = (spaceIdx == -1) ? data.substring(startIndex) : data.substring(startIndex, spaceIdx);
-            token.trim();
-            if (token.length() > 0) {
-                int d = token.toInt();
-                if (d != 0) durs.push_back(d);
+        const char *p = data.c_str();
+        char *endPtr = nullptr;
+        while (*p) {
+            long d = strtol(p, &endPtr, 10);
+            if (endPtr == p) {
+                p++;
+                continue;
             }
-            if (spaceIdx == -1) break;
-            startIndex = spaceIdx + 1;
+            if (d != 0) durs.push_back((int)d);
+            p = endPtr;
         }
 
         if (!hideDefaultUI) { displayTextLine("Sending.."); }

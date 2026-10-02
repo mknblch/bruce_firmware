@@ -767,8 +767,7 @@ void setRFFreqMenu() {
     if (freq_str == "\x1B") return;
     if (freq_str.length() > 1) {
         result = freq_str.toFloat();          // returns 0 if not valid
-        if ((result >= 280 && result <= 350) || (result >= 387 && result <= 468) ||
-            (result >= 779 && result <= 928)) {
+        if (CC1101Driver::isFrequencySupported(result)) {
             bruceConfigPins.setRfFreq(result);
             return;
         }
