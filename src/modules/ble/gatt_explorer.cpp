@@ -37,7 +37,7 @@ enum GattFilterMode {
 struct GattSettings {
     int minRssi = -100;        // -100 (All), -85, -75, -65
     int timeoutSec = 3;       // 3, 5, 8, 12, 15
-    int scanRespTimeout = 50;  // 0 (Off), 50, 100, 250, 500 ms
+    int scanRespTimeout = 100;  // 0 (Off), 50, 100, 250, 500 ms
     bool includeOnDiscovered = true; // false (onResult only), true (include onDiscovered)
     int addrTypeFilter = 0;   // 0: Any, 1: Public only, 2: Random only
     int maxDevices = 60;      // Ring buffer capacity: 20, 40, 60, 80
@@ -460,19 +460,44 @@ private:
         if (!dev || !g_gattScanState.active) return;
         if (!g_gattScanState.mutex) return;
 
+        int8_t rssi = dev->getRSSI();
+        if (rssi == 0) rssi = -100;
+        uint8_t addrType = dev->getAddressType();
+        bool isConn = dev->isConnectable();
+        NimBLEAddress address = dev->getAddress();
+        const uint8_t *devVal = address.getVal();
+        char name[32] = {0};
+        char vendor[24] = {0};
+
+        if (dev->haveName()) {
+            std::string dName = dev->getName();
+            if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
+                strncpy(name, dName.c_str(), sizeof(name) - 1);
+            }
+        }
+        if (dev->haveManufacturerData()) {
+            std::string mfg = dev->getManufacturerData();
+            if (mfg.length() >= 2) {
+                uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
+                const char *comp = getBleCompanyIdName(companyId);
+                if (comp) strncpy(vendor, comp, sizeof(vendor) - 1);
+            }
+        }
+        if (vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
+            const char *oui = getBleOuiNameFromMacBytes(devVal);
+            if (oui) strncpy(vendor, oui, sizeof(vendor) - 1);
+        }
+
         // Try-take mutex with 0 timeout so NimBLE host task is never blocked
         if (xSemaphoreTake(g_gattScanState.mutex, 0) != pdTRUE) return;
 
         g_gattScanState.totalPackets++;
 
-        int8_t rssi = dev->getRSSI();
-        if (rssi == 0) rssi = -100;
         if (rssi < g_gattSettings.minRssi) {
             xSemaphoreGive(g_gattScanState.mutex);
             return;
         }
 
-        uint8_t addrType = dev->getAddressType();
         if (g_gattSettings.addrTypeFilter == 1 && addrType != BLE_ADDR_PUBLIC) {
             xSemaphoreGive(g_gattScanState.mutex);
             return;
@@ -481,8 +506,6 @@ private:
             xSemaphoreGive(g_gattScanState.mutex);
             return;
         }
-
-        bool isConn = dev->isConnectable();
 
         // Tag inspection
         char tag[8] = "ADV";
@@ -550,7 +573,6 @@ private:
             return;
         }
 
-        const uint8_t *devVal = dev->getAddress().getVal();
         uint32_t now = millis();
 
         // 1. Update existing device if already seen
@@ -561,33 +583,13 @@ private:
                 g_gattScanState.devices[i].packetCount++;
                 if (isConn) g_gattScanState.devices[i].isConnectable = true;
 
-                if (g_gattScanState.devices[i].name[0] == '\0' && dev->haveName()) {
-                    std::string dName = dev->getName();
-                    if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
-                        strncpy(g_gattScanState.devices[i].name, dName.c_str(), sizeof(g_gattScanState.devices[i].name) - 1);
-                        g_gattScanState.devices[i].name[sizeof(g_gattScanState.devices[i].name) - 1] = '\0';
-                    }
+                if (g_gattScanState.devices[i].name[0] == '\0' && name[0] != '\0') {
+                    strncpy(g_gattScanState.devices[i].name, name, sizeof(g_gattScanState.devices[i].name) - 1);
+                    g_gattScanState.devices[i].name[sizeof(g_gattScanState.devices[i].name) - 1] = '\0';
                 }
-
-                if (g_gattScanState.devices[i].vendor[0] == '\0') {
-                    if (dev->haveManufacturerData()) {
-                        std::string mfg = dev->getManufacturerData();
-                        if (mfg.length() >= 2) {
-                            uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
-                            const char *comp = getBleCompanyIdName(companyId);
-                            if (comp) {
-                                strncpy(g_gattScanState.devices[i].vendor, comp, sizeof(g_gattScanState.devices[i].vendor) - 1);
-                                g_gattScanState.devices[i].vendor[sizeof(g_gattScanState.devices[i].vendor) - 1] = '\0';
-                            }
-                        }
-                    }
-                    if (g_gattScanState.devices[i].vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
-                        const char *oui = getBleOuiNameFromMacBytes(devVal);
-                        if (oui) {
-                            strncpy(g_gattScanState.devices[i].vendor, oui, sizeof(g_gattScanState.devices[i].vendor) - 1);
-                            g_gattScanState.devices[i].vendor[sizeof(g_gattScanState.devices[i].vendor) - 1] = '\0';
-                        }
-                    }
+                if (g_gattScanState.devices[i].vendor[0] == '\0' && vendor[0] != '\0') {
+                    strncpy(g_gattScanState.devices[i].vendor, vendor, sizeof(g_gattScanState.devices[i].vendor) - 1);
+                    g_gattScanState.devices[i].vendor[sizeof(g_gattScanState.devices[i].vendor) - 1] = '\0';
                 }
 
                 if (strcmp(g_gattScanState.devices[i].tag, "GATT") == 0 || strcmp(g_gattScanState.devices[i].tag, "ADV") == 0) {
@@ -606,42 +608,13 @@ private:
         if (g_gattScanState.count < GATT_MAX_SCAN_DEVICES) {
             auto &d = g_gattScanState.devices[g_gattScanState.count];
             memcpy(d.macBytes, devVal, 6);
-            d.address = dev->getAddress();
+            d.address = address;
             d.addressType = addrType;
             snprintf(d.macStr, sizeof(d.macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                      devVal[5], devVal[4], devVal[3], devVal[2], devVal[1], devVal[0]);
 
-            if (dev->haveName()) {
-                std::string dName = dev->getName();
-                if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
-                    strncpy(d.name, dName.c_str(), sizeof(d.name) - 1);
-                    d.name[sizeof(d.name) - 1] = '\0';
-                } else {
-                    d.name[0] = '\0';
-                }
-            } else {
-                d.name[0] = '\0';
-            }
-
-            d.vendor[0] = '\0';
-            if (dev->haveManufacturerData()) {
-                std::string mfg = dev->getManufacturerData();
-                if (mfg.length() >= 2) {
-                    uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
-                    const char *comp = getBleCompanyIdName(companyId);
-                    if (comp) {
-                        strncpy(d.vendor, comp, sizeof(d.vendor) - 1);
-                        d.vendor[sizeof(d.vendor) - 1] = '\0';
-                    }
-                }
-            }
-            if (d.vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
-                const char *oui = getBleOuiNameFromMacBytes(devVal);
-                if (oui) {
-                    strncpy(d.vendor, oui, sizeof(d.vendor) - 1);
-                    d.vendor[sizeof(d.vendor) - 1] = '\0';
-                }
-            }
+            strncpy(d.name, name, sizeof(d.name) - 1);
+            strncpy(d.vendor, vendor, sizeof(d.vendor) - 1);
 
             d.rssi = rssi;
             d.isConnectable = isConn;
@@ -664,42 +637,13 @@ private:
             if (rssi > minRssi) {
                 auto &d = g_gattScanState.devices[minIdx];
                 memcpy(d.macBytes, devVal, 6);
-                d.address = dev->getAddress();
+                d.address = address;
                 d.addressType = addrType;
                 snprintf(d.macStr, sizeof(d.macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                          devVal[5], devVal[4], devVal[3], devVal[2], devVal[1], devVal[0]);
 
-                if (dev->haveName()) {
-                    std::string dName = dev->getName();
-                    if (!dName.empty() && dName != "(null)" && dName != "null" && dName != "NULL" && dName != "<no name>") {
-                        strncpy(d.name, dName.c_str(), sizeof(d.name) - 1);
-                        d.name[sizeof(d.name) - 1] = '\0';
-                    } else {
-                        d.name[0] = '\0';
-                    }
-                } else {
-                    d.name[0] = '\0';
-                }
-
-                d.vendor[0] = '\0';
-                if (dev->haveManufacturerData()) {
-                    std::string mfg = dev->getManufacturerData();
-                    if (mfg.length() >= 2) {
-                        uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
-                        const char *comp = getBleCompanyIdName(companyId);
-                        if (comp) {
-                            strncpy(d.vendor, comp, sizeof(d.vendor) - 1);
-                            d.vendor[sizeof(d.vendor) - 1] = '\0';
-                        }
-                    }
-                }
-                if (d.vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
-                    const char *oui = getBleOuiNameFromMacBytes(devVal);
-                    if (oui) {
-                        strncpy(d.vendor, oui, sizeof(d.vendor) - 1);
-                        d.vendor[sizeof(d.vendor) - 1] = '\0';
-                    }
-                }
+                strncpy(d.name, name, sizeof(d.name) - 1);
+                strncpy(d.vendor, vendor, sizeof(d.vendor) - 1);
 
                 d.rssi = rssi;
                 d.isConnectable = isConn;
@@ -822,11 +766,14 @@ static void runContinuousScan(GattFilterMode filterMode) {
         return;
     }
 
-    bool bleWasActiveBefore = BLEConnected || (BLEDevice::getServer() != nullptr);
+    bool bleInUse = BLEConnected || (BLEDevice::getServer() != nullptr);
 #if !defined(LITE_VERSION)
-    bleWasActiveBefore =
-        bleWasActiveBefore || BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0;
+    bleInUse = bleInUse || BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0;
 #endif
+    if (bleInUse || pBLEScan != nullptr) {
+        displayError("BLE scanner already in use");
+        return;
+    }
 
     // 3. Setup BLE scan
     if (!ble_scan_setup() || pBLEScan == nullptr) {
@@ -847,7 +794,15 @@ static void runContinuousScan(GattFilterMode filterMode) {
 
     drawMainBorder(true);
 
-    pBLEScan->start(0, false);
+    if (!pBLEScan->start(0, false)) {
+        g_gattScanState.stop();
+        pBLEScan->setScanCallbacks(nullptr);
+        pBLEScan->clearResults();
+        g_scanActive = false;
+        stopBLEStack();
+        displayError("Failed to start BLE scan");
+        return;
+    }
     g_scanActive = true;
 
     int selectedIdx = 0;
@@ -926,11 +881,12 @@ static void runContinuousScan(GattFilterMode filterMode) {
                 } else if (lowerKey == 's') {
                     sel = true;
                 } else if (lowerKey == 'p' || lowerKey == ' ') {
-                    scanPaused = !scanPaused;
-                    if (scanPaused) {
+                    if (!scanPaused) {
                         pBLEScan->stop();
+                        scanPaused = true;
                     } else {
-                        pBLEScan->start(0, false);
+                        scanPaused = !pBLEScan->start(0, false);
+                        if (scanPaused) displayError("Failed to resume BLE scan");
                     }
                     needsRedraw = true;
                 } else if (lowerKey == 'c') {
@@ -1088,10 +1044,6 @@ static void runContinuousScan(GattFilterMode filterMode) {
         g_discoveredDevices.push_back(g_gattScanState.devices[i]);
     }
 
-    if (!devicePicked && !bleWasActiveBefore) {
-        stopBLEStack();
-    }
-
     // Drain keys
     vTaskDelay(pdMS_TO_TICKS(150));
     check(SelPress);
@@ -1105,6 +1057,8 @@ static void runContinuousScan(GattFilterMode filterMode) {
             exploreGattDevice(pickedDevice);
         }
     }
+
+    stopBLEStack();
 }
 
 //=============================================================================
