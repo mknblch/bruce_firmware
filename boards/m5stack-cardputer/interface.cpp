@@ -393,7 +393,7 @@ void InputHandler(void) {
     bool arrow_dw = false;
     bool arrow_ry = false;
     bool arrow_le = false;
-    if (!UseTCA8418 && millis() - tm < 200 && !LongPress) return;
+    if (!UseTCA8418 && millis() - tm < 100 && !LongPress) return;
 
     if (digitalRead(0) == LOW) { // GPIO0 button, shoulder button
         tm = millis();

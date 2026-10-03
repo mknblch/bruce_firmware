@@ -387,6 +387,11 @@ void rf_waterfall_run() {
         bool zoomOut = false;
         bool panUp = false;
         bool panDown = false;
+        bool selectDuringSweep = false;
+        bool nextDuringSweep = false;
+        bool previousDuringSweep = false;
+        bool upDuringSweep = false;
+        bool downDuringSweep = false;
         int32_t panSteps = 0;
         int32_t zoomInSteps = 0;
         int32_t zoomOutSteps = 0;
@@ -491,6 +496,20 @@ void rf_waterfall_run() {
             float f = f_start + (f_end - f_start) * b / (WF_BINS - 1);
             tuneWaterfall(f);
             delayMicroseconds(WF_SETTLE_US);
+            // Let the Cardputer input task run between bins. The settle delay
+            // alone does not yield, so a continuous sweep can otherwise starve
+            // short keyboard presses until they are no longer reported.
+            yield();
+            // Navigation flags are one-shot pulses on the Cardputer. Latch
+            // them while scanning so a pulse is not lost before the frame's
+            // normal input handling below.
+#ifndef HAS_ENCODER
+            selectDuringSweep |= SelPress;
+            nextDuringSweep |= NextPress;
+            previousDuringSweep |= PrevPress;
+            upDuringSweep |= UpPress;
+            downDuringSweep |= DownPress;
+#endif
             int rssi = sampleRssi();
 
             rawRssi[b] = rssi;
@@ -508,6 +527,30 @@ void rf_waterfall_run() {
         delay(8); // yield briefly for input processing
 
         if (sampleCount != WF_BINS) break;
+
+#ifndef HAS_ENCODER
+        if (nextDuringSweep) {
+            if (NextPress) check(NextPress);
+            nextSteps++;
+        }
+        if (previousDuringSweep) {
+            if (PrevPress) check(PrevPress);
+            previousSteps++;
+        }
+        if (upDuringSweep) {
+            if (UpPress) check(UpPress);
+            panUp = true;
+        }
+        if (downDuringSweep) {
+            if (DownPress) check(DownPress);
+            panDown = true;
+        }
+        if (selectDuringSweep) {
+            if (SelPress) check(SelPress);
+            controlLocked = !controlLocked;
+            lastStatus = 0;
+        }
+#endif
 
         // Adaptive Peak Tracker: fast attack on peaks, responsive decay so sensitivity recovers quickly
         if ((float)maxRssi > agcPeak) {
