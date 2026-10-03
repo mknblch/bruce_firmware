@@ -25,38 +25,38 @@ enum Rtl433Band {
 
 enum Rtl433Preset {
     // 300 Band (300 - 348 MHz)
-    RTL433_PRESET_300_OOK_315 = 0,    // 315.00 MHz OOK (US TPMS, Security, Remotes)
-    RTL433_PRESET_300_FSK_315_19K,    // 315.00 MHz 2-FSK 19.2kbps (US Toyota TPMS)
-    RTL433_PRESET_300_GFSK_315_19K,   // 315.00 MHz GFSK 19.2kbps (US TPMS GFSK)
-    RTL433_PRESET_300_FSK_315_17K,    // 315.00 MHz 2-FSK 17.24kbps (Fine Offset 315M FSK)
-    RTL433_PRESET_300_OOK_345,        // 345.00 MHz OOK (Honeywell / Ademco 5800 / 2GIG)
-    RTL433_PRESET_300_FSK_345_17K,    // 345.00 MHz 2-FSK 17.24kbps (345M FSK Sensors)
-    RTL433_PRESET_300_OOK_310,        // 310.00 MHz OOK (Linear / Multi-Code)
-    RTL433_PRESET_300_OOK_318,        // 318.00 MHz OOK (MegaCode Remotes)
-    RTL433_PRESET_300_OOK_303,        // 303.875 MHz OOK (Garage / Gate Remotes)
-    RTL433_PRESET_300_OOK_300,        // 300.00 MHz OOK (300M Band Base)
+    RTL433_PRESET_300_OOK_315 = 0,  // 315.00 MHz OOK (US TPMS, Security, Remotes)
+    RTL433_PRESET_300_FSK_315_19K,  // 315.00 MHz 2-FSK 19.2kbps (US Toyota TPMS)
+    RTL433_PRESET_300_GFSK_315_19K, // 315.00 MHz GFSK 19.2kbps (US TPMS GFSK)
+    RTL433_PRESET_300_FSK_315_17K,  // 315.00 MHz 2-FSK 17.24kbps (Fine Offset 315M FSK)
+    RTL433_PRESET_300_OOK_345,      // 345.00 MHz OOK (Honeywell / Ademco 5800 / 2GIG)
+    RTL433_PRESET_300_FSK_345_17K,  // 345.00 MHz 2-FSK 17.24kbps (345M FSK Sensors)
+    RTL433_PRESET_300_OOK_310,      // 310.00 MHz OOK (Linear / Multi-Code)
+    RTL433_PRESET_300_OOK_318,      // 318.00 MHz OOK (MegaCode Remotes)
+    RTL433_PRESET_300_OOK_303,      // 303.875 MHz OOK (Garage / Gate Remotes)
+    RTL433_PRESET_300_OOK_300,      // 300.00 MHz OOK (300M Band Base)
 
     // 400 Band (387 - 464 MHz)
-    RTL433_PRESET_400_OOK_433,        // 433.92 MHz OOK (Nexus, Acurite, Oregon, Kerui, Proove, DSC, Schrader)
-    RTL433_PRESET_400_FSK_433_17K,    // 433.92 MHz 2-FSK 17.24kbps (Fine Offset WH65/WH24/WS1000, LaCrosse)
-    RTL433_PRESET_400_FSK_433_19K,    // 433.92 MHz 2-FSK 19.2kbps (Toyota TPMS, FSK TPMS)
-    RTL433_PRESET_400_GFSK_433_17K,   // 433.92 MHz GFSK 17.24kbps (Bresser 5-in-1 / Weather GFSK)
-    RTL433_PRESET_400_MSK_433_100K,   // 433.92 MHz MSK 100kbps (433M MSK / Telemetry)
-    RTL433_PRESET_400_OOK_434,        // 434.42 MHz OOK (434M Weather OOK)
-    RTL433_PRESET_400_FSK_434_17K,    // 434.42 MHz 2-FSK 17.24kbps (Fine Offset secondary FSK)
-    RTL433_PRESET_400_GFSK_434_17K,   // 434.42 MHz GFSK 17.24kbps (Bresser secondary GFSK)
-    RTL433_PRESET_400_OOK_418,        // 418.00 MHz OOK (UK / US 418M Remotes)
-    RTL433_PRESET_400_OOK_390,        // 390.00 MHz OOK (Chamberlain / LiftMaster)
+    RTL433_PRESET_400_OOK_433,      // 433.92 MHz OOK (Nexus, Acurite, Oregon, Kerui, Proove, DSC, Schrader)
+    RTL433_PRESET_400_FSK_433_17K,  // 433.92 MHz 2-FSK 17.24kbps (Fine Offset WH65/WH24/WS1000, LaCrosse)
+    RTL433_PRESET_400_FSK_433_19K,  // 433.92 MHz 2-FSK 19.2kbps (Toyota TPMS, FSK TPMS)
+    RTL433_PRESET_400_GFSK_433_17K, // 433.92 MHz GFSK 17.24kbps (Bresser 5-in-1 / Weather GFSK)
+    RTL433_PRESET_400_MSK_433_100K, // 433.92 MHz MSK 100kbps (433M MSK / Telemetry)
+    RTL433_PRESET_400_OOK_434,      // 434.42 MHz OOK (434M Weather OOK)
+    RTL433_PRESET_400_FSK_434_17K,  // 434.42 MHz 2-FSK 17.24kbps (Fine Offset secondary FSK)
+    RTL433_PRESET_400_GFSK_434_17K, // 434.42 MHz GFSK 17.24kbps (Bresser secondary GFSK)
+    RTL433_PRESET_400_OOK_418,      // 418.00 MHz OOK (UK / US 418M Remotes)
+    RTL433_PRESET_400_OOK_390,      // 390.00 MHz OOK (Chamberlain / LiftMaster)
 
     // 800 Band (779 - 928 MHz)
-    RTL433_PRESET_800_OOK_868,        // 868.35 MHz OOK (EU Weather & Security OOK)
-    RTL433_PRESET_800_FSK_868_17K,    // 868.35 MHz 2-FSK 17.24kbps (EU Fine Offset, LaCrosse)
-    RTL433_PRESET_800_GFSK_868_17K,   // 868.35 MHz GFSK 17.24kbps (EU Bresser 5/6/7-in-1 Weather)
-    RTL433_PRESET_800_MSK_868_T,      // 868.95 MHz MSK 100kbps (Wireless M-Bus Mode T Smart Meters)
-    RTL433_PRESET_800_MSK_868_S,      // 868.30 MHz MSK 32.768kbps (Wireless M-Bus Mode S Smart Meters)
-    RTL433_PRESET_800_OOK_915,        // 915.00 MHz OOK (US 915M ISM / Sensors OOK)
-    RTL433_PRESET_800_FSK_915_17K,    // 915.00 MHz 2-FSK 17.24kbps (US 915M Weather / Sensors FSK)
-    RTL433_PRESET_800_GFSK_915_17K,   // 915.00 MHz GFSK 17.24kbps (US 915M Weather / Sensors GFSK)
+    RTL433_PRESET_800_OOK_868,      // 868.35 MHz OOK (EU Weather & Security OOK)
+    RTL433_PRESET_800_FSK_868_17K,  // 868.35 MHz 2-FSK 17.24kbps (EU Fine Offset, LaCrosse)
+    RTL433_PRESET_800_GFSK_868_17K, // 868.35 MHz GFSK 17.24kbps (EU Bresser 5/6/7-in-1 Weather)
+    RTL433_PRESET_800_MSK_868_T,    // 868.95 MHz MSK 100kbps (Wireless M-Bus Mode T Smart Meters)
+    RTL433_PRESET_800_MSK_868_S,    // 868.30 MHz MSK 32.768kbps (Wireless M-Bus Mode S Smart Meters)
+    RTL433_PRESET_800_OOK_915,      // 915.00 MHz OOK (US 915M ISM / Sensors OOK)
+    RTL433_PRESET_800_FSK_915_17K,  // 915.00 MHz 2-FSK 17.24kbps (US 915M Weather / Sensors FSK)
+    RTL433_PRESET_800_GFSK_915_17K, // 915.00 MHz GFSK 17.24kbps (US 915M Weather / Sensors GFSK)
 
     RTL433_PRESET_COUNT,
 
@@ -79,33 +79,33 @@ enum Rtl433Preset {
 
 enum Rtl433ChangingPreset {
     // 300 Band Hopping Profiles
-    RTL433_HOP_300_315_ALL = 0,    // 1 Freq + All Modes (315.00 MHz)
-    RTL433_HOP_300_345_ALL,        // 1 Freq + All Modes (345.00 MHz)
-    RTL433_HOP_300_BAND_OOK,       // Freq Range + 1 Mode (300 Band OOK)
-    RTL433_HOP_300_BAND_FSK,       // Freq Range + 1 Mode (300 Band 2-FSK)
-    RTL433_HOP_300_BAND_GFSK,      // Freq Range + 1 Mode (300 Band GFSK)
-    RTL433_HOP_300_BAND_ALL,       // Freq Range + All Modes (300 Band All)
+    RTL433_HOP_300_315_ALL = 0, // 1 Freq + All Modes (315.00 MHz)
+    RTL433_HOP_300_345_ALL,     // 1 Freq + All Modes (345.00 MHz)
+    RTL433_HOP_300_BAND_OOK,    // Freq Range + 1 Mode (300 Band OOK)
+    RTL433_HOP_300_BAND_FSK,    // Freq Range + 1 Mode (300 Band 2-FSK)
+    RTL433_HOP_300_BAND_GFSK,   // Freq Range + 1 Mode (300 Band GFSK)
+    RTL433_HOP_300_BAND_ALL,    // Freq Range + All Modes (300 Band All)
 
     // 400 Band Hopping Profiles
-    RTL433_HOP_400_433_ALL,        // 1 Freq + All Modes (433.92 MHz)
-    RTL433_HOP_400_434_ALL,        // 1 Freq + All Modes (434.42 MHz)
-    RTL433_HOP_400_BAND_OOK,       // Freq Range + 1 Mode (400 Band OOK)
-    RTL433_HOP_400_BAND_FSK,       // Freq Range + 1 Mode (400 Band 2-FSK)
-    RTL433_HOP_400_BAND_GFSK,      // Freq Range + 1 Mode (400 Band GFSK)
-    RTL433_HOP_400_BAND_MSK,       // Freq Range + 1 Mode (400 Band MSK)
-    RTL433_HOP_400_BAND_ALL,       // Freq Range + All Modes (400 Band All)
+    RTL433_HOP_400_433_ALL,   // 1 Freq + All Modes (433.92 MHz)
+    RTL433_HOP_400_434_ALL,   // 1 Freq + All Modes (434.42 MHz)
+    RTL433_HOP_400_BAND_OOK,  // Freq Range + 1 Mode (400 Band OOK)
+    RTL433_HOP_400_BAND_FSK,  // Freq Range + 1 Mode (400 Band 2-FSK)
+    RTL433_HOP_400_BAND_GFSK, // Freq Range + 1 Mode (400 Band GFSK)
+    RTL433_HOP_400_BAND_MSK,  // Freq Range + 1 Mode (400 Band MSK)
+    RTL433_HOP_400_BAND_ALL,  // Freq Range + All Modes (400 Band All)
 
     // 800 Band Hopping Profiles
-    RTL433_HOP_800_868_ALL,        // 1 Freq + All Modes (868.35 MHz)
-    RTL433_HOP_800_915_ALL,        // 1 Freq + All Modes (915.00 MHz)
-    RTL433_HOP_800_BAND_OOK,       // Freq Range + 1 Mode (800 Band OOK)
-    RTL433_HOP_800_BAND_FSK,       // Freq Range + 1 Mode (800 Band 2-FSK)
-    RTL433_HOP_800_BAND_GFSK,      // Freq Range + 1 Mode (800 Band GFSK)
-    RTL433_HOP_800_BAND_MSK,       // Freq Range + 1 Mode (800 Band MSK)
-    RTL433_HOP_800_BAND_ALL,       // Freq Range + All Modes (800 Band All)
+    RTL433_HOP_800_868_ALL,   // 1 Freq + All Modes (868.35 MHz)
+    RTL433_HOP_800_915_ALL,   // 1 Freq + All Modes (915.00 MHz)
+    RTL433_HOP_800_BAND_OOK,  // Freq Range + 1 Mode (800 Band OOK)
+    RTL433_HOP_800_BAND_FSK,  // Freq Range + 1 Mode (800 Band 2-FSK)
+    RTL433_HOP_800_BAND_GFSK, // Freq Range + 1 Mode (800 Band GFSK)
+    RTL433_HOP_800_BAND_MSK,  // Freq Range + 1 Mode (800 Band MSK)
+    RTL433_HOP_800_BAND_ALL,  // Freq Range + All Modes (800 Band All)
 
     // All Bands Hopping Profile
-    RTL433_HOP_ALL_BANDS_ALL,      // All Bands (All Ranges & Modes)
+    RTL433_HOP_ALL_BANDS_ALL,        // All Bands (All Ranges & Modes)
     RTL433_HOP_SINGLE_FREQ_ALL = -1, // One selected frequency, cycling through modes
 
     RTL433_CHANGING_PRESET_COUNT = RTL433_HOP_ALL_BANDS_ALL + 1,
@@ -134,32 +134,42 @@ struct Rtl433PresetDef {
     const char *name;
     Rtl433Band band;
     float default_freq;
-    int modulation;     // 0 = 2-FSK, 1 = GFSK, 2 = ASK/OOK, 4 = MSK
-    float deviation;    // kHz
-    float rx_bw;        // kHz
-    float data_rate;    // kbps
+    int modulation;  // 0 = 2-FSK, 1 = GFSK, 2 = ASK/OOK, 4 = MSK
+    float deviation; // kHz
+    float rx_bw;     // kHz
+    float data_rate; // kbps
     const char *desc;
+};
+
+struct Rtl433HopSelection {
+    float rangeStart = 433.92f;
+    float rangeEnd = 433.92f;
+    std::vector<int> presets = {RTL433_PRESET_400_OOK_433};
 };
 
 const Rtl433PresetDef *rtl433_get_preset_def(int preset);
 const char *rtl433_get_preset_name(int preset);
 std::vector<int> rtl433_get_band_presets(Rtl433Band band);
+std::vector<int> rtl433_get_modulation_presets();
 std::vector<int> rtl433_get_changing_presets(int changingPreset);
 const char *rtl433_get_changing_preset_name(int changingPreset);
 const char *rtl433_get_band_name(Rtl433Band band);
+bool rtl433_normalize_frequency_range(float &rangeStart, float &rangeEnd);
 inline std::vector<int> rtl433_get_hop_presets(int hopGroup) { return rtl433_get_changing_presets(hopGroup); }
-inline const char *rtl433_get_hop_group_name(int hopGroup) { return rtl433_get_changing_preset_name(hopGroup); }
+inline const char *rtl433_get_hop_group_name(int hopGroup) {
+    return rtl433_get_changing_preset_name(hopGroup);
+}
 
 // ---------------------------------------------------------------------------
 // Decoded Telemetry Reading
 // ---------------------------------------------------------------------------
 struct Rtl433Reading {
-    String protocol;          // e.g. "FineOffset-WH2", "Acurite-606TX", "Oregon-v2.1", "FineOffset-WH65"
-    String model;             // e.g. "WH2 / Rubicson", "606TX", "THGR122N", "WH65B Station"
-    String decoder_name;      // e.g. "Nexus", "Acurite", "Oregon", "FineOffset", "Honeywell"
+    String protocol;     // e.g. "FineOffset-WH2", "Acurite-606TX", "Oregon-v2.1", "FineOffset-WH65"
+    String model;        // e.g. "WH2 / Rubicson", "606TX", "THGR122N", "WH65B Station"
+    String decoder_name; // e.g. "Nexus", "Acurite", "Oregon", "FineOffset", "Honeywell"
     uint16_t decoder_id = 0;
     uint32_t device_id = 0;
-    int8_t channel = -1;      // -1 if not applicable
+    int8_t channel = -1; // -1 if not applicable
 
     bool has_temp = false;
     float temp_c = 0.0f;
@@ -259,18 +269,14 @@ public:
     uint32_t extract_bits(uint16_t start_bit, uint8_t count) const {
         if (count > 32 || count == 0) return 0;
         uint32_t val = 0;
-        for (uint8_t i = 0; i < count; i++) {
-            val = (val << 1) | get_bit(start_bit + i);
-        }
+        for (uint8_t i = 0; i < count; i++) { val = (val << 1) | get_bit(start_bit + i); }
         return val;
     }
 
     uint64_t extract_bits64(uint16_t start_bit, uint8_t count) const {
         if (count > 64 || count == 0) return 0;
         uint64_t val = 0;
-        for (uint8_t i = 0; i < count; i++) {
-            val = (val << 1) | get_bit(start_bit + i);
-        }
+        for (uint8_t i = 0; i < count; i++) { val = (val << 1) | get_bit(start_bit + i); }
         return val;
     }
 
@@ -280,9 +286,7 @@ public:
         uint32_t window = 0;
         for (uint16_t i = 0; i < num_bits; i++) {
             window = ((window << 1) | get_bit(i)) & mask;
-            if (i >= pattern_len - 1 && window == pattern) {
-                return i - pattern_len + 1;
-            }
+            if (i >= pattern_len - 1 && window == pattern) { return i - pattern_len + 1; }
         }
         return -1;
     }
@@ -317,17 +321,13 @@ public:
 
     uint8_t sum_bytes(uint16_t start_byte, uint16_t count) const {
         uint8_t sum = 0;
-        for (uint16_t i = 0; i < count; i++) {
-            sum += get_byte(start_byte + i);
-        }
+        for (uint16_t i = 0; i < count; i++) { sum += get_byte(start_byte + i); }
         return sum;
     }
 
     uint8_t sum_nibbles(uint16_t start_nibble, uint16_t count) const {
         uint8_t sum = 0;
-        for (uint16_t i = 0; i < count; i++) {
-            sum += get_nibble(start_nibble + i);
-        }
+        for (uint16_t i = 0; i < count; i++) { sum += get_nibble(start_nibble + i); }
         return sum;
     }
 
@@ -343,20 +343,32 @@ public:
     }
 
     void invert() {
-        for (size_t i = 0; i < MAX_BYTES; i++) {
-            data[i] = ~data[i];
-        }
+        for (size_t i = 0; i < MAX_BYTES; i++) { data[i] = ~data[i]; }
     }
 };
 
 // ---------------------------------------------------------------------------
 // Pulse Demodulator Helpers
 // ---------------------------------------------------------------------------
-bool demod_ppm(const std::vector<int> &durations, int mark_us, int zero_gap_us, int one_gap_us, int tol_pct, BitBuffer &out);
-bool demod_pwm(const std::vector<int> &durations, int zero_mark_us, int one_mark_us, int space_us, int tol_pct, BitBuffer &out);
-bool demod_pwm_space(const std::vector<int> &durations, int mark_us, int zero_space_us, int one_space_us, int tol_pct, BitBuffer &out);
-bool demod_manchester(const std::vector<int> &durations, int half_clock_us, int tol_pct, BitBuffer &out, bool invert = false);
-bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out, uint32_t sync_word = 0, uint8_t sync_len = 0);
+bool demod_ppm(
+    const std::vector<int> &durations, int mark_us, int zero_gap_us, int one_gap_us, int tol_pct,
+    BitBuffer &out
+);
+bool demod_pwm(
+    const std::vector<int> &durations, int zero_mark_us, int one_mark_us, int space_us, int tol_pct,
+    BitBuffer &out
+);
+bool demod_pwm_space(
+    const std::vector<int> &durations, int mark_us, int zero_space_us, int one_space_us, int tol_pct,
+    BitBuffer &out
+);
+bool demod_manchester(
+    const std::vector<int> &durations, int half_clock_us, int tol_pct, BitBuffer &out, bool invert = false
+);
+bool demod_pcm_fsk(
+    const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out, uint32_t sync_word = 0,
+    uint8_t sync_len = 0
+);
 
 // ---------------------------------------------------------------------------
 // Protocol Decoder Declarations
@@ -378,8 +390,10 @@ bool decode_bresser_6in1(const std::vector<int> &durations, Rtl433Reading &out);
 bool decode_wmbus(const std::vector<int> &durations, Rtl433Reading &out);
 
 // Pulse Generator Helpers
-std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int mark_us, int zero_gap_us, int one_gap_us);
-std::vector<int> build_pwm_pulses(const uint8_t *bytes, size_t bit_count, int zero_mark_us, int one_mark_us, int space_us);
+std::vector<int>
+build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int mark_us, int zero_gap_us, int one_gap_us);
+std::vector<int>
+build_pwm_pulses(const uint8_t *bytes, size_t bit_count, int zero_mark_us, int one_mark_us, int space_us);
 std::vector<int> build_manchester_pulses(const uint8_t *bytes, size_t bit_count, int half_us);
 std::vector<int> build_pcm_pulses(const uint8_t *bytes, size_t bit_count, int bit_us);
 
@@ -393,7 +407,9 @@ bool decode_bresser_6in1_payload(const uint8_t *payload, size_t len, Rtl433Readi
 bool decode_wmbus_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
 bool decode_toyota_tpms_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
 bool decode_lacrosse_tx_payload(const uint8_t *payload, size_t len, Rtl433Reading &out);
-bool rtl433_transmit_fsk_packet(float freq, int preset, const uint8_t *payload, size_t len, uint16_t sync_word, int repeats);
+bool rtl433_transmit_fsk_packet(
+    float freq, int preset, const uint8_t *payload, size_t len, uint16_t sync_word, int repeats
+);
 
 // ---------------------------------------------------------------------------
 // Subsystem Engine & Storage API
@@ -411,7 +427,9 @@ public:
 
     // Hardware FIFO packet polling and payload decoding
     bool pollFifo(float freq, int preset, int rssi, Rtl433Reading &reading);
-    bool decodePayload(const uint8_t *payload, size_t len, float freq, int preset, int rssi, Rtl433Reading &reading);
+    bool decodePayload(
+        const uint8_t *payload, size_t len, float freq, int preset, int rssi, Rtl433Reading &reading
+    );
 
     // Logging & Storage
     bool logJson(const Rtl433Reading &reading, bool sd_enabled = true);
@@ -433,7 +451,10 @@ public:
     // Stats
     uint32_t getPacketsReceived() const { return _packetsReceived; }
     uint32_t getPacketsDecoded() const { return _packetsDecoded; }
-    void resetStats() { _packetsReceived = 0; _packetsDecoded = 0; }
+    void resetStats() {
+        _packetsReceived = 0;
+        _packetsDecoded = 0;
+    }
 
     int currentPreset = RTL433_PRESET_OOK_433;
     float currentFrequency = 433.92f;
@@ -442,6 +463,8 @@ public:
     int hopGroup = RTL433_CHANGING_433_ALL;
     Rtl433Band hopFrequencyBand = RTL433_BAND_400;
     float hopFrequency = 433.92f;
+    Rtl433HopSelection hopSelection;
+    bool hopExtended = false;
     uint32_t hopTimeoutMs = 10000;
     bool hopStayOnSignal = true;
     bool sdLoggingEnabled = false;
@@ -449,10 +472,11 @@ public:
     String getActivePresetName() const;
 
     // Replay settings
-    bool replayPreamble = false;     // Preamble enabled only when explicitly requested
-    int replayFreqSpread = 0;        // 0 = Off (single freq), 1 = +/-15 kHz (3x), 2 = +/-30 kHz (5x), 3 = +/-50 kHz (3x)
-    int replayRepeats = 3;           // Number of frame repetitions
-    int replayGapMs = 20;            // Gap between frames in ms
+    bool replayPreamble = false; // Preamble enabled only when explicitly requested
+    int replayFreqSpread =
+        0; // 0 = Off (single freq), 1 = +/-15 kHz (3x), 2 = +/-30 kHz (5x), 3 = +/-50 kHz (3x)
+    int replayRepeats = 3; // Number of frame repetitions
+    int replayGapMs = 20;  // Gap between frames in ms
 
     // Test transmit settings (Test TX menu)
     int testTxSampleIdx = 0;         // Index into rtl433_test_tx_samples[]

@@ -2,43 +2,44 @@
 #include "rtl_433.h"
 #include "core/sd_functions.h"
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
+#include <algorithm>
 #include <cmath>
 
 static const Rtl433PresetDef rtl433_presets[] = {
     // 300 Band (300 - 348 MHz)
     // name                  band              default_freq  mod  dev       rx_bw   d_rate   desc
-    {"OOK 315.00M",          RTL433_BAND_300,  315.00f,      2,   0.0f,     270.8f, 10.0f,   "US TPMS & Security OOK"},
-    {"2-FSK 315 19.2k",      RTL433_BAND_300,  315.00f,      0,   47.60f,   200.0f, 19.20f,  "US Toyota TPMS FSK"},
-    {"GFSK 315 19.2k",       RTL433_BAND_300,  315.00f,      1,   47.60f,   200.0f, 19.20f,  "US TPMS GFSK"},
-    {"2-FSK 315 17.2k",      RTL433_BAND_300,  315.00f,      0,   19.04f,   135.4f, 17.24f,  "315M Fine Offset FSK"},
-    {"OOK 345.00M",          RTL433_BAND_300,  345.00f,      2,   0.0f,     270.8f, 10.0f,   "Honeywell / Ademco 5800"},
-    {"2-FSK 345 17.2k",      RTL433_BAND_300,  345.00f,      0,   19.04f,   135.4f, 17.24f,  "345M FSK Sensors"},
-    {"OOK 310.00M",          RTL433_BAND_300,  310.00f,      2,   0.0f,     270.8f, 10.0f,   "Linear / Multi-Code"},
-    {"OOK 318.00M",          RTL433_BAND_300,  318.00f,      2,   0.0f,     270.8f, 10.0f,   "MegaCode Remotes"},
-    {"OOK 303.875M",         RTL433_BAND_300,  303.875f,     2,   0.0f,     270.8f, 10.0f,   "Garage / Gate Remotes"},
-    {"OOK 300.00M",          RTL433_BAND_300,  300.00f,      2,   0.0f,     270.8f, 10.0f,   "300M Band Base"},
+    {"OOK 315.00M",      RTL433_BAND_300, 315.00f,  2, 0.0f,   270.8f, 10.0f,   "US TPMS & Security OOK"   },
+    {"2-FSK 315 19.2k",  RTL433_BAND_300, 315.00f,  0, 47.60f, 200.0f, 19.20f,  "US Toyota TPMS FSK"       },
+    {"GFSK 315 19.2k",   RTL433_BAND_300, 315.00f,  1, 47.60f, 200.0f, 19.20f,  "US TPMS GFSK"             },
+    {"2-FSK 315 17.2k",  RTL433_BAND_300, 315.00f,  0, 19.04f, 135.4f, 17.24f,  "315M Fine Offset FSK"     },
+    {"OOK 345.00M",      RTL433_BAND_300, 345.00f,  2, 0.0f,   270.8f, 10.0f,   "Honeywell / Ademco 5800"  },
+    {"2-FSK 345 17.2k",  RTL433_BAND_300, 345.00f,  0, 19.04f, 135.4f, 17.24f,  "345M FSK Sensors"         },
+    {"OOK 310.00M",      RTL433_BAND_300, 310.00f,  2, 0.0f,   270.8f, 10.0f,   "Linear / Multi-Code"      },
+    {"OOK 318.00M",      RTL433_BAND_300, 318.00f,  2, 0.0f,   270.8f, 10.0f,   "MegaCode Remotes"         },
+    {"OOK 303.875M",     RTL433_BAND_300, 303.875f, 2, 0.0f,   270.8f, 10.0f,   "Garage / Gate Remotes"    },
+    {"OOK 300.00M",      RTL433_BAND_300, 300.00f,  2, 0.0f,   270.8f, 10.0f,   "300M Band Base"           },
 
     // 400 Band (387 - 464 MHz)
-    {"OOK 433.92M",          RTL433_BAND_400,  433.92f,      2,   0.0f,     270.8f, 10.0f,   "Weather & Security OOK"},
-    {"2-FSK 433 17.2k",      RTL433_BAND_400,  433.92f,      0,   19.04f,   135.4f, 17.24f,  "Fine Offset / Ambient FSK"},
-    {"2-FSK 433 19.2k",      RTL433_BAND_400,  433.92f,      0,   47.60f,   200.0f, 19.20f,  "Toyota TPMS FSK"},
-    {"GFSK 433 17.2k",       RTL433_BAND_400,  433.92f,      1,   19.04f,   135.4f, 17.24f,  "Bresser / Weather GFSK"},
-    {"MSK 433 100k",         RTL433_BAND_400,  433.92f,      4,   0.0f,     270.8f, 100.0f,  "433M MSK / Telemetry"},
-    {"OOK 434.42M",          RTL433_BAND_400,  434.42f,      2,   0.0f,     270.8f, 10.0f,   "434M Weather OOK"},
-    {"2-FSK 434 17.2k",      RTL433_BAND_400,  434.42f,      0,   19.04f,   135.4f, 17.24f,  "Fine Offset 434M FSK"},
-    {"GFSK 434 17.2k",       RTL433_BAND_400,  434.42f,      1,   19.04f,   135.4f, 17.24f,  "Bresser 434M GFSK"},
-    {"OOK 418.00M",          RTL433_BAND_400,  418.00f,      2,   0.0f,     270.8f, 10.0f,   "UK / US 418M Remotes"},
-    {"OOK 390.00M",          RTL433_BAND_400,  390.00f,      2,   0.0f,     270.8f, 10.0f,   "Chamberlain / LiftMaster"},
+    {"OOK 433.92M",      RTL433_BAND_400, 433.92f,  2, 0.0f,   270.8f, 10.0f,   "Weather & Security OOK"   },
+    {"2-FSK 433 17.2k",  RTL433_BAND_400, 433.92f,  0, 19.04f, 135.4f, 17.24f,  "Fine Offset / Ambient FSK"},
+    {"2-FSK 433 19.2k",  RTL433_BAND_400, 433.92f,  0, 47.60f, 200.0f, 19.20f,  "Toyota TPMS FSK"          },
+    {"GFSK 433 17.2k",   RTL433_BAND_400, 433.92f,  1, 19.04f, 135.4f, 17.24f,  "Bresser / Weather GFSK"   },
+    {"MSK 433 100k",     RTL433_BAND_400, 433.92f,  4, 0.0f,   270.8f, 100.0f,  "433M MSK / Telemetry"     },
+    {"OOK 434.42M",      RTL433_BAND_400, 434.42f,  2, 0.0f,   270.8f, 10.0f,   "434M Weather OOK"         },
+    {"2-FSK 434 17.2k",  RTL433_BAND_400, 434.42f,  0, 19.04f, 135.4f, 17.24f,  "Fine Offset 434M FSK"     },
+    {"GFSK 434 17.2k",   RTL433_BAND_400, 434.42f,  1, 19.04f, 135.4f, 17.24f,  "Bresser 434M GFSK"        },
+    {"OOK 418.00M",      RTL433_BAND_400, 418.00f,  2, 0.0f,   270.8f, 10.0f,   "UK / US 418M Remotes"     },
+    {"OOK 390.00M",      RTL433_BAND_400, 390.00f,  2, 0.0f,   270.8f, 10.0f,   "Chamberlain / LiftMaster" },
 
     // 800 Band (779 - 928 MHz)
-    {"OOK 868.35M",          RTL433_BAND_800,  868.35f,      2,   0.0f,     270.8f, 10.0f,   "EU Weather OOK"},
-    {"2-FSK 868 17.2k",      RTL433_BAND_800,  868.35f,      0,   19.04f,   135.4f, 17.24f,  "EU Fine Offset / LaCrosse"},
-    {"GFSK 868 17.2k",       RTL433_BAND_800,  868.35f,      1,   19.04f,   135.4f, 17.24f,  "EU Bresser Weather GFSK"},
-    {"MSK 868 wM-Bus T",     RTL433_BAND_800,  868.95f,      4,   0.0f,     270.8f, 100.0f,  "wM-Bus Mode T (Meters)"},
-    {"MSK 868 wM-Bus S",     RTL433_BAND_800,  868.30f,      4,   0.0f,     135.4f, 32.768f, "wM-Bus Mode S (Meters)"},
-    {"OOK 915.00M",          RTL433_BAND_800,  915.00f,      2,   0.0f,     270.8f, 10.0f,   "US 915M ISM / Sensors OOK"},
-    {"2-FSK 915 17.2k",      RTL433_BAND_800,  915.00f,      0,   19.04f,   135.4f, 17.24f,  "US 915M Weather FSK"},
-    {"GFSK 915 17.2k",       RTL433_BAND_800,  915.00f,      1,   19.04f,   135.4f, 17.24f,  "US 915M Weather GFSK"},
+    {"OOK 868.35M",      RTL433_BAND_800, 868.35f,  2, 0.0f,   270.8f, 10.0f,   "EU Weather OOK"           },
+    {"2-FSK 868 17.2k",  RTL433_BAND_800, 868.35f,  0, 19.04f, 135.4f, 17.24f,  "EU Fine Offset / LaCrosse"},
+    {"GFSK 868 17.2k",   RTL433_BAND_800, 868.35f,  1, 19.04f, 135.4f, 17.24f,  "EU Bresser Weather GFSK"  },
+    {"MSK 868 wM-Bus T", RTL433_BAND_800, 868.95f,  4, 0.0f,   270.8f, 100.0f,  "wM-Bus Mode T (Meters)"   },
+    {"MSK 868 wM-Bus S", RTL433_BAND_800, 868.30f,  4, 0.0f,   135.4f, 32.768f, "wM-Bus Mode S (Meters)"   },
+    {"OOK 915.00M",      RTL433_BAND_800, 915.00f,  2, 0.0f,   270.8f, 10.0f,   "US 915M ISM / Sensors OOK"},
+    {"2-FSK 915 17.2k",  RTL433_BAND_800, 915.00f,  0, 19.04f, 135.4f, 17.24f,  "US 915M Weather FSK"      },
+    {"GFSK 915 17.2k",   RTL433_BAND_800, 915.00f,  1, 19.04f, 135.4f, 17.24f,  "US 915M Weather GFSK"     },
 };
 
 const Rtl433PresetDef *rtl433_get_preset_def(int preset) {
@@ -46,9 +47,7 @@ const Rtl433PresetDef *rtl433_get_preset_def(int preset) {
     return &rtl433_presets[preset];
 }
 
-const char *rtl433_get_preset_name(int preset) {
-    return rtl433_get_preset_def(preset)->name;
-}
+const char *rtl433_get_preset_name(int preset) { return rtl433_get_preset_def(preset)->name; }
 
 const char *rtl433_get_band_name(Rtl433Band band) {
     switch (band) {
@@ -62,79 +61,166 @@ const char *rtl433_get_band_name(Rtl433Band band) {
 std::vector<int> rtl433_get_band_presets(Rtl433Band band) {
     std::vector<int> list;
     for (int p = 0; p < RTL433_PRESET_COUNT; p++) {
-        if (rtl433_get_preset_def(p)->band == band) {
-            list.push_back(p);
-        }
+        if (rtl433_get_preset_def(p)->band == band) { list.push_back(p); }
     }
     return list;
+}
+
+static bool rtl433_same_modulation_profile(const Rtl433PresetDef &left, const Rtl433PresetDef &right) {
+    return left.modulation == right.modulation && left.deviation == right.deviation &&
+           left.rx_bw == right.rx_bw && left.data_rate == right.data_rate;
+}
+
+std::vector<int> rtl433_get_modulation_presets() {
+    std::vector<int> profiles;
+    for (int preset = 0; preset < RTL433_PRESET_COUNT; preset++) {
+        const Rtl433PresetDef &candidate = *rtl433_get_preset_def(preset);
+        if (candidate.modulation != 0 && candidate.modulation != 1 && candidate.modulation != 2 &&
+            candidate.modulation != 4) {
+            continue;
+        }
+
+        bool alreadyListed = false;
+        for (int listedPreset : profiles) {
+            if (rtl433_same_modulation_profile(candidate, *rtl433_get_preset_def(listedPreset))) {
+                alreadyListed = true;
+                break;
+            }
+        }
+        if (!alreadyListed) profiles.push_back(preset);
+    }
+    return profiles;
+}
+
+bool rtl433_normalize_frequency_range(float &rangeStart, float &rangeEnd) {
+    if (!std::isfinite(rangeStart) || !std::isfinite(rangeEnd) || rangeStart <= 0.0f || rangeEnd <= 0.0f) {
+        return false;
+    }
+    if (rangeStart > rangeEnd) std::swap(rangeStart, rangeEnd);
+    return true;
 }
 
 std::vector<int> rtl433_get_changing_presets(int changingPreset) {
     switch (changingPreset) {
         // 300 Band Hopping Profiles
         case RTL433_HOP_300_315_ALL:
-            return {RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_GFSK_315_19K, RTL433_PRESET_300_FSK_315_17K};
-        case RTL433_HOP_300_345_ALL:
-            return {RTL433_PRESET_300_OOK_345, RTL433_PRESET_300_FSK_345_17K};
+            return {
+                RTL433_PRESET_300_OOK_315,
+                RTL433_PRESET_300_FSK_315_19K,
+                RTL433_PRESET_300_GFSK_315_19K,
+                RTL433_PRESET_300_FSK_315_17K
+            };
+        case RTL433_HOP_300_345_ALL: return {RTL433_PRESET_300_OOK_345, RTL433_PRESET_300_FSK_345_17K};
         case RTL433_HOP_300_BAND_OOK:
-            return {RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_OOK_345, RTL433_PRESET_300_OOK_310, RTL433_PRESET_300_OOK_318, RTL433_PRESET_300_OOK_303, RTL433_PRESET_300_OOK_300};
+            return {
+                RTL433_PRESET_300_OOK_315,
+                RTL433_PRESET_300_OOK_345,
+                RTL433_PRESET_300_OOK_310,
+                RTL433_PRESET_300_OOK_318,
+                RTL433_PRESET_300_OOK_303,
+                RTL433_PRESET_300_OOK_300
+            };
         case RTL433_HOP_300_BAND_FSK:
-            return {RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_FSK_315_17K, RTL433_PRESET_300_FSK_345_17K};
-        case RTL433_HOP_300_BAND_GFSK:
-            return {RTL433_PRESET_300_GFSK_315_19K};
+            return {
+                RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_FSK_315_17K, RTL433_PRESET_300_FSK_345_17K
+            };
+        case RTL433_HOP_300_BAND_GFSK: return {RTL433_PRESET_300_GFSK_315_19K};
         case RTL433_HOP_300_BAND_ALL:
             return {
-                RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_GFSK_315_19K,
-                RTL433_PRESET_300_OOK_345, RTL433_PRESET_300_FSK_345_17K,
-                RTL433_PRESET_300_OOK_310, RTL433_PRESET_300_OOK_318, RTL433_PRESET_300_OOK_303, RTL433_PRESET_300_OOK_300
+                RTL433_PRESET_300_OOK_315,
+                RTL433_PRESET_300_FSK_315_19K,
+                RTL433_PRESET_300_GFSK_315_19K,
+                RTL433_PRESET_300_OOK_345,
+                RTL433_PRESET_300_FSK_345_17K,
+                RTL433_PRESET_300_OOK_310,
+                RTL433_PRESET_300_OOK_318,
+                RTL433_PRESET_300_OOK_303,
+                RTL433_PRESET_300_OOK_300
             };
 
         // 400 Band Hopping Profiles
         case RTL433_HOP_400_433_ALL:
-            return {RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_FSK_433_19K, RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_MSK_433_100K};
+            return {
+                RTL433_PRESET_400_OOK_433,
+                RTL433_PRESET_400_FSK_433_17K,
+                RTL433_PRESET_400_FSK_433_19K,
+                RTL433_PRESET_400_GFSK_433_17K,
+                RTL433_PRESET_400_MSK_433_100K
+            };
         case RTL433_HOP_400_434_ALL:
             return {RTL433_PRESET_400_OOK_434, RTL433_PRESET_400_FSK_434_17K, RTL433_PRESET_400_GFSK_434_17K};
         case RTL433_HOP_400_BAND_OOK:
-            return {RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_OOK_434, RTL433_PRESET_400_OOK_418, RTL433_PRESET_400_OOK_390};
+            return {
+                RTL433_PRESET_400_OOK_433,
+                RTL433_PRESET_400_OOK_434,
+                RTL433_PRESET_400_OOK_418,
+                RTL433_PRESET_400_OOK_390
+            };
         case RTL433_HOP_400_BAND_FSK:
-            return {RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_FSK_433_19K, RTL433_PRESET_400_FSK_434_17K};
+            return {
+                RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_FSK_433_19K, RTL433_PRESET_400_FSK_434_17K
+            };
         case RTL433_HOP_400_BAND_GFSK:
             return {RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_GFSK_434_17K};
-        case RTL433_HOP_400_BAND_MSK:
-            return {RTL433_PRESET_400_MSK_433_100K};
+        case RTL433_HOP_400_BAND_MSK: return {RTL433_PRESET_400_MSK_433_100K};
         case RTL433_HOP_400_BAND_ALL:
             return {
-                RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_FSK_433_19K, RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_MSK_433_100K,
-                RTL433_PRESET_400_OOK_434, RTL433_PRESET_400_FSK_434_17K, RTL433_PRESET_400_GFSK_434_17K,
-                RTL433_PRESET_400_OOK_418, RTL433_PRESET_400_OOK_390
+                RTL433_PRESET_400_OOK_433,
+                RTL433_PRESET_400_FSK_433_17K,
+                RTL433_PRESET_400_FSK_433_19K,
+                RTL433_PRESET_400_GFSK_433_17K,
+                RTL433_PRESET_400_MSK_433_100K,
+                RTL433_PRESET_400_OOK_434,
+                RTL433_PRESET_400_FSK_434_17K,
+                RTL433_PRESET_400_GFSK_434_17K,
+                RTL433_PRESET_400_OOK_418,
+                RTL433_PRESET_400_OOK_390
             };
 
         // 800 Band Hopping Profiles
         case RTL433_HOP_800_868_ALL:
-            return {RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_MSK_868_T, RTL433_PRESET_800_MSK_868_S};
+            return {
+                RTL433_PRESET_800_OOK_868,
+                RTL433_PRESET_800_FSK_868_17K,
+                RTL433_PRESET_800_GFSK_868_17K,
+                RTL433_PRESET_800_MSK_868_T,
+                RTL433_PRESET_800_MSK_868_S
+            };
         case RTL433_HOP_800_915_ALL:
             return {RTL433_PRESET_800_OOK_915, RTL433_PRESET_800_FSK_915_17K, RTL433_PRESET_800_GFSK_915_17K};
-        case RTL433_HOP_800_BAND_OOK:
-            return {RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_OOK_915};
-        case RTL433_HOP_800_BAND_FSK:
-            return {RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_FSK_915_17K};
+        case RTL433_HOP_800_BAND_OOK: return {RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_OOK_915};
+        case RTL433_HOP_800_BAND_FSK: return {RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_FSK_915_17K};
         case RTL433_HOP_800_BAND_GFSK:
             return {RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_GFSK_915_17K};
-        case RTL433_HOP_800_BAND_MSK:
-            return {RTL433_PRESET_800_MSK_868_T, RTL433_PRESET_800_MSK_868_S};
+        case RTL433_HOP_800_BAND_MSK: return {RTL433_PRESET_800_MSK_868_T, RTL433_PRESET_800_MSK_868_S};
         case RTL433_HOP_800_BAND_ALL:
             return {
-                RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_MSK_868_T, RTL433_PRESET_800_MSK_868_S,
-                RTL433_PRESET_800_OOK_915, RTL433_PRESET_800_FSK_915_17K, RTL433_PRESET_800_GFSK_915_17K
+                RTL433_PRESET_800_OOK_868,
+                RTL433_PRESET_800_FSK_868_17K,
+                RTL433_PRESET_800_GFSK_868_17K,
+                RTL433_PRESET_800_MSK_868_T,
+                RTL433_PRESET_800_MSK_868_S,
+                RTL433_PRESET_800_OOK_915,
+                RTL433_PRESET_800_FSK_915_17K,
+                RTL433_PRESET_800_GFSK_915_17K
             };
 
         // All Bands Hopping Profile
         case RTL433_HOP_ALL_BANDS_ALL:
             return {
-                RTL433_PRESET_300_OOK_315, RTL433_PRESET_300_FSK_315_19K, RTL433_PRESET_300_OOK_345,
-                RTL433_PRESET_400_OOK_433, RTL433_PRESET_400_FSK_433_17K, RTL433_PRESET_400_GFSK_433_17K, RTL433_PRESET_400_MSK_433_100K,
-                RTL433_PRESET_800_OOK_868, RTL433_PRESET_800_FSK_868_17K, RTL433_PRESET_800_GFSK_868_17K, RTL433_PRESET_800_MSK_868_T,
-                RTL433_PRESET_800_OOK_915, RTL433_PRESET_800_FSK_915_17K
+                RTL433_PRESET_300_OOK_315,
+                RTL433_PRESET_300_FSK_315_19K,
+                RTL433_PRESET_300_OOK_345,
+                RTL433_PRESET_400_OOK_433,
+                RTL433_PRESET_400_FSK_433_17K,
+                RTL433_PRESET_400_GFSK_433_17K,
+                RTL433_PRESET_400_MSK_433_100K,
+                RTL433_PRESET_800_OOK_868,
+                RTL433_PRESET_800_FSK_868_17K,
+                RTL433_PRESET_800_GFSK_868_17K,
+                RTL433_PRESET_800_MSK_868_T,
+                RTL433_PRESET_800_OOK_915,
+                RTL433_PRESET_800_FSK_915_17K
             };
 
         default:
@@ -144,38 +230,39 @@ std::vector<int> rtl433_get_changing_presets(int changingPreset) {
 
 const char *rtl433_get_changing_preset_name(int changingPreset) {
     switch (changingPreset) {
-        case RTL433_HOP_300_315_ALL:    return "315M (All Modes)";
-        case RTL433_HOP_300_345_ALL:    return "345M (All Modes)";
-        case RTL433_HOP_300_BAND_OOK:   return "300 Band (OOK)";
-        case RTL433_HOP_300_BAND_FSK:   return "300 Band (2-FSK)";
-        case RTL433_HOP_300_BAND_GFSK:  return "300 Band (GFSK)";
-        case RTL433_HOP_300_BAND_ALL:   return "300 Band (All Modes)";
+        case RTL433_HOP_300_315_ALL: return "315M (All Modes)";
+        case RTL433_HOP_300_345_ALL: return "345M (All Modes)";
+        case RTL433_HOP_300_BAND_OOK: return "300 Band (OOK)";
+        case RTL433_HOP_300_BAND_FSK: return "300 Band (2-FSK)";
+        case RTL433_HOP_300_BAND_GFSK: return "300 Band (GFSK)";
+        case RTL433_HOP_300_BAND_ALL: return "300 Band (All Modes)";
 
-        case RTL433_HOP_400_433_ALL:    return "433.92M (All Modes)";
-        case RTL433_HOP_400_434_ALL:    return "434.42M (All Modes)";
-        case RTL433_HOP_400_BAND_OOK:   return "400 Band (OOK)";
-        case RTL433_HOP_400_BAND_FSK:   return "400 Band (2-FSK)";
-        case RTL433_HOP_400_BAND_GFSK:  return "400 Band (GFSK)";
-        case RTL433_HOP_400_BAND_MSK:   return "400 Band (MSK)";
-        case RTL433_HOP_400_BAND_ALL:   return "400 Band (All Modes)";
+        case RTL433_HOP_400_433_ALL: return "433.92M (All Modes)";
+        case RTL433_HOP_400_434_ALL: return "434.42M (All Modes)";
+        case RTL433_HOP_400_BAND_OOK: return "400 Band (OOK)";
+        case RTL433_HOP_400_BAND_FSK: return "400 Band (2-FSK)";
+        case RTL433_HOP_400_BAND_GFSK: return "400 Band (GFSK)";
+        case RTL433_HOP_400_BAND_MSK: return "400 Band (MSK)";
+        case RTL433_HOP_400_BAND_ALL: return "400 Band (All Modes)";
 
-        case RTL433_HOP_800_868_ALL:    return "868.35M (All Modes)";
-        case RTL433_HOP_800_915_ALL:    return "915.00M (All Modes)";
-        case RTL433_HOP_800_BAND_OOK:   return "800 Band (OOK)";
-        case RTL433_HOP_800_BAND_FSK:   return "800 Band (2-FSK)";
-        case RTL433_HOP_800_BAND_GFSK:  return "800 Band (GFSK)";
-        case RTL433_HOP_800_BAND_MSK:   return "800 Band (MSK)";
-        case RTL433_HOP_800_BAND_ALL:   return "800 Band (All Modes)";
+        case RTL433_HOP_800_868_ALL: return "868.35M (All Modes)";
+        case RTL433_HOP_800_915_ALL: return "915.00M (All Modes)";
+        case RTL433_HOP_800_BAND_OOK: return "800 Band (OOK)";
+        case RTL433_HOP_800_BAND_FSK: return "800 Band (2-FSK)";
+        case RTL433_HOP_800_BAND_GFSK: return "800 Band (GFSK)";
+        case RTL433_HOP_800_BAND_MSK: return "800 Band (MSK)";
+        case RTL433_HOP_800_BAND_ALL: return "800 Band (All Modes)";
 
-        case RTL433_HOP_ALL_BANDS_ALL:  return "All Bands (All Modes)";
-        case RTL433_HOP_SINGLE_FREQ_ALL:return "Single Frequency (All Modes)";
-        default:                        return "400 Band (All Modes)";
+        case RTL433_HOP_ALL_BANDS_ALL: return "All Bands (All Modes)";
+        case RTL433_HOP_SINGLE_FREQ_ALL: return "Single Frequency (All Modes)";
+        default: return "400 Band (All Modes)";
     }
 }
 
 String Rtl433Engine::getActivePresetName() const {
     if (isChangingPreset) {
-        return String("Changing: ") + rtl433_get_changing_preset_name(changingPreset);
+        return String("Range: ") + String(hopSelection.rangeStart, 3) + "-" +
+               String(hopSelection.rangeEnd, 3) + " MHz";
     }
     return String("Fixed: ") + rtl433_get_preset_name(currentPreset);
 }
@@ -215,9 +302,7 @@ String Rtl433Reading::toJson() const {
         json += "\"uv_index\":" + String(uv_index, 1) + ",";
         json += "\"solar_radiation\":" + String(solar_radiation, 1) + ",";
     }
-    if (has_status && status_str.length() > 0) {
-        json += "\"status\":\"" + status_str + "\",";
-    }
+    if (has_status && status_str.length() > 0) { json += "\"status\":\"" + status_str + "\","; }
 
     json += "\"bits\":" + String(bit_len) + ",";
     json += "\"payload\":\"" + payload_hex + "\"";
@@ -254,7 +339,8 @@ String Rtl433Reading::toDetailedText() const {
     txt += "\n";
     if (has_temp) txt += "Temp:     " + String(temp_c, 1) + " C (" + String(temp_f, 1) + " F)\n";
     if (has_humidity) txt += "Humidity: " + String(humidity, 1) + " %\n";
-    if (has_pressure) txt += "Pressure: " + String(pressure_kpa, 1) + " kPa (" + String(pressure_psi, 1) + " psi)\n";
+    if (has_pressure)
+        txt += "Pressure: " + String(pressure_kpa, 1) + " kPa (" + String(pressure_psi, 1) + " psi)\n";
     if (has_battery) txt += "Battery:  " + String(battery_ok ? "OK" : "LOW") + "\n";
     if (has_wind) {
         txt += "Wind:     " + String(wind_speed_ms, 1) + " m/s (Gust: " + String(wind_gust_ms, 1) + " m/s";
@@ -262,7 +348,8 @@ String Rtl433Reading::toDetailedText() const {
         txt += ")\n";
     }
     if (has_rain) txt += "Rain:     " + String(rain_mm, 1) + " mm\n";
-    if (has_uv) txt += "UV Index: " + String(uv_index, 1) + "  Solar: " + String(solar_radiation, 0) + " W/m2\n";
+    if (has_uv)
+        txt += "UV Index: " + String(uv_index, 1) + "  Solar: " + String(solar_radiation, 0) + " W/m2\n";
     if (has_status && status_str.length() > 0) txt += "Status:   " + status_str + "\n";
     txt += "Freq:     " + String(frequency, 2) + " MHz (" + modulation + ") RSSI:" + String(rssi) + "dBm\n";
     txt += "Payload:  " + payload_hex + " (" + String(bit_len) + " bits)\n";
@@ -279,7 +366,10 @@ static inline bool match_range(int val, int target, int tol_pct) {
     return val >= (target - margin) && val <= (target + margin);
 }
 
-bool demod_ppm(const std::vector<int> &durations, int mark_us, int zero_gap_us, int one_gap_us, int tol_pct, BitBuffer &out) {
+bool demod_ppm(
+    const std::vector<int> &durations, int mark_us, int zero_gap_us, int one_gap_us, int tol_pct,
+    BitBuffer &out
+) {
     out.clear();
     if (durations.size() < 10) return false;
 
@@ -305,12 +395,14 @@ bool demod_ppm(const std::vector<int> &durations, int mark_us, int zero_gap_us, 
         }
 
         if (match_range(mark, mark_us, eff_tol)) {
-            bool is_zero = match_range(gap, zero_gap_us, eff_tol) ||
-                           (zero_is_shorter ? (gap < gap_threshold && match_range(gap, zero_gap_us, eff_tol + 20))
-                                            : (gap >= gap_threshold && match_range(gap, zero_gap_us, eff_tol + 20)));
-            bool is_one = match_range(gap, one_gap_us, eff_tol) ||
-                          (zero_is_shorter ? (gap >= gap_threshold && match_range(gap, one_gap_us, eff_tol + 20))
-                                           : (gap < gap_threshold && match_range(gap, one_gap_us, eff_tol + 20)));
+            bool is_zero =
+                match_range(gap, zero_gap_us, eff_tol) ||
+                (zero_is_shorter ? (gap < gap_threshold && match_range(gap, zero_gap_us, eff_tol + 20))
+                                 : (gap >= gap_threshold && match_range(gap, zero_gap_us, eff_tol + 20)));
+            bool is_one =
+                match_range(gap, one_gap_us, eff_tol) ||
+                (zero_is_shorter ? (gap >= gap_threshold && match_range(gap, one_gap_us, eff_tol + 20))
+                                 : (gap < gap_threshold && match_range(gap, one_gap_us, eff_tol + 20)));
 
             if (is_zero && !is_one) {
                 cur_buf.push_bit(0);
@@ -329,20 +421,19 @@ bool demod_ppm(const std::vector<int> &durations, int mark_us, int zero_gap_us, 
             }
         }
 
-        if (cur_buf.num_bits > best_buf.num_bits) {
-            best_buf = cur_buf;
-        }
+        if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
         cur_buf.clear();
         i++;
     }
-    if (cur_buf.num_bits > best_buf.num_bits) {
-        best_buf = cur_buf;
-    }
+    if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
     out = best_buf;
     return out.num_bits >= 16;
 }
 
-bool demod_pwm(const std::vector<int> &durations, int zero_mark_us, int one_mark_us, int space_us, int tol_pct, BitBuffer &out) {
+bool demod_pwm(
+    const std::vector<int> &durations, int zero_mark_us, int one_mark_us, int space_us, int tol_pct,
+    BitBuffer &out
+) {
     out.clear();
     if (durations.size() < 10) return false;
 
@@ -367,16 +458,19 @@ bool demod_pwm(const std::vector<int> &durations, int zero_mark_us, int one_mark
             continue;
         }
 
-        bool space_ok = match_range(space, space_us, eff_tol + 15) ||
-                        (space >= (space_us - (space_us * eff_tol) / 100) && (space > 5000 || i + 2 >= durations.size()));
+        bool space_ok =
+            match_range(space, space_us, eff_tol + 15) ||
+            (space >= (space_us - (space_us * eff_tol) / 100) && (space > 5000 || i + 2 >= durations.size()));
 
         if (space_ok) {
-            bool is_zero = match_range(mark, zero_mark_us, eff_tol) ||
-                           (zero_is_shorter ? (mark < mark_threshold && match_range(mark, zero_mark_us, eff_tol + 20))
-                                            : (mark >= mark_threshold && match_range(mark, zero_mark_us, eff_tol + 20)));
-            bool is_one = match_range(mark, one_mark_us, eff_tol) ||
-                          (zero_is_shorter ? (mark >= mark_threshold && match_range(mark, one_mark_us, eff_tol + 20))
-                                           : (mark < mark_threshold && match_range(mark, one_mark_us, eff_tol + 20)));
+            bool is_zero =
+                match_range(mark, zero_mark_us, eff_tol) ||
+                (zero_is_shorter ? (mark < mark_threshold && match_range(mark, zero_mark_us, eff_tol + 20))
+                                 : (mark >= mark_threshold && match_range(mark, zero_mark_us, eff_tol + 20)));
+            bool is_one =
+                match_range(mark, one_mark_us, eff_tol) ||
+                (zero_is_shorter ? (mark >= mark_threshold && match_range(mark, one_mark_us, eff_tol + 20))
+                                 : (mark < mark_threshold && match_range(mark, one_mark_us, eff_tol + 20)));
 
             if (is_zero && !is_one) {
                 cur_buf.push_bit(0);
@@ -395,20 +489,19 @@ bool demod_pwm(const std::vector<int> &durations, int zero_mark_us, int one_mark
             }
         }
 
-        if (cur_buf.num_bits > best_buf.num_bits) {
-            best_buf = cur_buf;
-        }
+        if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
         cur_buf.clear();
         i++;
     }
-    if (cur_buf.num_bits > best_buf.num_bits) {
-        best_buf = cur_buf;
-    }
+    if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
     out = best_buf;
     return out.num_bits >= 16;
 }
 
-bool demod_pwm_space(const std::vector<int> &durations, int mark_us, int zero_space_us, int one_space_us, int tol_pct, BitBuffer &out) {
+bool demod_pwm_space(
+    const std::vector<int> &durations, int mark_us, int zero_space_us, int one_space_us, int tol_pct,
+    BitBuffer &out
+) {
     out.clear();
     if (durations.size() < 10) return false;
 
@@ -434,12 +527,15 @@ bool demod_pwm_space(const std::vector<int> &durations, int mark_us, int zero_sp
         }
 
         if (match_range(mark, mark_us, eff_tol)) {
-            bool is_zero = match_range(space, zero_space_us, eff_tol) ||
-                           (zero_is_shorter ? (space < space_threshold && match_range(space, zero_space_us, eff_tol + 20))
-                                            : (space >= space_threshold && match_range(space, zero_space_us, eff_tol + 20)));
+            bool is_zero =
+                match_range(space, zero_space_us, eff_tol) ||
+                (zero_is_shorter
+                     ? (space < space_threshold && match_range(space, zero_space_us, eff_tol + 20))
+                     : (space >= space_threshold && match_range(space, zero_space_us, eff_tol + 20)));
             bool is_one = match_range(space, one_space_us, eff_tol) ||
-                          (zero_is_shorter ? (space >= space_threshold && match_range(space, one_space_us, eff_tol + 20))
-                                           : (space < space_threshold && match_range(space, one_space_us, eff_tol + 20)));
+                          (zero_is_shorter
+                               ? (space >= space_threshold && match_range(space, one_space_us, eff_tol + 20))
+                               : (space < space_threshold && match_range(space, one_space_us, eff_tol + 20)));
 
             if (is_zero && !is_one) {
                 cur_buf.push_bit(0);
@@ -458,20 +554,18 @@ bool demod_pwm_space(const std::vector<int> &durations, int mark_us, int zero_sp
             }
         }
 
-        if (cur_buf.num_bits > best_buf.num_bits) {
-            best_buf = cur_buf;
-        }
+        if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
         cur_buf.clear();
         i++;
     }
-    if (cur_buf.num_bits > best_buf.num_bits) {
-        best_buf = cur_buf;
-    }
+    if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
     out = best_buf;
     return out.num_bits >= 16;
 }
 
-bool demod_manchester(const std::vector<int> &durations, int half_clock_us, int tol_pct, BitBuffer &out, bool invert) {
+bool demod_manchester(
+    const std::vector<int> &durations, int half_clock_us, int tol_pct, BitBuffer &out, bool invert
+) {
     out.clear();
     if (durations.size() < 8) return false;
 
@@ -495,9 +589,7 @@ bool demod_manchester(const std::vector<int> &durations, int half_clock_us, int 
         bool is_full = (len >= full_min && len <= full_max);
 
         if (!is_half && !is_full) {
-            if (cur_buf.num_bits > best_buf.num_bits) {
-                best_buf = cur_buf;
-            }
+            if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
             cur_buf.clear();
             state = 0;
             continue;
@@ -515,14 +607,15 @@ bool demod_manchester(const std::vector<int> &durations, int half_clock_us, int 
             }
         }
     }
-    if (cur_buf.num_bits > best_buf.num_bits) {
-        best_buf = cur_buf;
-    }
+    if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
     out = best_buf;
     return out.num_bits >= 16;
 }
 
-bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out, uint32_t sync_word, uint8_t sync_len) {
+bool demod_pcm_fsk(
+    const std::vector<int> &durations, int bit_period_us, int tol_pct, BitBuffer &out, uint32_t sync_word,
+    uint8_t sync_len
+) {
     out.clear();
     if (durations.size() < 6 || bit_period_us <= 0) return false;
 
@@ -544,9 +637,7 @@ bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol
         int count = (len + bit_period_us / 2) / bit_period_us;
         if (count == 0) count = 1;
         if (count > 128) {
-            if (cur_buf.num_bits > best_buf.num_bits) {
-                best_buf = cur_buf;
-            }
+            if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
             cur_buf.clear();
             shift_reg = 0;
             capturing_synced = false;
@@ -566,18 +657,14 @@ bool demod_pcm_fsk(const std::vector<int> &durations, int bit_period_us, int tol
                     }
                 } else {
                     cur_buf.push_bit(bit_val);
-                    if (cur_buf.num_bits >= BitBuffer::MAX_BYTES * 8) {
-                        break;
-                    }
+                    if (cur_buf.num_bits >= BitBuffer::MAX_BYTES * 8) { break; }
                 }
             } else {
                 cur_buf.push_bit(bit_val);
             }
         }
     }
-    if (cur_buf.num_bits > best_buf.num_bits) {
-        best_buf = cur_buf;
-    }
+    if (cur_buf.num_bits > best_buf.num_bits) { best_buf = cur_buf; }
     out = best_buf;
     return out.num_bits >= 16;
 }
@@ -599,7 +686,9 @@ bool Rtl433Engine::initRadio(float freq, int preset) {
     // initRfModule() now applies the correct modulation-specific register/AGC preset (OOK vs
     // FSK-family) directly, so no post-hoc patching of modulation/deviation/bandwidth/data-rate
     // is needed here anymore.
-    if (!initRfModule("rx", currentFrequency, pdef->modulation, pdef->deviation, pdef->rx_bw, pdef->data_rate))
+    if (!initRfModule(
+            "rx", currentFrequency, pdef->modulation, pdef->deviation, pdef->rx_bw, pdef->data_rate
+        ))
         return false;
 
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
@@ -636,7 +725,7 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
             if (pdef->data_rate > 0.0f) ELECHOUSE_cc1101.setDRate(pdef->data_rate);
             uint16_t sync_word = (pdef->modulation == 4) ? 0x543D : 0x2DD4;
             ELECHOUSE_cc1101.setSyncWord((sync_word >> 8) & 0xFF, sync_word & 0xFF);
-            ELECHOUSE_cc1101.setSyncMode(2); // 16/16 sync word qualifier
+            ELECHOUSE_cc1101.setSyncMode(2);  // 16/16 sync word qualifier
             ELECHOUSE_cc1101.setPktFormat(0); // Hardware FIFO packet mode
             ELECHOUSE_cc1101.setCrc(false);
             ELECHOUSE_cc1101.setWhiteData(false);
@@ -645,7 +734,9 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
             ELECHOUSE_cc1101.setDcFilterOff(false);
             pinMode(bruceConfigPins.CC1101_bus.io0, INPUT);
             ELECHOUSE_cc1101.SetRx();
-            ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x06); // Asserts on sync received, de-asserts at end of packet
+            ELECHOUSE_cc1101.SpiWriteReg(
+                CC1101_IOCFG0, 0x06
+            ); // Asserts on sync received, de-asserts at end of packet
         }
         tft.drawPixel(0, 0, 0); // Keep shared SPI bus clean for display
     } else {
@@ -654,11 +745,11 @@ bool Rtl433Engine::switchPreset(float freq, int preset) {
     return true;
 }
 
-void Rtl433Engine::deinitRadio() {
-    deinitRfModule();
-}
+void Rtl433Engine::deinitRadio() { deinitRfModule(); }
 
-bool Rtl433Engine::decodePayload(const uint8_t *payload, size_t len, float freq, int preset, int rssi, Rtl433Reading &reading) {
+bool Rtl433Engine::decodePayload(
+    const uint8_t *payload, size_t len, float freq, int preset, int rssi, Rtl433Reading &reading
+) {
     if (!payload || len == 0) return false;
     _packetsReceived++;
 
@@ -682,8 +773,7 @@ bool Rtl433Engine::decodePayload(const uint8_t *payload, size_t len, float freq,
         ok = decode_fineoffset_fsk_payload(payload, len, reading) ||
              decode_bresser_5in1_payload(payload, len, reading) ||
              decode_bresser_6in1_payload(payload, len, reading) ||
-             decode_toyota_tpms_payload(payload, len, reading) ||
-             decode_wmbus_payload(payload, len, reading);
+             decode_toyota_tpms_payload(payload, len, reading) || decode_wmbus_payload(payload, len, reading);
     }
 
     if (ok) {
@@ -715,7 +805,9 @@ bool Rtl433Engine::pollFifo(float freq, int preset, int rssi, Rtl433Reading &rea
     return decodePayload(rxBuf, rxBytes, freq, preset, rssi, reading);
 }
 
-bool Rtl433Engine::decode(const std::vector<int> &durations, float freq, int preset, int rssi, Rtl433Reading &reading) {
+bool Rtl433Engine::decode(
+    const std::vector<int> &durations, float freq, int preset, int rssi, Rtl433Reading &reading
+) {
     if (durations.size() < 10) return false;
     _packetsReceived++;
 
@@ -732,24 +824,17 @@ bool Rtl433Engine::decode(const std::vector<int> &durations, float freq, int pre
     } else if (mod == 0 || mod == 1) {
         // 2-FSK & GFSK Decoders
         modStr = (mod == 1) ? "GFSK" : "2-FSK";
-        ok = decode_fineoffset_fsk(durations, reading) ||
-             decode_bresser_5in1(durations, reading) ||
-             decode_bresser_6in1(durations, reading) ||
-             decode_toyota_tpms(durations, reading) ||
+        ok = decode_fineoffset_fsk(durations, reading) || decode_bresser_5in1(durations, reading) ||
+             decode_bresser_6in1(durations, reading) || decode_toyota_tpms(durations, reading) ||
              decode_wmbus(durations, reading);
     } else {
         // OOK Decoders
         modStr = "OOK";
-        ok = decode_proove_nexa(durations, reading) ||
-             decode_nexus(durations, reading) ||
-             decode_acurite_606tx(durations, reading) ||
-             decode_acurite_tower(durations, reading) ||
-             decode_oregon_scientific(durations, reading) ||
-             decode_honeywell_5800(durations, reading) ||
-             decode_schrader_tpms(durations, reading) ||
-             decode_kerui_ev1527(durations, reading) ||
-             decode_dsc_security(durations, reading) ||
-             decode_lacrosse_tx(durations, reading);
+        ok = decode_proove_nexa(durations, reading) || decode_nexus(durations, reading) ||
+             decode_acurite_606tx(durations, reading) || decode_acurite_tower(durations, reading) ||
+             decode_oregon_scientific(durations, reading) || decode_honeywell_5800(durations, reading) ||
+             decode_schrader_tpms(durations, reading) || decode_kerui_ev1527(durations, reading) ||
+             decode_dsc_security(durations, reading) || decode_lacrosse_tx(durations, reading);
     }
 
     if (ok) {
@@ -766,9 +851,7 @@ bool Rtl433Engine::decode(const std::vector<int> &durations, float freq, int pre
 }
 
 void Rtl433Engine::addRecent(const Rtl433Reading &reading) {
-    if (_recentReadings.size() >= MAX_RECENT) {
-        _recentReadings.erase(_recentReadings.begin());
-    }
+    if (_recentReadings.size() >= MAX_RECENT) { _recentReadings.erase(_recentReadings.begin()); }
     _recentReadings.push_back(reading);
 }
 
@@ -787,14 +870,10 @@ bool Rtl433Engine::logJson(const Rtl433Reading &reading, bool sd_enabled) {
     if (!getFsStorage(fs) || fs == nullptr) return false;
 
     // Create /rtl433 directory if not existing
-    if (!fs->exists("/rtl433")) {
-        fs->mkdir("/rtl433");
-    }
+    if (!fs->exists("/rtl433")) { fs->mkdir("/rtl433"); }
 
     File logFile = fs->open("/rtl433/traffic.json", FILE_APPEND);
-    if (!logFile) {
-        logFile = fs->open("/rtl433_traffic.json", FILE_APPEND);
-    }
+    if (!logFile) { logFile = fs->open("/rtl433_traffic.json", FILE_APPEND); }
     if (!logFile) return false;
 
     logFile.print(line);
@@ -802,24 +881,26 @@ bool Rtl433Engine::logJson(const Rtl433Reading &reading, bool sd_enabled) {
     return true;
 }
 
-bool rtl433_transmit_fsk_packet(float freq, int preset, const uint8_t *payload, size_t len, uint16_t sync_word, int repeats) {
+bool rtl433_transmit_fsk_packet(
+    float freq, int preset, const uint8_t *payload, size_t len, uint16_t sync_word, int repeats
+) {
     if (!payload || len == 0 || len > 64) return false;
     const Rtl433PresetDef *pdef = rtl433_get_preset_def(preset);
 
-    if (bruceConfigPins.rfModule != CC1101_SPI_MODULE) {
-        return false;
-    }
+    if (bruceConfigPins.rfModule != CC1101_SPI_MODULE) { return false; }
 
     if (!initRfModule("tx", freq, pdef->modulation, pdef->deviation, 0.0f, pdef->data_rate)) return false;
 
-    ELECHOUSE_cc1101.setPktFormat(0);      // Normal FIFO mode
+    ELECHOUSE_cc1101.setPktFormat(0); // Normal FIFO mode
     ELECHOUSE_cc1101.setCrc(false);
     ELECHOUSE_cc1101.setWhiteData(false);
-    ELECHOUSE_cc1101.setLengthConfig(0);   // Fixed length mode
+    ELECHOUSE_cc1101.setLengthConfig(0); // Fixed length mode
     ELECHOUSE_cc1101.setPacketLength(len);
     ELECHOUSE_cc1101.setSyncWord((sync_word >> 8) & 0xFF, sync_word & 0xFF);
-    ELECHOUSE_cc1101.setSyncMode(2);       // 16/16 sync word
-    ELECHOUSE_cc1101.SpiWriteReg(CC1101_IOCFG0, 0x06); // Asserts on sync sent, de-asserts when packet finished
+    ELECHOUSE_cc1101.setSyncMode(2); // 16/16 sync word
+    ELECHOUSE_cc1101.SpiWriteReg(
+        CC1101_IOCFG0, 0x06
+    ); // Asserts on sync sent, de-asserts when packet finished
     ELECHOUSE_cc1101.setPA(bruceConfigPins.rfTxPower);
 
     ioExpander.turnPinOnOff(IO_EXP_CC_RX, LOW);
@@ -829,7 +910,7 @@ bool rtl433_transmit_fsk_packet(float freq, int preset, const uint8_t *payload, 
     for (int rep = 0; rep < repeats; rep++) {
         ELECHOUSE_cc1101.SpiStrobe(CC1101_SIDLE);
         ELECHOUSE_cc1101.SpiStrobe(CC1101_SFTX);
-        ELECHOUSE_cc1101.SpiWriteBurstReg(CC1101_TXFIFO, (byte*)payload, len);
+        ELECHOUSE_cc1101.SpiWriteBurstReg(CC1101_TXFIFO, (byte *)payload, len);
         ELECHOUSE_cc1101.SpiStrobe(CC1101_STX);
 
         uint32_t start = millis();
@@ -857,19 +938,23 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
     if (!CC1101Driver::isFrequencySupported(freqMhz)) freqMhz = bruceConfigPins.rfFreq;
 
     int presetIdx = reading.preset_idx;
-    if (presetIdx < 0 || presetIdx >= RTL433_PRESET_COUNT || (reading.modulation != "" && reading.modulation != "OOK" && presetIdx == RTL433_PRESET_OOK_433)) {
+    if (presetIdx < 0 || presetIdx >= RTL433_PRESET_COUNT ||
+        (reading.modulation != "" && reading.modulation != "OOK" && presetIdx == RTL433_PRESET_OOK_433)) {
         if (reading.modulation == "MSK") {
             presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_MSK_868_T : RTL433_PRESET_MSK_433_100K;
         } else if (reading.modulation == "GFSK") {
-            presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_GFSK_868_17K :
-                        (freqMhz < 330.0f) ? RTL433_PRESET_GFSK_315_19K : RTL433_PRESET_GFSK_433_17K;
+            presetIdx = (freqMhz > 800.0f)   ? RTL433_PRESET_GFSK_868_17K
+                        : (freqMhz < 330.0f) ? RTL433_PRESET_GFSK_315_19K
+                                             : RTL433_PRESET_GFSK_433_17K;
         } else if (reading.modulation == "2-FSK" || reading.modulation == "FSK") {
-            presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_FSK_868_17K :
-                        (freqMhz < 330.0f) ? RTL433_PRESET_FSK_315_19K : RTL433_PRESET_FSK_433_17K;
+            presetIdx = (freqMhz > 800.0f)   ? RTL433_PRESET_FSK_868_17K
+                        : (freqMhz < 330.0f) ? RTL433_PRESET_FSK_315_19K
+                                             : RTL433_PRESET_FSK_433_17K;
         } else {
-            presetIdx = (freqMhz > 800.0f) ? RTL433_PRESET_OOK_868 :
-                        (freqMhz < 330.0f) ? RTL433_PRESET_OOK_315 :
-                        (freqMhz > 330.0f && freqMhz < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+            presetIdx = (freqMhz > 800.0f)                       ? RTL433_PRESET_OOK_868
+                        : (freqMhz < 330.0f)                     ? RTL433_PRESET_OOK_315
+                        : (freqMhz > 330.0f && freqMhz < 360.0f) ? RTL433_PRESET_OOK_345
+                                                                 : RTL433_PRESET_OOK_433;
         }
     }
     const Rtl433PresetDef *pdef = rtl433_get_preset_def(presetIdx);
@@ -879,7 +964,8 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
 
     // Direct CC1101 Hardware FIFO Packet Transmission for FSK / GFSK / MSK
     if (bruceConfigPins.rfModule == CC1101_SPI_MODULE &&
-        (reading.modulation == "2-FSK" || reading.modulation == "FSK" || reading.modulation == "GFSK" || reading.modulation == "MSK") &&
+        (reading.modulation == "2-FSK" || reading.modulation == "FSK" || reading.modulation == "GFSK" ||
+         reading.modulation == "MSK") &&
         reading.payload_hex.length() >= 4) {
         size_t hexLen = reading.payload_hex.length();
         size_t byteCount = hexLen / 2;
@@ -913,16 +999,17 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
 
     // Synthesize preamble (lead-in training sequence for receiver bit-sync & AGC / discriminator lock)
     std::vector<int> preambleDurs;
-    if (replayPreamble || pdef->modulation != 2 || reading.modulation == "2-FSK" || reading.modulation == "GFSK" || reading.modulation == "MSK") {
+    if (replayPreamble || pdef->modulation != 2 || reading.modulation == "2-FSK" ||
+        reading.modulation == "GFSK" || reading.modulation == "MSK") {
         int bit_us = 58;
         if (reading.decoder_id == 13) {
             bit_us = 122; // Bresser 5-in-1 standard ~8.21 kbps
         } else if (reading.decoder_id == 14) {
             bit_us = 125; // Bresser 6-in-1 standard ~8.0 kbps
         } else if (reading.decoder_id == 5) {
-            bit_us = 58;  // FineOffset standard ~17.24 kbps
+            bit_us = 58; // FineOffset standard ~17.24 kbps
         } else if (reading.decoder_id == 15 || reading.decoder_id == 17) {
-            bit_us = 10;  // wM-Bus Mode T 100 kbps
+            bit_us = 10; // wM-Bus Mode T 100 kbps
         } else if (pdef->data_rate > 0.0f) {
             bit_us = (int)(1000.0f / pdef->data_rate + 0.5f);
         } else if (pdef->modulation == 2) { // OOK
@@ -960,13 +1047,13 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
     // Build target frequencies list based on spread option to account for crystal/receiver offset
     std::vector<float> targetFreqs;
     if (replayFreqSpread == 1) { // +/- 15 kHz (3 frequencies)
-        targetFreqs = { freqMhz - 0.015f, freqMhz, freqMhz + 0.015f };
+        targetFreqs = {freqMhz - 0.015f, freqMhz, freqMhz + 0.015f};
     } else if (replayFreqSpread == 2) { // +/- 30 kHz (5 frequencies)
-        targetFreqs = { freqMhz - 0.030f, freqMhz - 0.015f, freqMhz, freqMhz + 0.015f, freqMhz + 0.030f };
+        targetFreqs = {freqMhz - 0.030f, freqMhz - 0.015f, freqMhz, freqMhz + 0.015f, freqMhz + 0.030f};
     } else if (replayFreqSpread == 3) { // +/- 50 kHz (3 frequencies)
-        targetFreqs = { freqMhz - 0.050f, freqMhz, freqMhz + 0.050f };
+        targetFreqs = {freqMhz - 0.050f, freqMhz, freqMhz + 0.050f};
     } else {
-        targetFreqs = { freqMhz };
+        targetFreqs = {freqMhz};
     }
 
     for (size_t f_idx = 0; f_idx < targetFreqs.size(); f_idx++) {
@@ -982,9 +1069,7 @@ bool Rtl433Engine::replayReading(const Rtl433Reading &reading, int repeatCount) 
 
         rf_tx_durations(transmitDurs);
         deinitRfModule();
-        if (f_idx + 1 < targetFreqs.size()) {
-            delay(30);
-        }
+        if (f_idx + 1 < targetFreqs.size()) { delay(30); }
     }
 
     deinitRfModule();
@@ -1009,12 +1094,11 @@ bool Rtl433Engine::saveSubFile(const Rtl433Reading &reading, String *outFilename
     char freqBuf[16];
     snprintf(freqBuf, sizeof(freqBuf), "%.2fM", reading.frequency);
 
-    String base = "/BruceRF/" + cleanName + "_" + String(freqBuf) + "_" + cleanMod + "_" + String(reading.device_id);
+    String base =
+        "/BruceRF/" + cleanName + "_" + String(freqBuf) + "_" + cleanMod + "_" + String(reading.device_id);
     String path = base + ".sub";
     int idx = 1;
-    while (fs->exists(path)) {
-        path = base + "_" + String(idx++) + ".sub";
-    }
+    while (fs->exists(path)) { path = base + "_" + String(idx++) + ".sub"; }
 
     File file = fs->open(path, FILE_WRITE);
     if (!file) return false;
@@ -1022,7 +1106,14 @@ bool Rtl433Engine::saveSubFile(const Rtl433Reading &reading, String *outFilename
     file.println("Filetype: Bruce SubGhz File");
     file.println("Version 1");
     file.println("Frequency: " + String((int)(reading.frequency * 1000000)));
-    file.println("Preset: " + String((reading.modulation == "2-FSK" || reading.modulation == "FSK" || reading.modulation == "GFSK" || reading.modulation == "MSK") ? "2FSKDev238Async" : "Ook270Async"));
+    file.println(
+        "Preset: " + String(
+                         (reading.modulation == "2-FSK" || reading.modulation == "FSK" ||
+                          reading.modulation == "GFSK" || reading.modulation == "MSK")
+                             ? "2FSKDev238Async"
+                             : "Ook270Async"
+                     )
+    );
     file.println("Protocol: RAW");
 
     String rawStr = "RAW_Data: ";
@@ -1043,9 +1134,7 @@ bool Rtl433Engine::saveSubFile(const Rtl433Reading &reading, String *outFilename
 size_t Rtl433Engine::saveAllSubFiles(int *savedCount) {
     int saved = 0;
     for (const auto &reading : _recentReadings) {
-        if (saveSubFile(reading)) {
-            saved++;
-        }
+        if (saveSubFile(reading)) { saved++; }
     }
     if (savedCount) *savedCount = saved;
     return saved;
@@ -1054,7 +1143,8 @@ size_t Rtl433Engine::saveAllSubFiles(int *savedCount) {
 // ---------------------------------------------------------------------------
 // Pulse Generators for Self-Test and Replay
 // ---------------------------------------------------------------------------
-std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int mark_us, int zero_gap_us, int one_gap_us) {
+std::vector<int>
+build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int mark_us, int zero_gap_us, int one_gap_us) {
     std::vector<int> durs;
     durs.push_back(mark_us);
     durs.push_back(-4000); // sync gap
@@ -1068,7 +1158,8 @@ std::vector<int> build_ppm_pulses(const uint8_t *bytes, size_t bit_count, int ma
     return durs;
 }
 
-std::vector<int> build_pwm_pulses(const uint8_t *bytes, size_t bit_count, int zero_mark_us, int one_mark_us, int space_us) {
+std::vector<int>
+build_pwm_pulses(const uint8_t *bytes, size_t bit_count, int zero_mark_us, int one_mark_us, int space_us) {
     std::vector<int> durs;
     for (size_t i = 0; i < bit_count; i++) {
         uint8_t byte_val = bytes[i / 8];
@@ -1152,12 +1243,13 @@ bool rtl433_selftest(String &report) {
         uint8_t invalid_humidity_data[] = {0x8E, 0x00, 0xFE, 0xF6, 0x50};
         std::vector<int> invalid_humidity_durs = build_ppm_pulses(invalid_humidity_data, 36, 500, 1000, 2000);
         if (decode_nexus(durs, r) && r.device_id == 0x8E && abs(r.temp_c - 25.4f) < 0.2f &&
-                abs(r.humidity - 55.0f) < 0.2f && !decode_nexus(invalid_durs, r) &&
-                !decode_nexus(invalid_humidity_durs, r)) {
+            abs(r.humidity - 55.0f) < 0.2f && !decode_nexus(invalid_durs, r) &&
+            !decode_nexus(invalid_humidity_durs, r)) {
             report += "[PASS] Nexus / Rubicson OOK PPM\n";
             passed++;
         } else {
-            report += "[FAIL] Nexus / Rubicson OOK PPM (id=" + String(r.device_id) + " temp=" + String(r.temp_c) + " hum=" + String(r.humidity) + ")\n";
+            report += "[FAIL] Nexus / Rubicson OOK PPM (id=" + String(r.device_id) +
+                      " temp=" + String(r.temp_c) + " hum=" + String(r.humidity) + ")\n";
         }
     }
 
@@ -1184,10 +1276,9 @@ bool rtl433_selftest(String &report) {
         std::vector<int> zero_repeated_durs = make_acurite_durations(zero_acurite_data, 3);
         Rtl433Reading r;
         if (decode_acurite_606tx(durs, r) && r.device_id == 0x55 && abs(r.temp_c - 20.0f) < 0.2f &&
-                !decode_acurite_606tx(single_durs, r) && !decode_acurite_606tx(invalid_durs, r) &&
-                !decode_acurite_606tx(zero_single_durs, r) &&
-                decode_acurite_606tx(zero_repeated_durs, r) && r.device_id == 0 && r.channel == 1 &&
-                abs(r.temp_c) < 0.2f) {
+            !decode_acurite_606tx(single_durs, r) && !decode_acurite_606tx(invalid_durs, r) &&
+            !decode_acurite_606tx(zero_single_durs, r) && decode_acurite_606tx(zero_repeated_durs, r) &&
+            r.device_id == 0 && r.channel == 1 && abs(r.temp_c) < 0.2f) {
             report += "[PASS] Acurite 606TX OOK PWM\n";
             passed++;
         } else {
@@ -1215,7 +1306,7 @@ bool rtl433_selftest(String &report) {
         uint8_t bad_parity[] = {0xC1, 0x23, 0x40, 0x33, 0x09, 0x30, 0x90};
         std::vector<int> bad_parity_durs = make_tower_durations(bad_parity);
         if (decode_acurite_tower(durs, r) && r.device_id == 0x0123 && abs(r.temp_c - 20.0f) < 0.2f &&
-                !decode_acurite_tower(bad_checksum_durs, r) && !decode_acurite_tower(bad_parity_durs, r)) {
+            !decode_acurite_tower(bad_checksum_durs, r) && !decode_acurite_tower(bad_parity_durs, r)) {
             report += "[PASS] Acurite Tower checksum and parity\n";
             passed++;
         } else {
@@ -1229,10 +1320,9 @@ bool rtl433_selftest(String &report) {
         uint8_t toyota_data[] = {0x12, 0x34, 0x56, 0x78, 0x4E, 0x25, 0x92, 0x63, 0x09};
         uint8_t invalid_toyota_data[] = {0x12, 0x34, 0x56, 0x78, 0x4E, 0x25, 0x92, 0x63, 0x08};
         Rtl433Reading r;
-        if (decode_toyota_tpms_payload(toyota_data, sizeof(toyota_data), r) &&
-                r.device_id == 0x12345678 && abs(r.pressure_psi - 32.0f) < 0.2f &&
-                abs(r.temp_c - 35.0f) < 0.2f &&
-                !decode_toyota_tpms_payload(invalid_toyota_data, sizeof(invalid_toyota_data), r)) {
+        if (decode_toyota_tpms_payload(toyota_data, sizeof(toyota_data), r) && r.device_id == 0x12345678 &&
+            abs(r.pressure_psi - 32.0f) < 0.2f && abs(r.temp_c - 35.0f) < 0.2f &&
+            !decode_toyota_tpms_payload(invalid_toyota_data, sizeof(invalid_toyota_data), r)) {
             report += "[PASS] Toyota TPMS CRC and pressure check\n";
             passed++;
         } else {
@@ -1262,9 +1352,9 @@ bool rtl433_selftest(String &report) {
         std::vector<int> missing_sync_durs(durs.begin() + 2, durs.end());
         Rtl433Reading r;
         if (decode_proove_nexa(durs, r) && r.device_id == 0x01234567 && r.channel == 2 &&
-                r.status_flags == 0xCB && r.status_str.startsWith("ON") &&
-                decode_proove_nexa(extended_durs, r) && r.device_id == 0x01234567 &&
-                !decode_proove_nexa(invalid_pair_durs, r) && !decode_proove_nexa(missing_sync_durs, r)) {
+            r.status_flags == 0xCB && r.status_str.startsWith("ON") && decode_proove_nexa(extended_durs, r) &&
+            r.device_id == 0x01234567 && !decode_proove_nexa(invalid_pair_durs, r) &&
+            !decode_proove_nexa(missing_sync_durs, r)) {
             report += "[PASS] Nexa Security sync, Manchester and fields\n";
             passed++;
         } else {
@@ -1306,16 +1396,16 @@ bool rtl433_selftest(String &report) {
         }
 
         Rtl433Reading r_motion, r_lowbat, r_legacy;
-        bool ok_motion = decode_kerui_ev1527(durs_motion, r_motion) &&
-                         r_motion.device_id == 0x12345 && r_motion.status_flags == 0x0A &&
-                         r_motion.battery_ok && r_motion.status_str.indexOf("MOTION") >= 0;
+        bool ok_motion = decode_kerui_ev1527(durs_motion, r_motion) && r_motion.device_id == 0x12345 &&
+                         r_motion.status_flags == 0x0A && r_motion.battery_ok &&
+                         r_motion.status_str.indexOf("MOTION") >= 0;
 
-        bool ok_lowbat = decode_kerui_ev1527(durs_lowbat, r_lowbat) &&
-                         r_lowbat.device_id == 0x12345 && r_lowbat.status_flags == 0x09 &&
-                         !r_lowbat.battery_ok && r_lowbat.status_str.indexOf("LOW BATTERY") >= 0;
+        bool ok_lowbat = decode_kerui_ev1527(durs_lowbat, r_lowbat) && r_lowbat.device_id == 0x12345 &&
+                         r_lowbat.status_flags == 0x09 && !r_lowbat.battery_ok &&
+                         r_lowbat.status_str.indexOf("LOW BATTERY") >= 0;
 
-        bool ok_legacy = decode_kerui_ev1527(durs_legacy, r_legacy) &&
-                         r_legacy.device_id == 0x12345 && r_legacy.status_flags == 0x08;
+        bool ok_legacy = decode_kerui_ev1527(durs_legacy, r_legacy) && r_legacy.device_id == 0x12345 &&
+                         r_legacy.status_flags == 0x08;
 
         if (ok_motion && ok_lowbat && ok_legacy) {
             report += "[PASS] Kerui / EV1527 Alarm OOK PWM\n";
@@ -1361,7 +1451,8 @@ bool rtl433_selftest(String &report) {
         std::vector<int> durs = build_pcm_pulses(b.data, b.num_bits, 58);
         Rtl433Reading r;
         if (decode_fineoffset_fsk(durs, r) && r.device_id == 0x1234 && abs(r.temp_c - 21.5f) < 0.2f &&
-                r.humidity == 50.0f && !decode_fineoffset_fsk_payload(invalid_payload, sizeof(invalid_payload), r)) {
+            r.humidity == 50.0f &&
+            !decode_fineoffset_fsk_payload(invalid_payload, sizeof(invalid_payload), r)) {
             report += "[PASS] Fine Offset WH65 Weather 2-FSK\n";
             passed++;
         } else {
@@ -1387,12 +1478,13 @@ bool rtl433_selftest(String &report) {
         std::vector<int> durs = build_pcm_pulses(b.data, b.num_bits, 122);
         Rtl433Reading r;
         if (decode_bresser_5in1(durs, r) && (r.device_id == ((0x51 << 8) | 0x02)) &&
-                abs(r.temp_c - 22.2f) < 0.2f && r.humidity == 55.0f &&
-                !decode_bresser_5in1_payload(invalid_payload, sizeof(invalid_payload), r)) {
+            abs(r.temp_c - 22.2f) < 0.2f && r.humidity == 55.0f &&
+            !decode_bresser_5in1_payload(invalid_payload, sizeof(invalid_payload), r)) {
             report += "[PASS] Bresser 5-in-1 Weather GFSK\n";
             passed++;
         } else {
-            report += "[FAIL] Bresser 5-in-1 Weather GFSK (temp=" + String(r.temp_c) + " hum=" + String(r.humidity) + ")\n";
+            report += "[FAIL] Bresser 5-in-1 Weather GFSK (temp=" + String(r.temp_c) +
+                      " hum=" + String(r.humidity) + ")\n";
         }
     }
 
@@ -1401,17 +1493,12 @@ bool rtl433_selftest(String &report) {
         total++;
         // L=0x1E, C=0x44 (SND_NR), Manuf=0x2D2C (KAM), ID=0x78563412 (12345678), Ver=0x01, Type=0x07 (Water)
         // Full 37-byte telegram with Block 1, Block 2, Block 3 and EN 13757-4 CRC16 per block
-        uint8_t wmbus_t_data[] = {
-            0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xED, 0x56,
-            0x7A, 0x20, 0x00, 0x00, 0x00, 0x04, 0x13, 0x56, 0x34, 0x12, 0x00, 0x42, 0x6C, 0xBF, 0x2C, 0x2F, 0x9C, 0x09,
-            0x01, 0xFD, 0x17, 0x00, 0x00, 0x81, 0x87
-        };
-        uint8_t wmbus_s_data[] = {
-            0x09, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xB1, 0x30
-        };
-        uint8_t bad_b1_crc[] = {
-            0x09, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xB1, 0x31
-        };
+        uint8_t wmbus_t_data[] = {0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07,
+                                  0xED, 0x56, 0x7A, 0x20, 0x00, 0x00, 0x00, 0x04, 0x13, 0x56,
+                                  0x34, 0x12, 0x00, 0x42, 0x6C, 0xBF, 0x2C, 0x2F, 0x9C, 0x09,
+                                  0x01, 0xFD, 0x17, 0x00, 0x00, 0x81, 0x87};
+        uint8_t wmbus_s_data[] = {0x09, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xB1, 0x30};
+        uint8_t bad_b1_crc[] = {0x09, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xB1, 0x31};
         uint8_t bad_b2_crc[sizeof(wmbus_t_data)];
         memcpy(bad_b2_crc, wmbus_t_data, sizeof(wmbus_t_data));
         bad_b2_crc[28] ^= 0x01; // Corrupt Block 2 CRC
@@ -1432,15 +1519,16 @@ bool rtl433_selftest(String &report) {
 
         Rtl433Reading r_t, r_s, r_bad;
         if (decode_wmbus(durs_t, r_t) && r_t.device_id == 0x12345678 && r_t.channel == 0x07 &&
-                r_t.status_str.indexOf("KAM") >= 0 &&
-                decode_wmbus(durs_s, r_s) && r_s.device_id == 0x12345678 &&
-                !decode_wmbus_payload(bad_b1_crc, sizeof(bad_b1_crc), r_bad) &&
-                !decode_wmbus_payload(bad_b2_crc, sizeof(bad_b2_crc), r_bad) &&
-                !decode_wmbus_payload(wmbus_s_data, 10, r_bad)) {
+            r_t.status_str.indexOf("KAM") >= 0 && decode_wmbus(durs_s, r_s) && r_s.device_id == 0x12345678 &&
+            !decode_wmbus_payload(bad_b1_crc, sizeof(bad_b1_crc), r_bad) &&
+            !decode_wmbus_payload(bad_b2_crc, sizeof(bad_b2_crc), r_bad) &&
+            !decode_wmbus_payload(wmbus_s_data, 10, r_bad)) {
             report += "[PASS] Wireless M-Bus Mode T / Mode S MSK with CRC-16\n";
             passed++;
         } else {
-            report += "[FAIL] Wireless M-Bus Mode T / Mode S MSK with CRC-16 (id=" + String(r_t.device_id, HEX) + " type=" + String(r_t.channel) + ")\n";
+            report +=
+                "[FAIL] Wireless M-Bus Mode T / Mode S MSK with CRC-16 (id=" + String(r_t.device_id, HEX) +
+                " type=" + String(r_t.channel) + ")\n";
         }
     }
 
@@ -1457,13 +1545,13 @@ bool rtl433_selftest(String &report) {
         Rtl433Reading temp_reading;
         Rtl433Reading humidity_reading;
         if (decode_lacrosse_tx(temp_durs, temp_reading) && temp_reading.device_id == 53 &&
-                temp_reading.has_temp && abs(temp_reading.temp_c - 22.3f) < 0.2f &&
-                decode_lacrosse_tx(humidity_durs, humidity_reading) && humidity_reading.device_id == 53 &&
-                humidity_reading.has_humidity && abs(humidity_reading.humidity - 55.0f) < 0.2f &&
-                !decode_lacrosse_tx_payload(bad_checksum, sizeof(bad_checksum), temp_reading) &&
-                !decode_lacrosse_tx_payload(bad_parity, sizeof(bad_parity), temp_reading) &&
-                !decode_lacrosse_tx(bad_checksum_durs, temp_reading) &&
-                !decode_lacrosse_tx(bad_parity_durs, temp_reading)) {
+            temp_reading.has_temp && abs(temp_reading.temp_c - 22.3f) < 0.2f &&
+            decode_lacrosse_tx(humidity_durs, humidity_reading) && humidity_reading.device_id == 53 &&
+            humidity_reading.has_humidity && abs(humidity_reading.humidity - 55.0f) < 0.2f &&
+            !decode_lacrosse_tx_payload(bad_checksum, sizeof(bad_checksum), temp_reading) &&
+            !decode_lacrosse_tx_payload(bad_parity, sizeof(bad_parity), temp_reading) &&
+            !decode_lacrosse_tx(bad_checksum_durs, temp_reading) &&
+            !decode_lacrosse_tx(bad_parity_durs, temp_reading)) {
             report += "[PASS] LaCrosse TX OOK temperature, humidity, checksum and parity\n";
             passed++;
         } else {
@@ -1494,9 +1582,10 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.decoder_id = 1;
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
-        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_OOK_868 :
-                    (defFreq < 330.0f) ? RTL433_PRESET_OOK_315 :
-                    (defFreq > 330.0f && defFreq < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+        presetIdx = (defFreq > 800.0f)                       ? RTL433_PRESET_OOK_868
+                    : (defFreq < 330.0f)                     ? RTL433_PRESET_OOK_315
+                    : (defFreq > 330.0f && defFreq < 360.0f) ? RTL433_PRESET_OOK_345
+                                                             : RTL433_PRESET_OOK_433;
     } else if (st == "acurite" || st == "pwm" || st == "606tx") {
         uint8_t acurite_data[] = {0x55, 0x04, 0xB0, 0x09};
         r.raw_durations = build_pwm_pulses(acurite_data, 32, 200, 600, 400);
@@ -1507,8 +1596,9 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.decoder_id = 2;
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
-        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_OOK_868 :
-                    (defFreq < 330.0f) ? RTL433_PRESET_OOK_315 : RTL433_PRESET_OOK_433;
+        presetIdx = (defFreq > 800.0f)   ? RTL433_PRESET_OOK_868
+                    : (defFreq < 330.0f) ? RTL433_PRESET_OOK_315
+                                         : RTL433_PRESET_OOK_433;
     } else if (st == "honeywell" || st == "5800" || st == "manchester" || st == "345") {
         uint8_t hw_data[] = {0xFF, 0x1A, 0x2B, 0x3C, 0x90, 0x00, 0x12, 0x34};
         r.raw_durations = build_manchester_pulses(hw_data, 64, 380);
@@ -1519,9 +1609,10 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.decoder_id = 7;
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
-        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_OOK_868 :
-                    (defFreq < 330.0f) ? RTL433_PRESET_OOK_315 :
-                    (defFreq > 330.0f && defFreq < 360.0f) ? RTL433_PRESET_OOK_345 : RTL433_PRESET_OOK_433;
+        presetIdx = (defFreq > 800.0f)                       ? RTL433_PRESET_OOK_868
+                    : (defFreq < 330.0f)                     ? RTL433_PRESET_OOK_315
+                    : (defFreq > 330.0f && defFreq < 360.0f) ? RTL433_PRESET_OOK_345
+                                                             : RTL433_PRESET_OOK_433;
     } else if (st == "wh65" || st == "fsk" || st == "2fsk" || st == "fineoffset") {
         uint8_t payload[14] = {0x48, 0x12, 0x34, 0x02, 0x67, 50, 90, 15, 25, 0, 50, 3, 100, 0};
         BitBuffer b;
@@ -1543,8 +1634,9 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.payload_hex = b.to_hex();
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
-        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_FSK_868_17K :
-                    (defFreq < 330.0f) ? RTL433_PRESET_FSK_315_19K : RTL433_PRESET_FSK_433_17K;
+        presetIdx = (defFreq > 800.0f)   ? RTL433_PRESET_FSK_868_17K
+                    : (defFreq < 330.0f) ? RTL433_PRESET_FSK_315_19K
+                                         : RTL433_PRESET_FSK_433_17K;
         r.preset_idx = presetIdx;
 
         if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
@@ -1572,8 +1664,9 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.payload_hex = b.to_hex();
         float defFreq = (freq > 0.0f) ? freq : 433.92f;
         r.frequency = defFreq;
-        presetIdx = (defFreq > 800.0f) ? RTL433_PRESET_GFSK_868_17K :
-                    (defFreq < 330.0f) ? RTL433_PRESET_GFSK_315_19K : RTL433_PRESET_GFSK_433_17K;
+        presetIdx = (defFreq > 800.0f)   ? RTL433_PRESET_GFSK_868_17K
+                    : (defFreq < 330.0f) ? RTL433_PRESET_GFSK_315_19K
+                                         : RTL433_PRESET_GFSK_433_17K;
         r.preset_idx = presetIdx;
 
         if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
@@ -1581,11 +1674,9 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         }
         return replayReading(r, repeats);
     } else if (st == "wmbus" || st == "msk" || st == "mskt" || st == "wmbust") {
-        uint8_t wmbus_pkt[] = {
-            0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xED, 0x56,
-            0x7A, 0x20, 0x00, 0x00, 0x00, 0x04, 0x13, 0x56, 0x34, 0x12, 0x00, 0x42, 0x6C, 0xBF, 0x2C, 0x2F, 0x9C, 0x09,
-            0x01, 0xFD, 0x17, 0x00, 0x00, 0x81, 0x87
-        };
+        uint8_t wmbus_pkt[] = {0x1E, 0x44, 0x2D, 0x2C, 0x78, 0x56, 0x34, 0x12, 0x01, 0x07, 0xED, 0x56, 0x7A,
+                               0x20, 0x00, 0x00, 0x00, 0x04, 0x13, 0x56, 0x34, 0x12, 0x00, 0x42, 0x6C, 0xBF,
+                               0x2C, 0x2F, 0x9C, 0x09, 0x01, 0xFD, 0x17, 0x00, 0x00, 0x81, 0x87};
         BitBuffer b;
         for (int i = 15; i >= 0; i--) b.push_bit((0x543D >> i) & 1);
         for (size_t i = 0; i < sizeof(wmbus_pkt); i++) {
@@ -1605,7 +1696,9 @@ bool Rtl433Engine::transmitSample(const String &sampleType, float freq, int repe
         r.preset_idx = presetIdx;
 
         if (bruceConfigPins.rfModule == CC1101_SPI_MODULE) {
-            return rtl433_transmit_fsk_packet(defFreq, presetIdx, wmbus_pkt, sizeof(wmbus_pkt), 0x543D, repeats);
+            return rtl433_transmit_fsk_packet(
+                defFreq, presetIdx, wmbus_pkt, sizeof(wmbus_pkt), 0x543D, repeats
+            );
         }
         return replayReading(r, repeats);
     } else {
