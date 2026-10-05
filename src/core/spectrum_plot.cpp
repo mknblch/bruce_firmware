@@ -6,14 +6,11 @@
 // Waterfall intensity ramp, quantised so identical columns collapse into runs.
 static const int SP_HEAT_N = 16;
 static uint16_t sp_heat[SP_HEAT_N];
+// Envelope value (0-100) straight to its heat colour, saving a divide per pixel.
+static uint16_t sp_heat_lut[101];
 
-static uint32_t sp_rnd_state = 0x2a3b4c5d;
-
-static inline uint32_t sp_rnd() {
-    sp_rnd_state ^= sp_rnd_state << 13;
-    sp_rnd_state ^= sp_rnd_state >> 17;
-    sp_rnd_state ^= sp_rnd_state << 5;
-    return sp_rnd_state;
+static void sp_build_heat_lut() {
+    for (int v = 0; v <= 100; v++) sp_heat_lut[v] = sp_heat[v * (SP_HEAT_N - 1) / 100];
 }
 
 uint16_t SpectrumPlot::alertColor() {
@@ -99,6 +96,14 @@ void SpectrumPlot::buildPalette() {
     _label = blendColors(_bg, pri, 170);
     if (_sdr) sp_build_sdr_palette();
     else buildHeatPalette(sp_heat, SP_HEAT_N);
+    sp_build_heat_lut();
+}
+
+void SpectrumPlot::pushPixels(int32_t x, int32_t y, int32_t w, int32_t h) {
+    bool swap = tft.getSwapBytes();
+    tft.setSwapBytes(true); // _line holds native RGB565 values
+    tft.pushImage(x, y, w, h, _line);
+    tft.setSwapBytes(swap);
 }
 
 bool SpectrumPlot::begin(const String &title, bool sdrWaterfall, bool waterfallPriority) {
@@ -109,6 +114,11 @@ bool SpectrumPlot::begin(const String &title, bool sdrWaterfall, bool waterfallP
     buildPalette();
 
     if (_plotW < 8) return false;
+
+    _lineLen = max(_plotW, _specH);
+    free(_line);
+    _line = (uint16_t *)malloc((size_t)_lineLen * sizeof(uint16_t));
+    if (!_line) return false;
 
     if (_wfRows) {
         _wf = (uint8_t *)calloc((size_t)_wfRows * _plotW, 1);
@@ -140,6 +150,9 @@ void SpectrumPlot::redraw(const String &title) {
 void SpectrumPlot::end() {
     free(_wf);
     _wf = nullptr;
+    free(_line);
+    _line = nullptr;
+    _lineLen = 0;
     _wfRows = 0;
     _ok = false;
 }
@@ -156,33 +169,35 @@ void SpectrumPlot::trace(const uint8_t *env, const uint8_t *envPeak, int hlL, in
     gy[2] = _specBot - (_specH * 3) / 4;
 
     // Every pixel of the band is written exactly once per frame, which keeps the
-    // animation flicker free without needing a full-screen sprite.
+    // animation flicker free without needing a full-screen sprite. Each column
+    // is composed in _line and sent as one transfer rather than up to a dozen
+    // separate pixel/line primitives.
     for (int i = 0; i < _plotW; i++) {
         int x = _plotL + i;
 
         int hLive = constrain((int)env[i] * (_specH - 1) / 100, 0, _specH - 1);
-        int grass = (int)(sp_rnd() % 3); // animated noise floor
-        if (hLive < grass) hLive = grass;
         int hPeak = envPeak ? constrain((int)envPeak[i] * (_specH - 1) / 100, 0, _specH - 1) : 0;
         if (hPeak < hLive) hPeak = hLive;
 
-        int yLive = _specBot - hLive;
-        int yPeak = _specBot - hPeak;
+        // _line[0] is _specTop, _line[_specH - 1] is _specBot
+        int yLive = _specH - 1 - hLive;
+        int yPeak = _specH - 1 - hPeak;
+        uint16_t body = (i >= hlL && i <= hlR) ? bodyHl : _body;
 
-        if (yPeak > _specTop) tft.drawFastVLine(x, _specTop, yPeak - _specTop, _bg);
-        if (hPeak > hLive) {
-            tft.drawPixel(x, yPeak, _peak);
-            if (yLive > yPeak + 1) tft.drawFastVLine(x, yPeak + 1, yLive - yPeak - 1, _bg);
-        }
-        tft.drawPixel(x, yLive, trace);
-        if (hLive > 0)
-            tft.drawFastVLine(x, yLive + 1, hLive, (i >= hlL && i <= hlR) ? bodyHl : _body);
+        for (int y = 0; y < yLive; y++) _line[y] = _bg;
+        if (hPeak > hLive) _line[yPeak] = _peak;
+        _line[yLive] = trace;
+        for (int y = yLive + 1; y < _specH; y++) _line[y] = body;
 
         // dashed reference grid, visible only through the empty sky
         if ((i & 3) == 0) {
-            for (int k = 0; k < 3; k++)
-                if (gy[k] > _specTop && gy[k] < yLive - 1) tft.drawPixel(x, gy[k], _grid);
+            for (int k = 0; k < 3; k++) {
+                int gyk = gy[k] - _specTop;
+                if (gyk > 0 && gyk < yLive - 1 && gyk != yPeak) _line[gyk] = _grid;
+            }
         }
+
+        pushPixels(x, _specTop, 1, _specH);
     }
 }
 
@@ -193,25 +208,14 @@ void SpectrumPlot::drawWaterfall() {
     tft.drawFastHLine(_plotL, _specBot + 1, _plotW, _grid);
     tft.drawFastHLine(_plotL, _specBot + 2, _plotW, _bg);
 
+    // One transfer per row: the rows are re-rendered every frame as the
+    // history scrolls, so per-run line primitives cost thousands of SPI
+    // transactions on noisy data.
     for (int r = 0; r < _wfRows; r++) {
         int idx = (_wfHead - r + 2 * _wfRows) % _wfRows;
         const uint8_t *row = _wf + (size_t)idx * _plotW;
-        int y = _wfTop + r;
-
-        // flush equal-coloured columns as single spans, the rows are wide
-        int runStart = 0;
-        int heatIdx0 = constrain((int)row[0] * (SP_HEAT_N - 1) / 100, 0, SP_HEAT_N - 1);
-        uint16_t runCol = sp_heat[heatIdx0];
-        for (int i = 1; i <= _plotW; i++) {
-            bool last = (i == _plotW);
-            int heatIdx = last ? 0 : constrain((int)row[i] * (SP_HEAT_N - 1) / 100, 0, SP_HEAT_N - 1);
-            uint16_t c = last ? runCol : sp_heat[heatIdx];
-            if (last || c != runCol) {
-                tft.drawFastHLine(_plotL + runStart, y, i - runStart, runCol);
-                runStart = i;
-                runCol = c;
-            }
-        }
+        for (int i = 0; i < _plotW; i++) _line[i] = sp_heat_lut[row[i] > 100 ? 100 : row[i]];
+        pushPixels(_plotL, _wfTop + r, _plotW, 1);
     }
 }
 

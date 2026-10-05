@@ -74,4 +74,10 @@ private:
 
     uint8_t *_wf = nullptr; // _wfRows x _plotW ring of rendered envelopes
     int _wfHead = 0;
+
+    // Scratch pixels for one waterfall row / one trace column, so each is sent
+    // to the panel as a single pushImage instead of many small primitives.
+    uint16_t *_line = nullptr;
+    int _lineLen = 0;
+    void pushPixels(int32_t x, int32_t y, int32_t w, int32_t h);
 };

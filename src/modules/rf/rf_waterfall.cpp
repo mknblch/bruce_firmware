@@ -1,6 +1,7 @@
 #include "rf_waterfall.h"
 #include "core/mykeyboard.h"
 #include "core/spectrum_plot.h"
+#include "core/waterfall_input.h"
 float m_rf_waterfall_start_freq = 433.0;
 float m_rf_waterfall_end_freq = 435.0;
 
@@ -108,15 +109,24 @@ void rf_waterfall_boundary_freq(float &boundary, float &otherBoundary, bool isSt
 // trace with peak-hold across the top, and a theme-coloured waterfall below fed
 // by the very same envelope, so the falls track the waveform above them.
 //
-// The band is swept in a modest number of bins (not one per pixel): retuning a
-// CC1101 needs a few ms for the PLL/RSSI to settle before getRssi() is valid
-// (see rf_CC1101_rssi), so sampling every pixel with a sub-ms wait would just
-// read the noise floor. We sample WF_BINS points with a real settle and then
-// interpolate the envelope across the plot columns for a continuous trace.
-#define WF_BINS 64
-// Allow the PLL, RX path, and RSSI register to settle after every retune.
-// A shorter delay can return the previous bin's RSSI and create apparent holes.
-#define WF_SETTLE_US 2000
+// The band is swept in a modest number of bins (not one per pixel): after each
+// hop the RSSI needs time to settle before getRssi() is valid (see
+// rf_CC1101_rssi), so sampling every pixel would just read the noise floor. We
+// sample WF_BINS points with a real settle and then interpolate the envelope
+// across the plot columns for a continuous trace.
+#define WF_BINS 48
+// Settle after each hop: ~90 us PLL lock plus the RSSI averaging time, which
+// grows as the RX filter narrows. Too short returns the previous bin's RSSI
+// and creates apparent holes; raise WF_SETTLE_BW_US_KHZ if that shows up.
+#define WF_SETTLE_BASE_US 200
+#define WF_SETTLE_BW_US_KHZ 270000.0f // settle += this / RXBW[kHz]
+#define WF_SETTLE_MAX_US 2000
+// Re-run the per-bin VCO calibration this often to follow temperature drift.
+#define WF_RECAL_MS 30000
+// A waterfall row is committed at this pace rather than once per sweep, so the
+// visible history keeps its time span however fast the sweep runs. Sweeps in
+// between are max-held into the row so short bursts are never dropped.
+#define WF_ROW_MS 200
 
 struct WaterfallZoom {
     float spanMHz;
@@ -201,16 +211,6 @@ static void setWaterfallZoomRange(float &start, float &end, int zoomIndex) {
     clampWaterfallRange(start, end);
 }
 
-// Frequency registers must only be changed while the synthesizer is idle.
-// setMHZ() restarts RX after writing them, which is too late for a sweep:
-// writing FREQ2/FREQ1/FREQ0 while RX is running can leave the RSSI reading
-// associated with the previous bin, especially after changing RX bandwidth.
-static inline void tuneWaterfall(float frequency) {
-    ELECHOUSE_cc1101.setSidle();
-    ELECHOUSE_cc1101.setMHZ(frequency);
-    ELECHOUSE_cc1101.SetRx();
-}
-
 static void panWaterfall(float &start, float &end, float step, bool up) {
     float span = end - start;
     if (span < 0.05f) span = 2.0f;
@@ -257,13 +257,78 @@ static void panWaterfall(float &start, float &end, float step, bool up) {
 }
 
 static inline int sampleRssi() {
-    // WF_SETTLE_US already gives the PLL, RX chain, and RSSI register time to
+    // The hop settle already gives the PLL, RX chain, and RSSI register time to
     // settle. Taking the maximum of two reads can retain the previous bin's
     // stale high value immediately after a retune or antenna-path change.
     int rssi = ELECHOUSE_cc1101.getRssi();
     // Positive values (especially 127/0 from a failed status read) are not
     // valid dBm readings and must not become full-scale waterfall peaks.
     return (rssi >= 0 || rssi < -127) ? -110 : rssi;
+}
+
+// Fast frequency hopping (CC1101 datasheet, "Frequency Hopping and
+// Multi-Channel Systems"): every bin is calibrated once and its FSCAL3..1 are
+// replayed on each hop. With FS_AUTOCAL left on, every IDLE->RX transition
+// re-ran the ~720 us VCO calibration, which dominated the sweep time.
+struct WaterfallChannel {
+    uint8_t freq[3];  // FREQ2, FREQ1, FREQ0
+    uint8_t fscal[3]; // FSCAL3, FSCAL2, FSCAL1
+};
+
+// MCSM0 with FS_AUTOCAL disabled; PO_TIMEOUT as in the driver default (0x18).
+#define WF_MCSM0_MANUAL_CAL 0x08
+#define WF_MCSM0_DEFAULT 0x18
+
+static void waterfallFreqWord(float mhz, uint8_t out[3]) {
+    const uint32_t word = (uint32_t)lroundf(mhz * 1000000.0f * 65536.0f / 26000000.0f);
+    out[0] = (word >> 16) & 0xff;
+    out[1] = (word >> 8) & 0xff;
+    out[2] = word & 0xff;
+}
+
+static void waitWaterfallIdle(uint32_t timeoutUs) {
+    delayMicroseconds(50); // let the strobe leave IDLE before polling for it
+    uint32_t t0 = micros();
+    while (micros() - t0 < timeoutUs) {
+        if ((ELECHOUSE_cc1101.SpiReadStatus(CC1101_MARCSTATE) & 0x1F) == 0x01) return;
+        delayMicroseconds(20);
+    }
+}
+
+static void calibrateWaterfall(WaterfallChannel *ch, float f_start, float f_end) {
+    // The hops below write the CC1101 registers directly, which bypasses the
+    // board's antenna/filter switching (T-Embed CC1101 SW0/SW1, M5 Cap). Tune
+    // once through the Bruce setMHZ() wrapper so the RF path follows the band;
+    // a range never straddles a band (clampWaterfallRange), so one path fits
+    // every bin, and the wrapper only toggles and settles on an actual change.
+    setMHZ((f_start + f_end) * 0.5f);
+    ELECHOUSE_cc1101.setSidle();
+    for (int b = 0; b < WF_BINS; b++) {
+        float f = f_start + (f_end - f_start) * b / (WF_BINS - 1);
+        waterfallFreqWord(f, ch[b].freq);
+        ELECHOUSE_cc1101.SpiWriteBurstReg(CC1101_FREQ2, ch[b].freq, 3);
+        ELECHOUSE_cc1101.SpiStrobe(CC1101_SCAL);
+        waitWaterfallIdle(2000);
+        ch[b].fscal[0] = ELECHOUSE_cc1101.SpiReadReg(CC1101_FSCAL3);
+        ch[b].fscal[1] = ELECHOUSE_cc1101.SpiReadReg(CC1101_FSCAL2);
+        ch[b].fscal[2] = ELECHOUSE_cc1101.SpiReadReg(CC1101_FSCAL1);
+    }
+    ELECHOUSE_cc1101.SetRx();
+}
+
+// Frequency registers must only be changed while the synthesizer is idle;
+// writing FREQ2/FREQ1/FREQ0 while RX is running can leave the RSSI reading
+// associated with the previous bin.
+static inline void hopWaterfall(WaterfallChannel &ch) {
+    ELECHOUSE_cc1101.SpiStrobe(CC1101_SIDLE);
+    ELECHOUSE_cc1101.SpiWriteBurstReg(CC1101_FREQ2, ch.freq, 3);
+    ELECHOUSE_cc1101.SpiWriteBurstReg(CC1101_FSCAL3, ch.fscal, 3);
+    ELECHOUSE_cc1101.SpiStrobe(CC1101_SRX);
+}
+
+static uint32_t waterfallSettleUs(float bandwidthKHz) {
+    uint32_t us = WF_SETTLE_BASE_US + (uint32_t)(WF_SETTLE_BW_US_KHZ / bandwidthKHz);
+    return us > WF_SETTLE_MAX_US ? WF_SETTLE_MAX_US : us;
 }
 
 enum AgcMode {
@@ -282,6 +347,14 @@ enum WaterfallControl {
     WATERFALL_CONTROL_COUNT
 };
 
+static float waterfallPanStep(float range) {
+    if (range > 100) return 10;
+    if (range > 10) return 1;
+    if (range > 1) return 0.1f;
+    if (range > 0.1f) return 0.01f;
+    return 0.001f;
+}
+
 void rf_waterfall_run() {
     SpectrumPlot plot;
     if (!plot.begin("", /*sdrWaterfall=*/true, /*waterfallPriority=*/true)) { // SDR colourmap, no title bar to maximize waterfall room
@@ -293,10 +366,12 @@ void rf_waterfall_run() {
     uint8_t *env = (uint8_t *)malloc(plotW);     // freshly measured envelope
     uint8_t *disp = (uint8_t *)malloc(plotW);    // eased envelope drawn on top
     uint8_t *envPeak = (uint8_t *)malloc(plotW); // peak-hold line
-    if (!env || !disp || !envPeak) {
+    uint8_t *rowAcc = (uint8_t *)malloc(plotW);  // max of sweeps since the last waterfall row
+    if (!env || !disp || !envPeak || !rowAcc) {
         free(env);
         free(disp);
         free(envPeak);
+        free(rowAcc);
         plot.end();
         displayError("Out of memory", true);
         return;
@@ -304,6 +379,7 @@ void rf_waterfall_run() {
     memset(env, 0, plotW);
     memset(disp, 0, plotW);
     memset(envPeak, 0, plotW);
+    memset(rowAcc, 0, plotW);
 
     const bool previousRfFxdFreq = bruceConfigPins.rfFxdFreq;
     bruceConfigPins.rfFxdFreq = false;
@@ -325,13 +401,18 @@ void rf_waterfall_run() {
         free(env);
         free(disp);
         free(envPeak);
+        free(rowAcc);
         plot.end();
         displayError("CC1101 not found!", true);
         return;
     }
     ELECHOUSE_cc1101.setSidle();
     ELECHOUSE_cc1101.setRxBW(waterfallBandwidths[bandwidthIndex]);
-    ELECHOUSE_cc1101.SetRx();
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_MCSM0, WF_MCSM0_MANUAL_CAL);
+    WaterfallChannel channels[WF_BINS];
+    calibrateWaterfall(channels, f_start, f_end);
+    uint32_t lastCalibration = millis();
+    uint32_t settleUs = waterfallSettleUs(waterfallBandwidths[bandwidthIndex]);
 
     // Show only the band edges and center under the plot; redrawn when navigating.
     const int tickCount = 3;
@@ -349,13 +430,7 @@ void rf_waterfall_run() {
     plot.status("scanning...");
 
     // Pan step scales with the span, matching the old boundary stepping.
-    float range = f_end - f_start;
-    float step;
-    if (range > 100) step = 10;
-    else if (range > 10) step = 1;
-    else if (range > 1) step = 0.1f;
-    else if (range > 0.1f) step = 0.01f;
-    else step = 0.001f;
+    float step = waterfallPanStep(f_end - f_start);
 
     AgcMode agcMode = AGC_AUTO;
     float agcPeak = -30.0f;
@@ -365,10 +440,17 @@ void rf_waterfall_run() {
     WaterfallControl selectedControl = WATERFALL_CONTROL_FREQ;
     bool controlLocked = false;
     uint32_t lastStatus = 0;
+    uint32_t lastRow = millis();
+    WaterfallInput pending;
     while (!returnToMenu) {
+        // Apply everything collected since the previous frame.
+        pollWaterfallInput(pending);
+        WaterfallInput in = pending;
+        pending = WaterfallInput();
+
         // Select locks the footer control; Esc unlocks it, then exits when
         // the footer is already unlocked.
-        if (check(EscPress)) {
+        if (in.esc) {
             if (controlLocked) {
                 controlLocked = false;
                 lastStatus = 0;
@@ -376,114 +458,100 @@ void rf_waterfall_run() {
                 break;
             }
         }
-        bool selectPressed = check(SelPress);
-
-        // Toggle AGC / gain mode from the Cardputer's g/a/s shortcuts.
-        bool modeChanged = false;
-        bool agcChangedByControl = false;
-        bool bandwidthChanged = false;
-
-        bool zoomIn = false;
-        bool zoomOut = false;
-        bool panUp = false;
-        bool panDown = false;
-        bool selectDuringSweep = false;
-        bool nextDuringSweep = false;
-        bool previousDuringSweep = false;
-        bool upDuringSweep = false;
-        bool downDuringSweep = false;
-        int32_t panSteps = 0;
-        int32_t zoomInSteps = 0;
-        int32_t zoomOutSteps = 0;
-        keyStroke k = _getKeyPress();
-        if (k.pressed || !k.word.empty()) {
-            for (auto ch : k.word) {
-                char lowerKey = tolower(ch);
-                if (lowerKey == 'g' || lowerKey == 'a' || lowerKey == 's') {
-                    modeChanged = true;
-                } else if (ch == '+' || ch == '=' || ch == ']') {
-                    zoomIn = true;
-                } else if (ch == '-' || ch == '_' || ch == '[') {
-                    zoomOut = true;
-                }
-            }
-        }
-        // Cardputer Enter is reported in the keystroke itself rather than
-        // through SelPress. Treat both inputs as the same Select action.
-        if (k.enter) selectPressed = true;
-        if (selectPressed) {
+        if (in.select & 1) {
             controlLocked = !controlLocked;
             lastStatus = 0;
         }
 
-        bool next = false;
-        bool previous = false;
-#ifdef HAS_ENCODER
-        // Rotary movement is accumulated independently of the one-shot button
-        // flags. Consume the whole backlog so a sweep cannot make turns appear
-        // to be lost. The encoder also raises NextPress/PrevPress for menus;
-        // clear those duplicates here because RotaryNetSteps is authoritative.
-        int32_t rotarySteps = drainRotarySteps();
-        NextPress = false;
-        PrevPress = false;
-        int32_t nextSteps = rotarySteps < 0 ? -rotarySteps : 0;
-        int32_t previousSteps = rotarySteps > 0 ? rotarySteps : 0;
-#else
-        int32_t nextSteps = check(NextPress) ? 1 : 0;
-        int32_t previousSteps = check(PrevPress) ? 1 : 0;
-#endif
-        if (!controlLocked) {
-            while (nextSteps-- > 0) {
-                selectedControl = (WaterfallControl)((selectedControl + 1) % WATERFALL_CONTROL_COUNT);
+        bool agcChanged = false;
+        bool bandwidthChanged = false;
+        int panSteps = in.up - in.down; // dedicated Up/Down buttons always pan
+        int zoomSteps = in.zoomIn - in.zoomOut;
+
+        // AGC / gain mode from the Cardputer's g/a/s shortcuts.
+        if (in.gain > 0) {
+            agcMode = (AgcMode)wrapIndex(agcMode + in.gain, AGC_MODE_COUNT);
+            agcChanged = true;
+        }
+
+        int nav = in.next - in.prev;
+        if (nav != 0) {
+            if (!controlLocked) {
+                selectedControl = (WaterfallControl)wrapIndex(selectedControl + nav, WATERFALL_CONTROL_COUNT);
                 lastStatus = 0;
-            }
-            while (previousSteps-- > 0) {
-                selectedControl = (WaterfallControl)((selectedControl + WATERFALL_CONTROL_COUNT - 1) % WATERFALL_CONTROL_COUNT);
-                lastStatus = 0;
-            }
-        } else {
-            if (selectedControl == WATERFALL_CONTROL_AGC) {
-                while (nextSteps-- > 0) {
-                    agcMode = (AgcMode)((agcMode + 1) % AGC_MODE_COUNT);
-                    modeChanged = true;
-                    agcChangedByControl = true;
-                }
-                while (previousSteps-- > 0) {
-                    agcMode = (AgcMode)((agcMode + AGC_MODE_COUNT - 1) % AGC_MODE_COUNT);
-                    modeChanged = true;
-                    agcChangedByControl = true;
-                }
-            } else if (selectedControl == WATERFALL_CONTROL_FREQ) {
-                panSteps = nextSteps - previousSteps;
-                panUp = nextSteps > 0;
-                panDown = previousSteps > 0;
-            } else if (selectedControl == WATERFALL_CONTROL_ZOOM) {
-                zoomInSteps = nextSteps;
-                zoomOutSteps = previousSteps;
-                zoomIn = nextSteps > 0;
-                zoomOut = previousSteps > 0;
             } else {
-                while (nextSteps-- > 0) {
-                    bandwidthIndex = (bandwidthIndex + 1) % waterfallBandwidthCount;
-                    bandwidthChanged = true;
+                switch (selectedControl) {
+                    case WATERFALL_CONTROL_FREQ: panSteps += nav; break;
+                    case WATERFALL_CONTROL_AGC:
+                        agcMode = (AgcMode)wrapIndex(agcMode + nav, AGC_MODE_COUNT);
+                        agcChanged = true;
+                        break;
+                    case WATERFALL_CONTROL_ZOOM: zoomSteps += nav; break;
+                    default:
+                    {
+                        // Stop at the narrowest / widest filter instead of wrapping.
+                        int newIndex = constrain(bandwidthIndex + nav, 0, waterfallBandwidthCount - 1);
+                        bandwidthChanged = newIndex != bandwidthIndex;
+                        bandwidthIndex = newIndex;
+                        break;
+                    }
                 }
-                while (previousSteps-- > 0) {
-                    bandwidthIndex = (bandwidthIndex + waterfallBandwidthCount - 1) % waterfallBandwidthCount;
-                    bandwidthChanged = true;
-                }
-                if (bandwidthChanged) lastStatus = 0;
             }
         }
 
-        if (modeChanged && !agcChangedByControl) {
-            agcMode = (AgcMode)((agcMode + 1) % AGC_MODE_COUNT);
+        if (agcChanged) {
             memset(envPeak, 0, plotW);
             memset(disp, 0, plotW);
             lastStatus = 0; // trigger immediate status display update
-        } else if (agcChangedByControl) {
+        }
+
+        // Pan or zoom the whole window and refresh the ruler + peak history.
+        bool rangeChanged = false;
+        if (panSteps != 0) {
+            int oldBand = getWaterfallBandIndex(f_start);
+            bool up = panSteps > 0;
+            int moves = up ? panSteps : -panSteps;
+            while (moves-- > 0) panWaterfall(f_start, f_end, step, up);
+            if (getWaterfallBandIndex(f_start) != oldBand) {
+                agcPeak = -50.0f;
+                memset(disp, 0, plotW);
+            }
+            memset(envPeak, 0, plotW);
+            rangeChanged = true;
+        }
+        if (zoomSteps != 0) {
+            int moves = zoomSteps > 0 ? zoomSteps : -zoomSteps;
+            while (moves-- > 0) {
+                int nextZoomIndex = zoomIndex + (zoomSteps > 0 ? -1 : 1);
+                if (nextZoomIndex < 0 || nextZoomIndex >= waterfallZoomCount) break;
+                zoomIndex = nextZoomIndex;
+                setWaterfallZoomRange(f_start, f_end, zoomIndex);
+            }
             memset(envPeak, 0, plotW);
             memset(disp, 0, plotW);
-            lastStatus = 0; // trigger immediate status display update
+            rangeChanged = true;
+        }
+
+        if (bandwidthChanged) {
+            // RXBW changes are applied in IDLE; the next hop restarts RX with
+            // the newly selected filter.
+            ELECHOUSE_cc1101.setSidle();
+            ELECHOUSE_cc1101.setRxBW(waterfallBandwidths[bandwidthIndex]);
+            ELECHOUSE_cc1101.SetRx();
+            settleUs = waterfallSettleUs(waterfallBandwidths[bandwidthIndex]);
+            lastStatus = 0;
+        }
+        if (rangeChanged) {
+            memset(rowAcc, 0, plotW); // half a row from the old range would be misleading
+            lastRow = millis();
+            step = waterfallPanStep(f_end - f_start);
+            drawRuler();
+            lastStatus = 0;
+        }
+        // Recalibrate for the new bins, and periodically to follow VCO drift.
+        if (rangeChanged || millis() - lastCalibration >= WF_RECAL_MS) {
+            calibrateWaterfall(channels, f_start, f_end);
+            lastCalibration = millis();
         }
 
         // Sweep the band once — WF_BINS RSSI samples with a real settle so the
@@ -493,23 +561,8 @@ void rf_waterfall_run() {
         int minRssi = 127;
         int sampleCount = 0;
         for (int b = 0; b < WF_BINS; b++) {
-            float f = f_start + (f_end - f_start) * b / (WF_BINS - 1);
-            tuneWaterfall(f);
-            delayMicroseconds(WF_SETTLE_US);
-            // Let the Cardputer input task run between bins. The settle delay
-            // alone does not yield, so a continuous sweep can otherwise starve
-            // short keyboard presses until they are no longer reported.
-            yield();
-            // Navigation flags are one-shot pulses on the Cardputer. Latch
-            // them while scanning so a pulse is not lost before the frame's
-            // normal input handling below.
-#ifndef HAS_ENCODER
-            selectDuringSweep |= SelPress;
-            nextDuringSweep |= NextPress;
-            previousDuringSweep |= PrevPress;
-            upDuringSweep |= UpPress;
-            downDuringSweep |= DownPress;
-#endif
+            hopWaterfall(channels[b]);
+            delayMicroseconds(settleUs);
             int rssi = sampleRssi();
 
             rawRssi[b] = rssi;
@@ -521,36 +574,16 @@ void rf_waterfall_run() {
             if (rssi < minRssi) {
                 minRssi = rssi;
             }
-            if (EscPress) break;
+            // Let the input task run between bins; the settle delay alone does
+            // not yield. Then collect whatever it reported.
+            yield();
+            pollWaterfallInput(pending);
+            if (pending.esc) break;
         }
+        // Esc mid-sweep: drop the partial sweep and handle it at the top.
+        if (sampleCount != WF_BINS) continue;
+
         tft.drawPixel(0, 0, 0); // Keep CC1101/TFT shared SPI happy once per frame before display updates
-        delay(8); // yield briefly for input processing
-
-        if (sampleCount != WF_BINS) break;
-
-#ifndef HAS_ENCODER
-        if (nextDuringSweep) {
-            if (NextPress) check(NextPress);
-            nextSteps++;
-        }
-        if (previousDuringSweep) {
-            if (PrevPress) check(PrevPress);
-            previousSteps++;
-        }
-        if (upDuringSweep) {
-            if (UpPress) check(UpPress);
-            panUp = true;
-        }
-        if (downDuringSweep) {
-            if (DownPress) check(DownPress);
-            panDown = true;
-        }
-        if (selectDuringSweep) {
-            if (SelPress) check(SelPress);
-            controlLocked = !controlLocked;
-            lastStatus = 0;
-        }
-#endif
 
         // Adaptive Peak Tracker: fast attack on peaks, responsive decay so sensitivity recovers quickly
         if ((float)maxRssi > agcPeak) {
@@ -624,92 +657,30 @@ void rf_waterfall_run() {
         int hlStart = max(0, maxCol - hlSpan);
         int hlEnd = min(plotW - 1, maxCol + hlSpan);
         plot.trace(disp, envPeak, hlStart, hlEnd); // eased trace on top
-        plot.pushRow(env); // waterfall shows the true measurement
+        pollWaterfallInput(pending);
+        for (int i = 0; i < plotW; i++)
+            if (env[i] > rowAcc[i]) rowAcc[i] = env[i];
+        if (millis() - lastRow >= WF_ROW_MS) {
+            lastRow = millis();
+            plot.pushRow(rowAcc); // waterfall shows the true measurement
+            memset(rowAcc, 0, plotW);
+        }
+        pollWaterfallInput(pending);
 
         if (millis() - lastStatus >= 300) {
             lastStatus = millis();
             const char *modeNames[] = {"AUTO", "1x", "2x", "3x"};
-            String controlBar;
-            for (int i = 0; i < WATERFALL_CONTROL_COUNT; i++) {
-                if (i > 0) controlBar += " ";
-                if (i == selectedControl) controlBar += controlLocked ? "[" : ">";
-                switch (i) {
-                    case WATERFALL_CONTROL_FREQ:
-                        controlBar += "FREQ " + String((f_start + f_end) * 0.5f, 2);
-                        break;
-                    case WATERFALL_CONTROL_AGC:
-                        controlBar += "AGC " + String(modeNames[agcMode]);
-                        break;
-                    case WATERFALL_CONTROL_ZOOM:
-                        controlBar += "ZOOM Z" + String(zoomIndex + 1);
-                        break;
-                    case WATERFALL_CONTROL_BW:
-                        controlBar += "BW " + String(waterfallBandwidths[bandwidthIndex], 1) + "k";
-                        break;
-                }
-                if (i == selectedControl) controlBar += controlLocked ? "]" : "<";
-            }
+            String items[WATERFALL_CONTROL_COUNT] = {
+                String((f_start + f_end) * 0.5f, 2) + "M",
+                "AGC " + String(modeNames[agcMode]),
+                "ZOOM " + String(zoomIndex + 1),
+                "BW " + String(waterfallBandwidths[bandwidthIndex], 1) + "k",
+            };
+            String controlBar = waterfallControlBar(items, WATERFALL_CONTROL_COUNT, selectedControl, controlLocked);
             plot.status(controlBar);
         }
 
-        // Pan or zoom the whole window and refresh the ruler + peak history.
-        bool rangeChanged = false;
-        if (check(UpPress) || panUp) {
-            int oldBand = getWaterfallBandIndex(f_start);
-            int moves = panSteps > 0 ? panSteps : 1;
-            while (moves-- > 0) panWaterfall(f_start, f_end, step, true);
-            int newBand = getWaterfallBandIndex(f_start);
-            if (newBand != oldBand) {
-                agcPeak = -50.0f;
-                memset(disp, 0, plotW);
-            }
-            memset(envPeak, 0, plotW);
-            drawRuler();
-            rangeChanged = true;
-            delay(1);
-        } else if (check(DownPress) || panDown) {
-            int oldBand = getWaterfallBandIndex(f_start);
-            int moves = panSteps < 0 ? -panSteps : 1;
-            while (moves-- > 0) panWaterfall(f_start, f_end, step, false);
-            int newBand = getWaterfallBandIndex(f_start);
-            if (newBand != oldBand) {
-                agcPeak = -50.0f;
-                memset(disp, 0, plotW);
-            }
-            memset(envPeak, 0, plotW);
-            drawRuler();
-            rangeChanged = true;
-            delay(1);
-        } else if (zoomIn || zoomOut) {
-            int moves = zoomIn ? max(1, (int)zoomInSteps) : max(1, (int)zoomOutSteps);
-            while (moves-- > 0) {
-                int nextZoomIndex = zoomIndex + (zoomIn ? -1 : 1);
-                if (nextZoomIndex < 0 || nextZoomIndex >= waterfallZoomCount) break;
-                zoomIndex = nextZoomIndex;
-                setWaterfallZoomRange(f_start, f_end, zoomIndex);
-            }
-            memset(envPeak, 0, plotW);
-            memset(disp, 0, plotW);
-            drawRuler();
-            rangeChanged = true;
-        }
-
-        if (rangeChanged || bandwidthChanged) {
-            range = f_end - f_start;
-            if (range > 100) step = 10;
-            else if (range > 10) step = 1;
-            else if (range > 1) step = 0.1f;
-            else if (range > 0.1f) step = 0.01f;
-            else step = 0.001f;
-
-            if (bandwidthChanged) {
-                // RXBW changes are applied in IDLE and RX is restarted so the
-                // next sweep uses the newly selected filter.
-                ELECHOUSE_cc1101.setSidle();
-                ELECHOUSE_cc1101.setRxBW(waterfallBandwidths[bandwidthIndex]);
-                ELECHOUSE_cc1101.SetRx();
-            }
-        }
+        delay(2); // give lower-priority tasks a slice once per frame
     }
 
     m_rf_waterfall_start_freq = f_start;
@@ -717,7 +688,10 @@ void rf_waterfall_run() {
     free(env);
     free(disp);
     free(envPeak);
+    free(rowAcc);
     bruceConfigPins.rfFxdFreq = previousRfFxdFreq;
+    ELECHOUSE_cc1101.setSidle();
+    ELECHOUSE_cc1101.SpiWriteReg(CC1101_MCSM0, WF_MCSM0_DEFAULT);
     deinitRfModule();
     plot.end();
     delay(10);
