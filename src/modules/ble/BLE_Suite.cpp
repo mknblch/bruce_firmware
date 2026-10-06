@@ -758,6 +758,13 @@ const FastPairModelInfo fastpair_models[] = {
 //=============================================================================
 
 bool BLEStateManager::initBLE(const String &name, int powerLevel) {
+    if (!bleLifecycleLock()) return false;
+
+    if (bleInitialized) {
+        bleLifecycleUnlock();
+        return true;
+    }
+
     if (FORCE_RADIO_TEARDOWN_ON_SWITCH) {
         if (WiFi.getMode() != WIFI_MODE_NULL || wifiConnected) {
             if (wifiConnected) {
@@ -771,6 +778,7 @@ bool BLEStateManager::initBLE(const String &name, int powerLevel) {
 
     if (!radioHasMemForBle()) {
         displayError("Low RAM: free WiFi/SD first", true);
+        bleLifecycleUnlock();
         return false;
     }
 
@@ -780,17 +788,23 @@ bool BLEStateManager::initBLE(const String &name, int powerLevel) {
 
     currentDeviceName = name;
     bleInitialized = true;
+    bleLifecycleUnlock();
     return true;
 }
 
 void BLEStateManager::deinitBLE(bool immediate) {
-    if (!bleInitialized) return;
+    if (!bleLifecycleLock()) return;
+    if (!bleInitialized) {
+        bleLifecycleUnlock();
+        return;
+    }
     if (immediate) cleanupAllClients();
     NimBLEDevice::deinit(true);
     bleInitialized = false;
     currentDeviceName = "";
     g_pBLEScan = nullptr;
     g_bleScanActive = false;
+    bleLifecycleUnlock();
 }
 
 void BLEStateManager::registerClient(NimBLEClient *client) {

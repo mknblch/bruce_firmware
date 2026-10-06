@@ -43,6 +43,8 @@ constexpr bool FORCE_RADIO_TEARDOWN_ON_SWITCH = false;
 bool ble_scan_setup();
 void ble_scan();
 void stopBLEStack();
+bool bleLifecycleLock(TickType_t timeout = pdMS_TO_TICKS(5000));
+void bleLifecycleUnlock();
 
 bool bleNotifyRetry(NimBLECharacteristic *chr, const uint8_t *value, size_t length, uint8_t retries = 8);
 bool bleNotifyRetry(NimBLECharacteristic *chr, uint8_t retries = 8);

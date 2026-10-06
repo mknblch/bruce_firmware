@@ -89,24 +89,41 @@ class AdvertisedDeviceCallbacks : public NimBLEScanCallbacks {};
 static AdvertisedDeviceCallbacks g_scanCallbacks;
 
 static bool is_ble_inited = false;
+static SemaphoreHandle_t g_bleLifecycleMutex = nullptr;
+
+bool bleLifecycleLock(TickType_t timeout) {
+    if (!g_bleLifecycleMutex) {
+        g_bleLifecycleMutex = xSemaphoreCreateRecursiveMutex();
+    }
+    return g_bleLifecycleMutex && xSemaphoreTakeRecursive(g_bleLifecycleMutex, timeout) == pdTRUE;
+}
+
+void bleLifecycleUnlock() {
+    if (g_bleLifecycleMutex) xSemaphoreGiveRecursive(g_bleLifecycleMutex);
+}
 
 void stopBLEStack() {
+    if (!bleLifecycleLock()) return;
+
     if (pBLEScan) {
         pBLEScan->stop();
         pBLEScan->clearResults();
         pBLEScan = nullptr;
     }
 
-    if (is_ble_inited) {
+#if !defined(LITE_VERSION)
+    if (BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0
+#else
+    if (is_ble_inited
+#endif
+        || BLEDevice::getScan() != nullptr || BLEDevice::getAdvertising() != nullptr
+        || BLEDevice::getServer() != nullptr || BLEConnected) {
 #if !defined(LITE_VERSION)
         if (BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0) {
             BLEStateManager::deinitBLE(true);
         } else
 #endif
-            if (BLEDevice::getScan() != nullptr || BLEDevice::getAdvertising() != nullptr ||
-                BLEDevice::getServer() != nullptr || BLEConnected) {
             BLEDevice::deinit();
-        }
     }
 
     pServer = nullptr;
@@ -124,9 +141,13 @@ void stopBLEStack() {
         hid_ble = nullptr;
     }
 #endif
+
+    bleLifecycleUnlock();
 }
 
 bool ble_scan_setup() {
+    if (!bleLifecycleLock()) return false;
+
     if (FORCE_RADIO_TEARDOWN_ON_SWITCH) {
         if (WiFi.getMode() != WIFI_MODE_NULL || wifiConnected) {
             wifiDisconnect();
@@ -143,16 +164,27 @@ bool ble_scan_setup() {
     if (!radioHasMemForBle()) {
         displayError("Low RAM: free WiFi/SD first", true);
         returnToMenu = true;
+        bleLifecycleUnlock();
         return false;
     }
 
+#if !defined(LITE_VERSION)
+    if (!BLEStateManager::initBLE("Bruce-Scan", ESP_PWR_LVL_P9)) {
+        bleLifecycleUnlock();
+        return false;
+    }
+#else
     BLEDevice::init("");
+#endif
+#if defined(LITE_VERSION)
     is_ble_inited = true;
+#endif
 
     RAM_LOG("ble-scan post-init");
     pBLEScan = BLEDevice::getScan();
     if (!pBLEScan) {
         displayError("Failed to get scan object", true);
+        stopBLEStack();
         return false;
     }
 
@@ -175,6 +207,7 @@ bool ble_scan_setup() {
         sta_mac[5]
     );
     vTaskDelay(100 / portTICK_PERIOD_MS);
+    bleLifecycleUnlock();
     return true;
 }
 

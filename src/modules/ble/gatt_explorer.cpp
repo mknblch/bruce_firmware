@@ -34,13 +34,17 @@ enum GattFilterMode {
     FILTER_CUSTOM_128,
 };
 
+enum GattScanType {
+    SCAN_PASSIVE = 0,
+    SCAN_ACTIVE,
+    SCAN_BOTH
+};
+
 struct GattSettings {
     int minRssi = -100;        // -100 (All), -85, -75, -65
     int timeoutSec = 3;       // 3, 5, 8, 12, 15
-    int scanRespTimeout = 100;  // 0 (Off), 50, 100, 250, 500 ms
-    bool includeOnDiscovered = true; // false (onResult only), true (include onDiscovered)
+    int scanType = SCAN_PASSIVE; // 0: Passive, 1: Active, 2: Both
     int addrTypeFilter = 0;   // 0: Any, 1: Public only, 2: Random only
-    int maxDevices = 60;      // Ring buffer capacity: 20, 40, 60, 80
 };
 
 struct GattScannedDevice {
@@ -788,8 +792,22 @@ static void runContinuousScan(GattFilterMode filterMode) {
     g_currentFilter = filterMode;
     g_gattScanState.reset(filterMode);
 
+    // Randomize own MAC address once per scan to avoid being tracked by peripherals
+    uint8_t randomAddr[6];
+    esp_fill_random(randomAddr, sizeof(randomAddr));
+    randomAddr[0] &= 0xFE; // clear broadcast bit
+    randomAddr[0] |= 0xC0; // set non-resolvable private random address bits
+    ble_addr_t addr_le;
+    for (int i = 0; i < 6; i++) addr_le.val[i] = randomAddr[i];
+    addr_le.type = BLE_ADDR_RANDOM;
+    ble_hs_id_set_rnd(addr_le.val);
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+
     pBLEScan->setScanCallbacks(&g_gattScanCallbacks, true);
-    pBLEScan->setActiveScan(false); // passive: captures all devices safely and reliably without transmitting
+
+    // Apply scan type from settings: Passive (safe, no TX), Active (requests scan responses), Both (cycles)
+    bool activeScan = (g_gattSettings.scanType == SCAN_ACTIVE || g_gattSettings.scanType == SCAN_BOTH);
+    pBLEScan->setActiveScan(activeScan);
     pBLEScan->setInterval(100);
     pBLEScan->setWindow(99);
     pBLEScan->setDuplicateFilter(false);
@@ -911,7 +929,9 @@ static void runContinuousScan(GattFilterMode filterMode) {
             if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
                 uiCount = g_gattScanState.count;
                 uiPackets = g_gattScanState.totalPackets;
-                memcpy(uiDevices, g_gattScanState.devices, uiCount * sizeof(GattScannedDevice));
+                for (size_t i = 0; i < uiCount; i++) {
+                    uiDevices[i] = g_gattScanState.devices[i];
+                }
                 xSemaphoreGive(g_gattScanState.mutex);
             }
             needsRedraw = true;
@@ -1041,6 +1061,9 @@ static void runContinuousScan(GattFilterMode filterMode) {
         pBLEScan->setScanCallbacks(nullptr);
     }
     g_scanActive = false;
+
+    // Restore public address to avoid breaking other BLE features
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
 
     // Synchronize g_discoveredDevices for Auto-Dump and external callers
     g_discoveredDevices.clear();
@@ -2024,41 +2047,20 @@ void gattSettingsMenu() {
             else g_gattSettings.timeoutSec = 3;
         }});
 
-        String respToLabel = "3. Resp Timeout: " + ((g_gattSettings.scanRespTimeout == 0) ? String("Off (0ms)") : String(g_gattSettings.scanRespTimeout) + " ms");
-        setOptions.push_back({respToLabel, []() {
-            if (g_gattSettings.scanRespTimeout == 0) g_gattSettings.scanRespTimeout = 50;
-            else if (g_gattSettings.scanRespTimeout == 50) g_gattSettings.scanRespTimeout = 100;
-            else if (g_gattSettings.scanRespTimeout == 100) g_gattSettings.scanRespTimeout = 250;
-            else if (g_gattSettings.scanRespTimeout == 250) g_gattSettings.scanRespTimeout = 500;
-            else g_gattSettings.scanRespTimeout = 0;
+        String scanTypeLabel = "3. Scan Type: ";
+        if (g_gattSettings.scanType == SCAN_PASSIVE) scanTypeLabel += "Passive";
+        else if (g_gattSettings.scanType == SCAN_ACTIVE) scanTypeLabel += "Active";
+        else scanTypeLabel += "Both";
+        setOptions.push_back({scanTypeLabel, []() {
+            g_gattSettings.scanType = (g_gattSettings.scanType + 1) % 3;
         }});
 
-        String discLabel = "4. Inc onDiscovered: " + String(g_gattSettings.includeOnDiscovered ? "Yes" : "No");
-        setOptions.push_back({discLabel, []() {
-            g_gattSettings.includeOnDiscovered = !g_gattSettings.includeOnDiscovered;
-        }});
-
-        String addrLabel = "5. Addr Type: ";
+        String addrLabel = "4. Addr Type: ";
         if (g_gattSettings.addrTypeFilter == 0) addrLabel += "Any";
         else if (g_gattSettings.addrTypeFilter == 1) addrLabel += "Public Only";
         else addrLabel += "Random Only";
         setOptions.push_back({addrLabel, []() {
             g_gattSettings.addrTypeFilter = (g_gattSettings.addrTypeFilter + 1) % 3;
-        }});
-
-        String maxLabel = "6. Max Devices (RSSI): " + String(g_gattSettings.maxDevices) + " dev";
-        setOptions.push_back({maxLabel, []() {
-            if (g_gattSettings.maxDevices == 20) g_gattSettings.maxDevices = 40;
-            else if (g_gattSettings.maxDevices == 40) g_gattSettings.maxDevices = 60;
-            else if (g_gattSettings.maxDevices == 60) g_gattSettings.maxDevices = 80;
-            else g_gattSettings.maxDevices = 20;
-
-            if (g_discoveredDevices.size() > (size_t)g_gattSettings.maxDevices) {
-                std::sort(g_discoveredDevices.begin(), g_discoveredDevices.end(), [](const GattScannedDevice &a, const GattScannedDevice &b) {
-                    return a.rssi > b.rssi;
-                });
-                g_discoveredDevices.resize(g_gattSettings.maxDevices);
-            }
         }});
 
         setOptions.push_back({"< Back to GATT Menu", []() {}});
