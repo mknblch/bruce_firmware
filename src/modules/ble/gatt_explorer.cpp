@@ -64,7 +64,7 @@ struct GattScannedDevice {
 // State
 //=============================================================================
 
-constexpr size_t GATT_MAX_SCAN_DEVICES = 40;
+constexpr size_t GATT_MAX_SCAN_DEVICES = 50;
 
 struct GattScannerState {
     GattScannedDevice devices[GATT_MAX_SCAN_DEVICES];
@@ -475,17 +475,21 @@ private:
                 strncpy(name, dName.c_str(), sizeof(name) - 1);
             }
         }
-        if (dev->haveManufacturerData()) {
+        // A public address has a stable hardware OUI, unlike manufacturer data,
+        // which only identifies the owner of a particular advertisement payload.
+        // Prefer the OUI so generic Apple advertisements do not mask the actual
+        // public-address vendor. The embedded lookup is callback-safe and instant.
+        if (addrType == BLE_ADDR_PUBLIC) {
+            const char *oui = getBleOuiNameFromMacBytes(devVal);
+            if (oui) strncpy(vendor, oui, sizeof(vendor) - 1);
+        }
+        if (vendor[0] == '\0' && dev->haveManufacturerData()) {
             std::string mfg = dev->getManufacturerData();
             if (mfg.length() >= 2) {
                 uint16_t companyId = (uint8_t)mfg[0] | ((uint16_t)(uint8_t)mfg[1] << 8);
                 const char *comp = getBleCompanyIdName(companyId);
                 if (comp) strncpy(vendor, comp, sizeof(vendor) - 1);
             }
-        }
-        if (vendor[0] == '\0' && addrType == BLE_ADDR_PUBLIC) {
-            const char *oui = getBleOuiNameFromMacBytes(devVal);
-            if (oui) strncpy(vendor, oui, sizeof(vendor) - 1);
         }
 
         // Try-take mutex with 0 timeout so NimBLE host task is never blocked
@@ -2203,7 +2207,7 @@ void gattScanCli(int timeoutSec) {
     if (timeoutSec <= 0) timeoutSec = 5;
     Serial.printf("[BLE-CLI] Starting %d-second scan for connectable GATT devices...\n", timeoutSec);
 
-    BLEStateManager::initBLE("Bruce-GATT-Scan", ESP_PWR_LVL_P9);
+    BLEStateManager::initBLE("GATT", ESP_PWR_LVL_P9);
     NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
 
     NimBLEScan *pScan = NimBLEDevice::getScan();

@@ -2,7 +2,7 @@
 """
 transform_company_ids.py - Transform Bluetooth SIG company_ids.json into multiple formats:
   1. C++ Header / PROGMEM array (for direct compilation into firmware)
-  2. Binary Database (company_ids.bin) for SD card / LittleFS with O(log N) binary search
+  2. Binary Database (oui.bin) for SD card / LittleFS with O(log N) binary search
   3. Text Database (company_ids.txt) for SD card / LittleFS
 """
 
@@ -120,7 +120,7 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
     cpp_out = os.path.join(args.outdir, "ble_company_ids_data.h")
-    bin_out = os.path.join(args.outdir, "company_ids.bin")
+    bin_out = os.path.join(args.outdir, "oui.bin")
     txt_out = os.path.join(args.outdir, "company_ids.txt")
 
     generate_cpp_header(entries, cpp_out)

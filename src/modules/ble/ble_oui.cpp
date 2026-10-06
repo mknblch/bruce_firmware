@@ -324,6 +324,8 @@ static const char *const OUI_BIN_PATHS[] = {
     "/oui.bin",
     "/ChimeraBLE/oui.bin",
     "/sdcard/oui.bin",
+    "oui.bin",
+    "sdcard/oui.bin",
 };
 static const size_t OUI_BIN_PATHS_COUNT = sizeof(OUI_BIN_PATHS) / sizeof(OUI_BIN_PATHS[0]);
 
