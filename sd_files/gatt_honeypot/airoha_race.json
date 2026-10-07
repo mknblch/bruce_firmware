@@ -1,0 +1,75 @@
+{
+  "name": "Airoha RACE Device",
+  "mac": "94:DB:56:AB:CD:EF",
+  "mac_type": "public",
+  "services": [
+    {
+      "uuid": "180A",
+      "characteristics": [
+        {
+          "uuid": "2A29",
+          "properties": ["read"],
+          "value": "Airoha Technology"
+        },
+        {
+          "uuid": "2A24",
+          "properties": ["read"],
+          "value": "AB1562A"
+        },
+        {
+          "uuid": "2A25",
+          "properties": ["read"],
+          "value": "001B66814A2C"
+        },
+        {
+          "uuid": "2A26",
+          "properties": ["read"],
+          "value": "2.5.0"
+        },
+        {
+          "uuid": "2A27",
+          "properties": ["read"],
+          "value": "v1.0"
+        },
+        {
+          "uuid": "2A28",
+          "properties": ["read"],
+          "value": "SDK-2.5.1"
+        }
+      ]
+    },
+    {
+      "uuid": "180F",
+      "characteristics": [
+        {
+          "uuid": "2A19",
+          "properties": ["read", "notify"],
+          "value": "5A",
+          "is_hex": true
+        }
+      ]
+    },
+    {
+      "uuid": "5052494D-2DAB-0341-6972-6F6861424C45",
+      "characteristics": [
+        {
+          "uuid": "43484152-2DAB-3241-6972-6F6861424C45",
+          "properties": ["write", "write_nr"],
+          "value": ""
+        },
+        {
+          "uuid": "43484152-2DAB-3141-6972-6F6861424C45",
+          "properties": ["read", "notify", "indicate"],
+          "value": "055B02000000",
+          "is_hex": true
+        },
+        {
+          "uuid": "43484152-2DAB-3041-6972-6F6861424C45",
+          "properties": ["read", "notify"],
+          "value": "055B02000000",
+          "is_hex": true
+        }
+      ]
+    }
+  ]
+}

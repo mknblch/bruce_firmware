@@ -10,6 +10,7 @@
 #include "modules/ble/BLE_Suite.h"
 #include "modules/ble/gatt_explorer.h"
 #include "modules/ble/gatt_server.h"
+#include "modules/ble/gatt_honeypot.h"
 #include "modules/ble/race_client.h"
 #else
 #include "modules/ble/ble_sniffer.h"
@@ -39,6 +40,7 @@ void BleMenu::optionsMenu() {
         localOptions.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
         localOptions.push_back({"GATT Explorer", gattExplorerMenu});
         localOptions.push_back({"GATT Server", gattServerMenu});
+        localOptions.push_back({"GATT Honeypot", gattHoneypotMenu});
         localOptions.push_back({"RACE Client", raceMainMenu});
         localOptions.push_back({"iBeacon", [=]() {
                                    ibeacon("Bruce", "e4c159a0-8c82-11e6-bdf4-0800200c9a66", 0x004C);

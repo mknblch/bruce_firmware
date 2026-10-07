@@ -1,0 +1,1331 @@
+#if !defined(LITE_VERSION)
+
+#include "gatt_honeypot.h"
+#include "BLE_Suite.h"
+#include "gatt_explorer.h"
+#include "core/display.h"
+#include "core/mykeyboard.h"
+#include "core/sd_functions.h"
+#include "core/scrollableTextArea.h"
+#include "core/utils.h"
+#include <NimBLEDevice.h>
+#include <globals.h>
+#include <esp_mac.h>
+#include <ArduinoJson.h>
+#include <LittleFS.h>
+#include <SD.h>
+#include <vector>
+#include <deque>
+#include <memory>
+#include <algorithm>
+
+//=============================================================================
+// Data Structures
+//=============================================================================
+
+struct HoneypotCharacteristicDef {
+    String uuid;
+    uint32_t properties = 0;
+    std::vector<uint8_t> readValue;
+    String rawValueStr;
+    bool isHex = false;
+    NimBLECharacteristic *pNimChar = nullptr;
+};
+
+struct HoneypotServiceDef {
+    String uuid;
+    std::vector<HoneypotCharacteristicDef> characteristics;
+};
+
+struct HoneypotDeviceDef {
+    String name;
+    String mac;
+    bool isRandomMac = false;
+    std::vector<HoneypotServiceDef> services;
+};
+
+struct HoneypotState {
+    volatile bool isRunning = false;
+    volatile bool isConnected = false;
+    char peerAddress[20] = "None";
+    uint16_t peerMtu = 23;
+    uint32_t connCount = 0;
+    uint32_t readCount = 0;
+    uint32_t writeCount = 0;
+    uint32_t subCount = 0;
+    char lastWritePayload[64] = "";
+    std::deque<String> logLines;
+    StaticSemaphore_t logMutexBuf;
+    SemaphoreHandle_t logMutex = nullptr;
+
+    HoneypotDeviceDef activeDevice;
+
+    void initMutex() {
+        if (!logMutex) {
+            logMutex = xSemaphoreCreateMutexStatic(&logMutexBuf);
+        }
+    }
+
+    void addLog(const String &msg) {
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            logLines.push_back(msg);
+            while (logLines.size() > 40) {
+                logLines.pop_front();
+            }
+            xSemaphoreGive(logMutex);
+        }
+    }
+
+    void setPeer(const char *addr, uint16_t mtu) {
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (addr) {
+                strncpy(peerAddress, addr, sizeof(peerAddress) - 1);
+                peerAddress[sizeof(peerAddress) - 1] = '\0';
+            } else {
+                strcpy(peerAddress, "None");
+            }
+            peerMtu = mtu;
+            xSemaphoreGive(logMutex);
+        }
+    }
+
+    void getPeer(char *outAddr, size_t maxLen, uint16_t *outMtu = nullptr) {
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (outAddr && maxLen > 0) {
+                strncpy(outAddr, peerAddress, maxLen - 1);
+                outAddr[maxLen - 1] = '\0';
+            }
+            if (outMtu) *outMtu = peerMtu;
+            xSemaphoreGive(logMutex);
+        }
+    }
+
+    void setLastWrite(const char *val) {
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (val) {
+                strncpy(lastWritePayload, val, sizeof(lastWritePayload) - 1);
+                lastWritePayload[sizeof(lastWritePayload) - 1] = '\0';
+            } else {
+                lastWritePayload[0] = '\0';
+            }
+            xSemaphoreGive(logMutex);
+        }
+    }
+
+    void reset() {
+        isRunning = false;
+        isConnected = false;
+        connCount = 0;
+        readCount = 0;
+        writeCount = 0;
+        subCount = 0;
+        initMutex();
+        if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            strcpy(peerAddress, "None");
+            peerMtu = 23;
+            lastWritePayload[0] = '\0';
+            logLines.clear();
+            xSemaphoreGive(logMutex);
+        }
+    }
+};
+
+static HoneypotState g_hpState;
+
+//=============================================================================
+// Helper Functions: Hex & MAC parsing
+//=============================================================================
+
+static std::vector<uint8_t> parseHexStringToBytes(const String &hexStr) {
+    std::vector<uint8_t> bytes;
+    String cleanHex = hexStr;
+    cleanHex.replace(" ", "");
+    cleanHex.replace("0x", "");
+    cleanHex.replace("0X", "");
+    cleanHex.replace("hex:", "");
+    cleanHex.replace("HEX:", "");
+    cleanHex.replace(":", "");
+    cleanHex.replace("-", "");
+
+    for (size_t i = 0; i + 1 < cleanHex.length(); i += 2) {
+        String bytePart = cleanHex.substring(i, i + 2);
+        uint8_t b = (uint8_t)strtoul(bytePart.c_str(), nullptr, 16);
+        bytes.push_back(b);
+    }
+    return bytes;
+}
+
+static bool parseMacBytes(const String &macStr, uint8_t mac[6]) {
+    if (macStr.isEmpty()) return false;
+    std::vector<uint8_t> b = parseHexStringToBytes(macStr);
+    if (b.size() == 6) {
+        for (int i = 0; i < 6; i++) {
+            mac[i] = b[i];
+        }
+        return true;
+    }
+    return false;
+}
+
+static String bytesToHexString(const uint8_t *data, size_t len, size_t maxBytes = 16) {
+    if (!data || len == 0) return "";
+    String hex = "";
+    size_t count = (len > maxBytes) ? maxBytes : len;
+    for (size_t i = 0; i < count; i++) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X ", data[i]);
+        hex += buf;
+    }
+    if (len > maxBytes) hex += "..";
+    hex.trim();
+    return hex;
+}
+
+static String shortUuidStr(const String &uuidStr) {
+    if (uuidStr.length() > 8 && uuidStr.startsWith("0000") && uuidStr.indexOf("-0000-1000-8000-00805f9b34fb") != -1) {
+        return uuidStr.substring(4, 8);
+    }
+    if (uuidStr.length() > 8) {
+        return uuidStr.substring(0, 8) + "..";
+    }
+    return uuidStr;
+}
+
+//=============================================================================
+// JSON Parsing & Built-in Presets
+//=============================================================================
+
+static uint32_t parseProperties(JsonVariant propVar) {
+    uint32_t props = 0;
+    if (propVar.is<JsonArray>()) {
+        for (JsonVariant v : propVar.as<JsonArray>()) {
+            String p = v.as<String>();
+            p.toLowerCase();
+            p.trim();
+            if (p == "read") props |= NIMBLE_PROPERTY::READ;
+            else if (p == "write") props |= NIMBLE_PROPERTY::WRITE;
+            else if (p == "write_nr" || p == "write_no_response" || p == "writenr") props |= NIMBLE_PROPERTY::WRITE_NR;
+            else if (p == "notify") props |= NIMBLE_PROPERTY::NOTIFY;
+            else if (p == "indicate") props |= NIMBLE_PROPERTY::INDICATE;
+            else if (p == "broadcast") props |= NIMBLE_PROPERTY::BROADCAST;
+            else if (p == "read_enc" || p == "read_auth") props |= NIMBLE_PROPERTY::READ_ENC;
+            else if (p == "write_enc" || p == "write_auth") props |= NIMBLE_PROPERTY::WRITE_ENC;
+        }
+    } else if (propVar.is<const char *>()) {
+        String pStr = propVar.as<String>();
+        pStr.toLowerCase();
+        if (pStr.indexOf("read") != -1) props |= NIMBLE_PROPERTY::READ;
+        if (pStr.indexOf("write_nr") != -1 || pStr.indexOf("writenr") != -1) props |= NIMBLE_PROPERTY::WRITE_NR;
+        else if (pStr.indexOf("write") != -1) props |= NIMBLE_PROPERTY::WRITE;
+        if (pStr.indexOf("notify") != -1) props |= NIMBLE_PROPERTY::NOTIFY;
+        if (pStr.indexOf("indicate") != -1) props |= NIMBLE_PROPERTY::INDICATE;
+        if (pStr.indexOf("broadcast") != -1) props |= NIMBLE_PROPERTY::BROADCAST;
+    } else if (propVar.is<uint32_t>()) {
+        props = propVar.as<uint32_t>();
+    }
+    return props;
+}
+
+static bool parseHoneypotJson(const String &jsonContent, HoneypotDeviceDef &outDevice) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, jsonContent);
+    if (err) {
+        Serial.printf("[HONEYPOT-JSON] Parse error: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonObject root;
+    if (doc.is<JsonObject>()) {
+        root = doc.as<JsonObject>();
+        if (root["presets"].is<JsonArray>() && root["presets"].as<JsonArray>().size() > 0) {
+            root = root["presets"][0].as<JsonObject>();
+        }
+    } else if (doc.is<JsonArray>() && doc.as<JsonArray>().size() > 0) {
+        root = doc[0].as<JsonObject>();
+    } else {
+        return false;
+    }
+
+    outDevice.services.clear();
+    outDevice.name = root["name"].as<String>();
+    outDevice.mac = root["mac"].as<String>();
+    if (outDevice.name.isEmpty() || outDevice.mac.isEmpty()) return false;
+
+    String macType = root["mac_type"].as<String>();
+    if (macType.isEmpty()) macType = root["addr_type"].as<String>();
+    if (macType.isEmpty()) macType = root["type"].as<String>();
+    macType.toLowerCase();
+
+    outDevice.isRandomMac = (macType == "random" || macType == "rnd" || macType == "rand");
+
+    JsonArray servicesArr = root["services"].as<JsonArray>();
+    for (JsonObject svcObj : servicesArr) {
+        HoneypotServiceDef sDef;
+        sDef.uuid = svcObj["uuid"].as<String>();
+        if (sDef.uuid.isEmpty()) continue;
+
+        JsonArray charsArr = svcObj["characteristics"].as<JsonArray>();
+        if (charsArr.isNull()) {
+            charsArr = svcObj["attributes"].as<JsonArray>();
+        }
+
+        for (JsonObject charObj : charsArr) {
+            HoneypotCharacteristicDef cDef;
+            cDef.uuid = charObj["uuid"].as<String>();
+            if (cDef.uuid.isEmpty()) continue;
+
+            cDef.properties = parseProperties(charObj["properties"]);
+            if (cDef.properties == 0) {
+                cDef.properties = parseProperties(charObj["props"]);
+            }
+
+            bool isHex = charObj["is_hex"].as<bool>() || charObj["hex"].as<bool>();
+            String valStr = charObj["value"].as<String>();
+            if (valStr.isEmpty()) {
+                valStr = charObj["read_value"].as<String>();
+            }
+            if (valStr.isEmpty() && charObj["hex_value"].is<const char *>()) {
+                valStr = charObj["hex_value"].as<String>();
+                isHex = true;
+            }
+
+            cDef.rawValueStr = valStr;
+            cDef.isHex = isHex;
+
+            if (valStr.startsWith("0x") || valStr.startsWith("0X") || valStr.startsWith("hex:")) {
+                isHex = true;
+                cDef.isHex = true;
+            }
+
+            if (isHex && !valStr.isEmpty()) {
+                cDef.readValue = parseHexStringToBytes(valStr);
+            } else if (!valStr.isEmpty()) {
+                cDef.readValue.assign(valStr.c_str(), valStr.c_str() + valStr.length());
+            }
+
+            if (cDef.properties == 0) {
+                cDef.properties = NIMBLE_PROPERTY::READ;
+            }
+
+            sDef.characteristics.push_back(cDef);
+        }
+
+        outDevice.services.push_back(sDef);
+    }
+
+    return (!outDevice.services.empty());
+}
+
+static HoneypotDeviceDef getBuiltinAirohaRacePreset() {
+    HoneypotDeviceDef d;
+    d.name = "Airoha RACE Device";
+    d.mac = "94:DB:56:AB:CD:EF";
+    d.isRandomMac = false;
+
+    // 1. Device Information Service (0x180A)
+    HoneypotServiceDef disSvc;
+    disSvc.uuid = "180A";
+
+    auto addDisChar = [&disSvc](const char *uuid, const char *val) {
+        HoneypotCharacteristicDef c;
+        c.uuid = uuid;
+        c.properties = NIMBLE_PROPERTY::READ;
+        c.rawValueStr = val;
+        c.isHex = false;
+        c.readValue.assign(val, val + strlen(val));
+        disSvc.characteristics.push_back(c);
+    };
+
+    addDisChar("2A29", "Airoha Technology"); // Manufacturer Name
+    addDisChar("2A24", "AB1562A");           // Model Number
+    addDisChar("2A25", "001B66814A2C");      // Serial Number
+    addDisChar("2A26", "2.5.0");             // Firmware Revision
+    addDisChar("2A27", "v1.0");              // Hardware Revision
+    addDisChar("2A28", "SDK-2.5.1");         // Software Revision
+    d.services.push_back(disSvc);
+
+    // 2. Battery Service (0x180F)
+    HoneypotServiceDef batSvc;
+    batSvc.uuid = "180F";
+    HoneypotCharacteristicDef batChar;
+    batChar.uuid = "2A19";
+    batChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY;
+    batChar.rawValueStr = "5A";
+    batChar.isHex = true;
+    batChar.readValue.push_back(0x5A); // 90%
+    batSvc.characteristics.push_back(batChar);
+    d.services.push_back(batSvc);
+
+    // 3. Airoha Standard RACE GATT Service (CVE-2025-20700 & CVE-2025-20701 target)
+    HoneypotServiceDef raceSvc;
+    raceSvc.uuid = "5052494D-2DAB-0341-6972-6F6861424C45";
+
+    // TX Characteristic (Write / Write Without Response)
+    HoneypotCharacteristicDef txChar;
+    txChar.uuid = "43484152-2DAB-3241-6972-6F6861424C45";
+    txChar.properties = NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR;
+    txChar.rawValueStr = "";
+    raceSvc.characteristics.push_back(txChar);
+
+    // RX Characteristic (Read / Notify / Indicate)
+    // Response payload simulating RACE return code 0x00 (SUCCESS)
+    HoneypotCharacteristicDef rxChar;
+    rxChar.uuid = "43484152-2DAB-3141-6972-6F6861424C45";
+    rxChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::INDICATE;
+    rxChar.rawValueStr = "055B02000000";
+    rxChar.isHex = true;
+    rxChar.readValue = { 0x05, 0x5B, 0x02, 0x00, 0x00, 0x00 };
+    raceSvc.characteristics.push_back(rxChar);
+
+    // RX Alt Characteristic (Read / Notify)
+    HoneypotCharacteristicDef rxAltChar;
+    rxAltChar.uuid = "43484152-2DAB-3041-6972-6F6861424C45";
+    rxAltChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY;
+    rxAltChar.rawValueStr = "055B02000000";
+    rxAltChar.isHex = true;
+    rxAltChar.readValue = { 0x05, 0x5B, 0x02, 0x00, 0x00, 0x00 };
+    raceSvc.characteristics.push_back(rxAltChar);
+
+    d.services.push_back(raceSvc);
+    return d;
+}
+
+static HoneypotDeviceDef getBuiltinSonyRacePreset() {
+    HoneypotDeviceDef d;
+    d.name = "WH-1000XM4";
+    d.mac = "00:1B:66:81:4A:2C";
+    d.isRandomMac = false;
+
+    // Device Information
+    HoneypotServiceDef disSvc;
+    disSvc.uuid = "180A";
+
+    auto addDisChar = [&disSvc](const char *uuid, const char *val) {
+        HoneypotCharacteristicDef c;
+        c.uuid = uuid;
+        c.properties = NIMBLE_PROPERTY::READ;
+        c.rawValueStr = val;
+        c.isHex = false;
+        c.readValue.assign(val, val + strlen(val));
+        disSvc.characteristics.push_back(c);
+    };
+
+    addDisChar("2A29", "Sony Corporation");
+    addDisChar("2A24", "WH-1000XM4");
+    addDisChar("2A25", "001B66814A2C");
+    addDisChar("2A26", "2.5.0");
+    addDisChar("2A27", "v1.0");
+    addDisChar("2A28", "SDK-2.5.1");
+    d.services.push_back(disSvc);
+
+    // Battery Service
+    HoneypotServiceDef batSvc;
+    batSvc.uuid = "180F";
+    HoneypotCharacteristicDef batChar;
+    batChar.uuid = "2A19";
+    batChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY;
+    batChar.rawValueStr = "5F";
+    batChar.isHex = true;
+    batChar.readValue.push_back(0x5F); // 95%
+    batSvc.characteristics.push_back(batChar);
+    d.services.push_back(batSvc);
+
+    // Sony Vendor RACE Service
+    HoneypotServiceDef sonySvc;
+    sonySvc.uuid = "dc405470-a351-4a59-97d8-2e2e3b207fbb";
+
+    HoneypotCharacteristicDef txChar;
+    txChar.uuid = "bfd869fa-a3f2-4c2f-bcff-3eb1ec80cead";
+    txChar.properties = NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR;
+    txChar.rawValueStr = "";
+    sonySvc.characteristics.push_back(txChar);
+
+    HoneypotCharacteristicDef rxChar;
+    rxChar.uuid = "2a6b6575-faf6-418c-923f-ccd63a56d955";
+    rxChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::INDICATE;
+    rxChar.rawValueStr = "055B02000000";
+    rxChar.isHex = true;
+    rxChar.readValue = { 0x05, 0x5B, 0x02, 0x00, 0x00, 0x00 };
+    sonySvc.characteristics.push_back(rxChar);
+
+    d.services.push_back(sonySvc);
+    return d;
+}
+
+static HoneypotDeviceDef getBuiltinAiroha16BitPreset() {
+    HoneypotDeviceDef d;
+    d.name = "Airoha Headset";
+    d.mac = "4C:65:A8:12:34:56";
+    d.isRandomMac = true;
+
+    HoneypotServiceDef disSvc;
+    disSvc.uuid = "180A";
+    HoneypotCharacteristicDef mfgChar;
+    mfgChar.uuid = "2A29";
+    mfgChar.properties = NIMBLE_PROPERTY::READ;
+    mfgChar.rawValueStr = "Airoha";
+    mfgChar.readValue.assign("Airoha", "Airoha" + 6);
+    disSvc.characteristics.push_back(mfgChar);
+    d.services.push_back(disSvc);
+
+    HoneypotServiceDef fef0Svc;
+    fef0Svc.uuid = "0000fef0-0000-1000-8000-00805f9b34fb";
+
+    HoneypotCharacteristicDef txChar;
+    txChar.uuid = "0000fef1-0000-1000-8000-00805f9b34fb";
+    txChar.properties = NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR;
+    fef0Svc.characteristics.push_back(txChar);
+
+    HoneypotCharacteristicDef rxChar;
+    rxChar.uuid = "0000fef2-0000-1000-8000-00805f9b34fb";
+    rxChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY;
+    rxChar.rawValueStr = "055B02000000";
+    rxChar.isHex = true;
+    rxChar.readValue = { 0x05, 0x5B, 0x02, 0x00, 0x00, 0x00 };
+    fef0Svc.characteristics.push_back(rxChar);
+
+    d.services.push_back(fef0Svc);
+    return d;
+}
+
+static HoneypotDeviceDef getBuiltinSmartLockPreset() {
+    HoneypotDeviceDef d;
+    d.name = "SmartLock-Pro-92";
+    d.mac = "A4:C1:38:99:88:77";
+    d.isRandomMac = false;
+
+    HoneypotServiceDef disSvc;
+    disSvc.uuid = "180A";
+    HoneypotCharacteristicDef mfgChar;
+    mfgChar.uuid = "2A29";
+    mfgChar.properties = NIMBLE_PROPERTY::READ;
+    mfgChar.rawValueStr = "SmartSecurity Inc";
+    mfgChar.readValue.assign("SmartSecurity Inc", "SmartSecurity Inc" + 17);
+    disSvc.characteristics.push_back(mfgChar);
+
+    HoneypotCharacteristicDef modelChar;
+    modelChar.uuid = "2A24";
+    modelChar.properties = NIMBLE_PROPERTY::READ;
+    modelChar.rawValueStr = "SL-9200";
+    modelChar.readValue.assign("SL-9200", "SL-9200" + 7);
+    disSvc.characteristics.push_back(modelChar);
+    d.services.push_back(disSvc);
+
+    HoneypotServiceDef lockSvc;
+    lockSvc.uuid = "0000ffe0-0000-1000-8000-00805f9b34fb";
+
+    HoneypotCharacteristicDef authChar;
+    authChar.uuid = "0000ffe1-0000-1000-8000-00805f9b34fb";
+    authChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE;
+    authChar.rawValueStr = "41444D494E"; // "ADMIN"
+    authChar.isHex = true;
+    authChar.readValue = { 'A', 'D', 'M', 'I', 'N' };
+    lockSvc.characteristics.push_back(authChar);
+
+    HoneypotCharacteristicDef stateChar;
+    stateChar.uuid = "0000ffe2-0000-1000-8000-00805f9b34fb";
+    stateChar.properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY;
+    stateChar.rawValueStr = "01"; // Locked
+    stateChar.isHex = true;
+    stateChar.readValue = { 0x01 };
+    lockSvc.characteristics.push_back(stateChar);
+
+    d.services.push_back(lockSvc);
+    return d;
+}
+
+static String serializeHoneypotDeviceToJson(const HoneypotDeviceDef &dev) {
+    JsonDocument doc;
+    doc["name"] = dev.name;
+    doc["mac"] = dev.mac;
+    doc["mac_type"] = dev.isRandomMac ? "random" : "public";
+
+    JsonArray svcsArr = doc["services"].to<JsonArray>();
+    for (const auto &svc : dev.services) {
+        JsonObject sObj = svcsArr.add<JsonObject>();
+        sObj["uuid"] = svc.uuid;
+
+        JsonArray charsArr = sObj["characteristics"].to<JsonArray>();
+        for (const auto &ch : svc.characteristics) {
+            JsonObject cObj = charsArr.add<JsonObject>();
+            cObj["uuid"] = ch.uuid;
+
+            JsonArray propsArr = cObj["properties"].to<JsonArray>();
+            if (ch.properties & NIMBLE_PROPERTY::READ) propsArr.add("read");
+            if (ch.properties & NIMBLE_PROPERTY::WRITE) propsArr.add("write");
+            if (ch.properties & NIMBLE_PROPERTY::WRITE_NR) propsArr.add("write_nr");
+            if (ch.properties & NIMBLE_PROPERTY::NOTIFY) propsArr.add("notify");
+            if (ch.properties & NIMBLE_PROPERTY::INDICATE) propsArr.add("indicate");
+
+            if (ch.isHex) {
+                cObj["value"] = ch.rawValueStr;
+                cObj["is_hex"] = true;
+            } else {
+                cObj["value"] = ch.rawValueStr;
+            }
+        }
+    }
+
+    String outJson;
+    serializeJsonPretty(doc, outJson);
+    return outJson;
+}
+
+//=============================================================================
+// Server & Characteristic Callbacks
+//=============================================================================
+
+class HoneypotServerCallbacks : public NimBLEServerCallbacks {
+public:
+    void onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo) override {
+        g_hpState.isConnected = true;
+        g_hpState.connCount++;
+        std::string pAddr = connInfo.getAddress().toString();
+        uint16_t mtu = connInfo.getMTU();
+        g_hpState.setPeer(pAddr.c_str(), mtu);
+        g_hpState.addLog("[CONN] From " + String(pAddr.c_str()) + " (MTU:" + String(mtu) + ")");
+        Serial.printf("[HONEYPOT] Incoming connection from %s (MTU: %d)\n", pAddr.c_str(), mtu);
+    }
+
+    void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
+        g_hpState.isConnected = false;
+        std::string peer = connInfo.getAddress().toString();
+        g_hpState.setPeer("None", 23);
+        g_hpState.addLog("[DISC] " + String(peer.c_str()) + " (0x" + String(reason, HEX) + ")");
+        Serial.printf("[HONEYPOT] Disconnected by %s (Reason: 0x%02X)\n", peer.c_str(), reason);
+
+        // Honeypot auto-resume advertising so subsequent probes/attackers connect
+        if (g_hpState.isRunning && pServer && pServer->getAdvertising()) {
+            pServer->getAdvertising()->start();
+            g_hpState.addLog("[ADV] Advertising resumed");
+        }
+    }
+
+    void onMTUChange(uint16_t MTU, NimBLEConnInfo &connInfo) override {
+        char addr[20] = {0};
+        g_hpState.getPeer(addr, sizeof(addr));
+        g_hpState.setPeer(addr, MTU);
+        g_hpState.addLog("[MTU] Updated: " + String(MTU) + " B");
+        Serial.printf("[HONEYPOT] MTU updated to: %d\n", MTU);
+    }
+};
+
+class HoneypotCharCallbacks : public NimBLECharacteristicCallbacks {
+private:
+    std::vector<uint8_t> m_readValue;
+
+    void restorePresetValue(NimBLECharacteristic *pChar) {
+        static const uint8_t emptyValue = 0;
+        pChar->setValue(m_readValue.empty() ? &emptyValue : m_readValue.data(), m_readValue.size());
+    }
+
+public:
+    explicit HoneypotCharCallbacks(const std::vector<uint8_t> &val = {}) : m_readValue(val) {}
+
+    void onRead(NimBLECharacteristic *pChar, NimBLEConnInfo &connInfo) override {
+        g_hpState.readCount++;
+        String uuidStr = pChar->getUUID().toString().c_str();
+
+        restorePresetValue(pChar);
+
+        String shortU = shortUuidStr(uuidStr);
+        size_t len = pChar->getValue().length();
+        g_hpState.addLog("[READ] " + shortU + " (" + String((int)len) + "B)");
+        Serial.printf("[HONEYPOT] Read on %s from %s (%d bytes returned)\n",
+                      uuidStr.c_str(), connInfo.getAddress().toString().c_str(), (int)len);
+    }
+
+    void onWrite(NimBLECharacteristic *pChar, NimBLEConnInfo &connInfo) override {
+        g_hpState.writeCount++;
+        String uuidStr = pChar->getUUID().toString().c_str();
+        std::string raw = pChar->getValue();
+        const uint8_t *rawBytes = (const uint8_t *)raw.data();
+        size_t rawLen = raw.length();
+
+        String hexPayload = bytesToHexString(rawBytes, rawLen, 12);
+        g_hpState.setLastWrite(hexPayload.c_str());
+
+        String shortU = shortUuidStr(uuidStr);
+        g_hpState.addLog("[WRITE] " + shortU + ": " + hexPayload);
+        Serial.printf("[HONEYPOT] Write on %s from %s (%d bytes): %s\n",
+                      uuidStr.c_str(), connInfo.getAddress().toString().c_str(), (int)rawLen, hexPayload.c_str());
+
+        // In a honeypot, write operations have NO effect on internal state / system.
+        // If the characteristic had a predefined read value, reset it so subsequent reads remain static.
+        restorePresetValue(pChar);
+    }
+
+    void onSubscribe(NimBLECharacteristic *pChar, NimBLEConnInfo &connInfo, uint16_t subValue) override {
+        g_hpState.subCount++;
+        String uuidStr = pChar->getUUID().toString().c_str();
+        String shortU = shortUuidStr(uuidStr);
+        String action = (subValue == 0) ? "Unsub" : (subValue == 1) ? "NotifySub" : "IndicateSub";
+        g_hpState.addLog("[" + action + "] " + shortU);
+        Serial.printf("[HONEYPOT] Subscription on %s: %s\n", uuidStr.c_str(), action.c_str());
+    }
+
+#if 0
+    void handleRaceResponseIfApplicable(const uint8_t *data, size_t len) {
+        if (!m_pNotifyChar || !data || len < sizeof(RaceHeader)) return;
+
+        const RaceHeader *hdr = reinterpret_cast<const RaceHeader *>(data);
+        if (hdr->head != RACE_MAGIC_STD && hdr->head != RACE_MAGIC_EXT) return;
+        if (hdr->type != RACE_TYPE_REQ && hdr->type != RACE_TYPE_REQ_NO_RSP) return;
+
+        uint16_t cmdId = hdr->cmdId;
+        std::vector<uint8_t> rspPkt;
+
+        auto buildRsp = [hdr, cmdId, &rspPkt](const uint8_t *payload, size_t pLen) {
+            size_t total = sizeof(RaceHeader) + pLen;
+            rspPkt.resize(total);
+            RaceHeader *outHdr = reinterpret_cast<RaceHeader *>(rspPkt.data());
+            outHdr->head = hdr->head;
+            outHdr->type = RACE_TYPE_RSP;
+            outHdr->length = (uint16_t)(pLen + 2);
+            outHdr->cmdId = cmdId;
+            if (payload && pLen > 0) {
+                memcpy(rspPkt.data() + sizeof(RaceHeader), payload, pLen);
+            }
+        };
+
+        if (cmdId == RACE_CMD_GET_BUILD_VERSION) {
+            // Build version string e.g. "2.5.0\0"
+            const char *bv = "2.5.0";
+            uint8_t p[8];
+            p[0] = 0x00; // RC = SUCCESS
+            memcpy(p + 1, bv, strlen(bv) + 1);
+            buildRsp(p, 1 + strlen(bv) + 1);
+        } else if (cmdId == RACE_CMD_READ_SDK_VERSION) {
+            // SDK version string e.g. "SDK-2.5.1\0"
+            const char *sdk = "SDK-2.5.1";
+            uint8_t p[16];
+            p[0] = 0x00; // RC = SUCCESS
+            memcpy(p + 1, sdk, strlen(sdk) + 1);
+            buildRsp(p, 1 + strlen(sdk) + 1);
+        } else if (cmdId == RACE_CMD_GET_BD_ADDRESS) {
+            // Classic BD_ADDR response: RC (0x00) + Agent (0x00) + BD_ADDR (6B LE)
+            uint8_t p[8] = { 0x00, 0x00, 0xEF, 0xCD, 0xAB, 0x56, 0xDB, 0x94 };
+            buildRsp(p, sizeof(p));
+        } else if (cmdId == RACE_CMD_GET_LINK_KEY) {
+            // Link keys: RC (0x00) + NumDevices (0x00) + Reserved (0x00)
+            uint8_t p[3] = { 0x00, 0x00, 0x00 };
+            buildRsp(p, sizeof(p));
+        } else if (cmdId == RACE_CMD_READ_ADDRESS) {
+            // RAM Read response: RC (0x00) + 0x00 0x00 + Addr (4B LE echoed) + Data (4B LE)
+            if (len >= sizeof(RaceHeader) + 6) {
+                const uint8_t *reqData = data + sizeof(RaceHeader);
+                uint8_t p[11];
+                p[0] = 0x00; // RC = SUCCESS
+                p[1] = 0x00;
+                p[2] = 0x00;
+                // Echo address
+                p[3] = reqData[2];
+                p[4] = reqData[3];
+                p[5] = reqData[4];
+                p[6] = reqData[5];
+                // Simulated RAM data at address
+                p[7] = 0x9C;
+                p[8] = 0x8C;
+                p[9] = 0x23;
+                p[10] = 0x14;
+                buildRsp(p, sizeof(p));
+            }
+        } else if (cmdId == RACE_CMD_STORAGE_PAGE_READ) {
+            // Flash page read response: RC (0x00) + storage_type (1B) + 0x00 0x00 (2B) + Addr (4B LE) + 256B data
+            if (len >= sizeof(RaceHeader) + 6) {
+                const uint8_t *reqData = data + sizeof(RaceHeader);
+                std::vector<uint8_t> p(8 + 256, 0x00);
+                p[0] = 0x00; // RC = SUCCESS
+                p[1] = reqData[0]; // storage type
+                p[2] = 0x00;
+                p[3] = 0x00;
+                // Echo address
+                p[4] = reqData[2];
+                p[5] = reqData[3];
+                p[6] = reqData[4];
+                p[7] = reqData[5];
+                // Fill simulated partition table
+                if (reqData[2] == 0 && reqData[3] == 0 && reqData[4] == 0 && reqData[5] == 0) {
+                    size_t ptOff = 8 + 0x0C;
+                    p[ptOff + 0] = 0x00; p[ptOff + 1] = 0x00; p[ptOff + 2] = 0x01; p[ptOff + 3] = 0x00; // 0x00010000
+                    p[ptOff + 8] = 0x00; p[ptOff + 9] = 0x00; p[ptOff + 10] = 0x10; p[ptOff + 11] = 0x00; // 1MB
+                    p[ptOff + 36] = 0x02; // SYSTEM
+                }
+                buildRsp(p.data(), p.size());
+            }
+        } else {
+            // Generic SUCCESS response for other RACE commands: RC (0x00)
+            uint8_t p[1] = { 0x00 };
+            buildRsp(p, sizeof(p));
+        }
+
+        if (!rspPkt.empty()) {
+            m_pNotifyChar->setValue(rspPkt.data(), rspPkt.size());
+            m_pNotifyChar->notify();
+            g_hpState.addLog("[RACE-RSP] Cmd 0x" + String(cmdId, HEX));
+            Serial.printf("[HONEYPOT] Sent RACE response for cmd 0x%04X (%d bytes)\n", cmdId, (int)rspPkt.size());
+        }
+    }
+#endif
+};
+
+static HoneypotServerCallbacks g_hpServerCallbacks;
+static std::vector<std::unique_ptr<HoneypotCharCallbacks>> g_hpCharCallbacksPool;
+
+//=============================================================================
+// Service Lifecycle
+//=============================================================================
+
+bool startGattHoneypotService(const String &jsonConfigOrPath) {
+    if (g_hpState.isRunning) {
+        return true;
+    }
+    g_hpState.reset();
+
+    HoneypotDeviceDef dev;
+    bool loaded = false;
+
+    if (!jsonConfigOrPath.isEmpty()) {
+        // Check if string is a JSON file path
+        if (jsonConfigOrPath.startsWith("/") || jsonConfigOrPath.endsWith(".json")) {
+            bool useSd = sdcardMounted;
+            if (!useSd) useSd = setupSdCard(2);
+
+            FS *fs = useSd ? (FS *)&SD : (FS *)&LittleFS;
+            String path = jsonConfigOrPath;
+            if (useSd && path.startsWith("/sd")) {
+                path = path.substring(3);
+            }
+
+            if (fs->exists(path)) {
+                File f = fs->open(path, FILE_READ);
+                if (f) {
+                    String content = f.readString();
+                    f.close();
+                    loaded = parseHoneypotJson(content, dev);
+                }
+            }
+        }
+
+        // If not loaded yet, try parsing as raw JSON string
+        if (!loaded) {
+            loaded = parseHoneypotJson(jsonConfigOrPath, dev);
+        }
+    }
+
+    if (!loaded) return false;
+
+    g_hpState.activeDevice = dev;
+
+    // 1. Configure Hardware MAC address if specified
+    uint8_t mac[6];
+    bool hasCustomMac = parseMacBytes(dev.mac, mac);
+    if (!hasCustomMac) return false;
+    g_hpState.isRunning = true;
+
+    // 2. Initialize BLE
+    BLEStateManager::initBLE(dev.name, ESP_PWR_LVL_P9);
+
+    if (hasCustomMac) {
+        if (dev.isRandomMac) {
+            uint8_t addr_le[6];
+            addr_le[0] = mac[5];
+            addr_le[1] = mac[4];
+            addr_le[2] = mac[3];
+            addr_le[3] = mac[2];
+            addr_le[4] = mac[1];
+            addr_le[5] = mac[0] | 0xC0; // MSB with static random bits set
+            ble_hs_id_set_rnd(addr_le);
+            NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+        } else {
+            esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+            NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+        }
+    } else {
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+    }
+
+    NimBLEDevice::setSecurityAuth(false, false, false);
+
+    // 3. Create Server
+    NimBLEServer *pServer = NimBLEDevice::createServer();
+    if (!pServer) {
+        g_hpState.isRunning = false;
+        return false;
+    }
+
+    pServer->setCallbacks(&g_hpServerCallbacks, false);
+
+    // 4. Build GATT database from device definition
+    size_t totalChars = 0;
+    for (const auto &svc : dev.services) {
+        totalChars += svc.characteristics.size();
+    }
+    g_hpCharCallbacksPool.clear();
+    g_hpCharCallbacksPool.reserve(totalChars + 8);
+
+    NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
+    pAdv->reset();
+    pAdv->setName(dev.name.c_str());
+
+    int advServiceCount = 0;
+    for (size_t sIdx = 0; sIdx < dev.services.size(); sIdx++) {
+        const auto &sDef = dev.services[sIdx];
+        NimBLEService *pSvc = pServer->createService(sDef.uuid.c_str());
+        if (!pSvc) continue;
+
+        // Advertise primary service in 31-byte advertising frame
+        if (advServiceCount < 2) {
+            pAdv->addServiceUUID(sDef.uuid.c_str());
+            advServiceCount++;
+        }
+
+        for (size_t cIdx = 0; cIdx < sDef.characteristics.size(); cIdx++) {
+            const auto &cDef = sDef.characteristics[cIdx];
+            NimBLECharacteristic *pChar = pSvc->createCharacteristic(
+                cDef.uuid.c_str(),
+                cDef.properties
+            );
+            if (pChar) {
+                if (!cDef.readValue.empty()) {
+                    pChar->setValue(cDef.readValue.data(), cDef.readValue.size());
+                }
+
+                g_hpCharCallbacksPool.emplace_back(std::make_unique<HoneypotCharCallbacks>(cDef.readValue));
+                pChar->setCallbacks(g_hpCharCallbacksPool.back().get());
+            }
+        }
+    }
+
+    pServer->start();
+
+    // 5. Start Advertising (Connectable, Scan Response enabled)
+    pAdv->enableScanResponse(true);
+    pAdv->start();
+
+    g_hpState.addLog("[INIT] Honeypot: " + dev.name);
+    g_hpState.addLog("[MAC] " + dev.mac + (dev.isRandomMac ? " (RND)" : " (PUB)"));
+    g_hpState.addLog("[ADV] Advertising active");
+    Serial.printf("[HONEYPOT] Started '%s' (%s, %s)\n",
+                  dev.name.c_str(), dev.mac.c_str(), dev.isRandomMac ? "RANDOM" : "PUBLIC");
+    return true;
+}
+
+void stopGattHoneypotService() {
+    if (!g_hpState.isRunning) return;
+    g_hpState.isRunning = false;
+    g_hpState.addLog("[STOP] Honeypot shutting down...");
+
+    NimBLEServer *pServer = NimBLEDevice::getServer();
+    if (pServer) {
+        if (pServer->getAdvertising()) {
+            pServer->getAdvertising()->stop();
+        }
+        std::vector<uint16_t> peers = pServer->getPeerDevices();
+        for (uint16_t handle : peers) {
+            pServer->disconnect(handle);
+        }
+    }
+
+    g_hpCharCallbacksPool.clear();
+
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+    BLEStateManager::deinitBLE(true);
+    Serial.println(F("[HONEYPOT] Stopped and BLE stack cleaned."));
+}
+
+bool isGattHoneypotActive() {
+    return g_hpState.isRunning;
+}
+
+//=============================================================================
+// Preset Export & Storage Helpers
+//=============================================================================
+
+static bool exportDefaultPresetsToStorage(String &outPath) {
+    bool useSd = sdcardMounted;
+    if (!useSd) useSd = setupSdCard(2);
+
+    FS *fs = useSd ? (FS *)&SD : (FS *)&LittleFS;
+    String baseDir = useSd ? "/sd/bruce/honeypot" : "/bruce/honeypot";
+
+    if (!fs->exists("/bruce")) fs->mkdir("/bruce");
+    if (!fs->exists("/bruce/honeypot")) fs->mkdir("/bruce/honeypot");
+
+    String filePath = baseDir + "/airoha_race.json";
+    String localPath = useSd ? "/bruce/honeypot/airoha_race.json" : "/bruce/honeypot/airoha_race.json";
+
+    File f = fs->open(localPath, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[HONEYPOT] Failed to export to %s\n", localPath.c_str());
+        return false;
+    }
+
+    HoneypotDeviceDef airohaDev = getBuiltinAirohaRacePreset();
+    String jsonStr = serializeHoneypotDeviceToJson(airohaDev);
+    f.print(jsonStr);
+    f.flush();
+    f.close();
+
+    // Also export multi-preset bundle
+    String bundlePath = useSd ? "/bruce/honeypot/presets.json" : "/bruce/honeypot/presets.json";
+    File fb = fs->open(bundlePath, FILE_WRITE);
+    if (fb) {
+        JsonDocument bDoc;
+        JsonArray pArr = bDoc["presets"].to<JsonArray>();
+
+        auto addDevToBundle = [&pArr](const HoneypotDeviceDef &d) {
+            JsonObject dObj = pArr.add<JsonObject>();
+            dObj["name"] = d.name;
+            dObj["mac"] = d.mac;
+            dObj["mac_type"] = d.isRandomMac ? "random" : "public";
+
+            JsonArray svcsArr = dObj["services"].to<JsonArray>();
+            for (const auto &svc : d.services) {
+                JsonObject sObj = svcsArr.add<JsonObject>();
+                sObj["uuid"] = svc.uuid;
+                JsonArray charsArr = sObj["characteristics"].to<JsonArray>();
+                for (const auto &ch : svc.characteristics) {
+                    JsonObject cObj = charsArr.add<JsonObject>();
+                    cObj["uuid"] = ch.uuid;
+                    JsonArray propsArr = cObj["properties"].to<JsonArray>();
+                    if (ch.properties & NIMBLE_PROPERTY::READ) propsArr.add("read");
+                    if (ch.properties & NIMBLE_PROPERTY::WRITE) propsArr.add("write");
+                    if (ch.properties & NIMBLE_PROPERTY::WRITE_NR) propsArr.add("write_nr");
+                    if (ch.properties & NIMBLE_PROPERTY::NOTIFY) propsArr.add("notify");
+                    if (ch.properties & NIMBLE_PROPERTY::INDICATE) propsArr.add("indicate");
+                    cObj["value"] = ch.rawValueStr;
+                    if (ch.isHex) cObj["is_hex"] = true;
+                }
+            }
+        };
+
+        addDevToBundle(getBuiltinAirohaRacePreset());
+        addDevToBundle(getBuiltinSonyRacePreset());
+        addDevToBundle(getBuiltinAiroha16BitPreset());
+        addDevToBundle(getBuiltinSmartLockPreset());
+
+        serializeJsonPretty(bDoc, fb);
+        fb.flush();
+        fb.close();
+    }
+
+    outPath = filePath;
+    return true;
+}
+
+static bool saveHoneypotLogsToStorage(String &outPath) {
+    bool useSd = sdcardMounted;
+    if (!useSd) useSd = setupSdCard(2);
+
+    FS *fs = useSd ? (FS *)&SD : (FS *)&LittleFS;
+    String baseDir = useSd ? "/sd/bruce/honeypot_logs" : "/bruce/honeypot_logs";
+
+    if (!fs->exists("/bruce")) fs->mkdir("/bruce");
+    if (!fs->exists("/bruce/honeypot_logs")) fs->mkdir("/bruce/honeypot_logs");
+
+    char fname[64];
+    snprintf(fname, sizeof(fname), "%s/log_%u.txt", baseDir.c_str(), (unsigned int)(millis() / 1000));
+    outPath = String(fname);
+
+    String localPath = String(fname);
+    if (useSd && localPath.startsWith("/sd")) {
+        localPath = localPath.substring(3);
+    }
+
+    File f = fs->open(localPath, FILE_WRITE);
+    if (!f) return false;
+
+    f.println("=== GATT Honeypot Activity Log ===");
+    f.printf("Device: %s\n", g_hpState.activeDevice.name.c_str());
+    f.printf("MAC: %s (%s)\n", g_hpState.activeDevice.mac.c_str(), g_hpState.activeDevice.isRandomMac ? "RANDOM" : "PUBLIC");
+    f.printf("Total Connections: %u\n", (unsigned int)g_hpState.connCount);
+    f.printf("Total Reads: %u, Writes: %u, Subs: %u\n",
+             (unsigned int)g_hpState.readCount, (unsigned int)g_hpState.writeCount, (unsigned int)g_hpState.subCount);
+    f.println("----------------------------------");
+
+    g_hpState.initMutex();
+    if (g_hpState.logMutex && xSemaphoreTake(g_hpState.logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (const auto &line : g_hpState.logLines) {
+            f.println(line);
+        }
+        xSemaphoreGive(g_hpState.logMutex);
+    }
+
+    f.flush();
+    f.close();
+    return true;
+}
+
+//=============================================================================
+// Interactive Live Monitor UI
+//=============================================================================
+
+void runGattHoneypot(const String &jsonFilePath) {
+    if (!startGattHoneypotService(jsonFilePath)) {
+        displayError("Failed to start Honeypot", true);
+        return;
+    }
+
+    drawMainBorderWithTitle("GATT HONEYPOT");
+
+    int lineH = 8 * FP + 3;
+    int headerY = BORDER_PAD_Y + 14;
+    int statsY = headerY + lineH + 2;
+    int logBoxTop = statsY + lineH + 4;
+    int footY = tftHeight - BORDER_PAD_Y - 9;
+    int logBoxH = footY - logBoxTop - 2;
+    int logVisibleRows = logBoxH / lineH;
+    if (logVisibleRows < 1) logVisibleRows = 1;
+
+    uint32_t lastRefresh = 0;
+    bool lastConnected = false;
+    uint32_t lastReadCount = 0xFFFFFFFF;
+    uint32_t lastWriteCount = 0xFFFFFFFF;
+    size_t lastLogCount = 0;
+
+    while (g_hpState.isRunning) {
+        if (check(EscPress) || check(PrevPress)) {
+            break;
+        }
+
+        keyStroke k = _getKeyPress();
+        if (k.pressed || !k.word.empty()) {
+            if (k.del || k.exit_key) {
+                break;
+            }
+            for (char ch : k.word) {
+                char lower = tolower(ch);
+                if (lower == 'c') {
+                    // Clear log
+                    g_hpState.initMutex();
+                    if (g_hpState.logMutex && xSemaphoreTake(g_hpState.logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        g_hpState.logLines.clear();
+                        xSemaphoreGive(g_hpState.logMutex);
+                    }
+                    lastLogCount = 0;
+                } else if (lower == 's') {
+                    // Save logs to storage
+                    String savedPath;
+                    if (saveHoneypotLogsToStorage(savedPath)) {
+                        displaySuccess("Saved: " + savedPath, true);
+                        drawMainBorderWithTitle("GATT HONEYPOT");
+                        lastRefresh = 0; // force full redraw
+                    } else {
+                        displayError("Save log failed", true);
+                        drawMainBorderWithTitle("GATT HONEYPOT");
+                    }
+                }
+            }
+        }
+
+        uint32_t now = millis();
+        if (now - lastRefresh >= 200) {
+            lastRefresh = now;
+
+            // 1. Device Info Header
+            tft.setTextSize(FP);
+            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+
+            String titleLine = "Trap: " + g_hpState.activeDevice.name;
+            if (titleLine.length() > 22) titleLine = titleLine.substring(0, 20) + "..";
+            titleLine += " [" + String(g_hpState.activeDevice.isRandomMac ? "RND" : "PUB") + "]";
+
+            tft.fillRect(BORDER_PAD_X, headerY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+            tft.drawString(titleLine, BORDER_PAD_X, headerY);
+
+            // 2. Connection & Activity Stats
+            char peerBuf[20] = {0};
+            uint16_t peerMtu = 23;
+            g_hpState.getPeer(peerBuf, sizeof(peerBuf), &peerMtu);
+
+            String statusStr;
+            if (g_hpState.isConnected) {
+                statusStr = "CONN:" + String(peerBuf).substring(9) + " R:" + String(g_hpState.readCount) + " W:" + String(g_hpState.writeCount);
+            } else {
+                statusStr = "WAITING.. Conns:" + String(g_hpState.connCount) + " R:" + String(g_hpState.readCount) + " W:" + String(g_hpState.writeCount);
+            }
+
+            tft.fillRect(BORDER_PAD_X, statsY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
+            tft.setTextColor(g_hpState.isConnected ? TFT_GREEN : bruceConfig.priColor, bruceConfig.bgColor);
+            tft.drawString(statusStr, BORDER_PAD_X, statsY);
+
+            // 3. Log View Area
+            std::vector<String> snapshotLogs;
+            g_hpState.initMutex();
+            if (g_hpState.logMutex && xSemaphoreTake(g_hpState.logMutex, pdMS_TO_TICKS(30)) == pdTRUE) {
+                snapshotLogs.assign(g_hpState.logLines.begin(), g_hpState.logLines.end());
+                xSemaphoreGive(g_hpState.logMutex);
+            }
+
+            if (snapshotLogs.size() != lastLogCount || g_hpState.isConnected != lastConnected ||
+                g_hpState.readCount != lastReadCount || g_hpState.writeCount != lastWriteCount) {
+                lastLogCount = snapshotLogs.size();
+                lastConnected = g_hpState.isConnected;
+                lastReadCount = g_hpState.readCount;
+                lastWriteCount = g_hpState.writeCount;
+
+                tft.fillRect(BORDER_PAD_X, logBoxTop, tftWidth - 2 * BORDER_PAD_X, logBoxH, bruceConfig.bgColor);
+                tft.drawFastHLine(BORDER_PAD_X, logBoxTop - 2, tftWidth - 2 * BORDER_PAD_X, bruceConfig.priColor);
+
+                int logStartIdx = (int)snapshotLogs.size() - logVisibleRows;
+                if (logStartIdx < 0) logStartIdx = 0;
+
+                for (int r = 0; r < logVisibleRows && (logStartIdx + r) < (int)snapshotLogs.size(); r++) {
+                    String line = snapshotLogs[logStartIdx + r];
+                    uint16_t col = bruceConfig.priColor;
+                    if (line.startsWith("[WRITE]")) col = TFT_RED;
+                    else if (line.startsWith("[READ]")) col = TFT_YELLOW;
+                    else if (line.startsWith("[CONN]")) col = TFT_GREEN;
+                    else if (line.startsWith("[DISC]")) col = TFT_DARKGREY;
+
+                    tft.setTextColor(col, bruceConfig.bgColor);
+                    tft.drawString(line.substring(0, 32), BORDER_PAD_X, logBoxTop + r * lineH);
+                }
+            }
+
+            // Footer
+            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+            tft.drawString("ESC:Stop  C:Clear  S:Save", BORDER_PAD_X, footY);
+        }
+
+        vTaskDelay(30 / portTICK_PERIOD_MS);
+    }
+
+    stopGattHoneypotService();
+}
+
+//=============================================================================
+// Preset Selection & Menu System
+//=============================================================================
+
+static void showHoneypotDeviceDetailsUi(const HoneypotDeviceDef &dev) {
+    ScrollableTextArea area(dev.name);
+    area.addLine("=== Honeypot Profile ===");
+    area.addLine("Name: " + dev.name);
+    area.addLine("MAC:  " + dev.mac + (dev.isRandomMac ? " (Random)" : " (Public)"));
+    area.addLine("Services: " + String((int)dev.services.size()));
+    area.addLine("");
+
+    for (size_t s = 0; s < dev.services.size(); s++) {
+        const auto &svc = dev.services[s];
+        area.addLine("Svc [" + String((int)s + 1) + "]: " + svc.uuid);
+        for (size_t c = 0; c < svc.characteristics.size(); c++) {
+            const auto &ch = svc.characteristics[c];
+            String pStr = "";
+            if (ch.properties & NIMBLE_PROPERTY::READ) pStr += "R ";
+            if (ch.properties & NIMBLE_PROPERTY::WRITE) pStr += "W ";
+            if (ch.properties & NIMBLE_PROPERTY::WRITE_NR) pStr += "WNR ";
+            if (ch.properties & NIMBLE_PROPERTY::NOTIFY) pStr += "N ";
+            if (ch.properties & NIMBLE_PROPERTY::INDICATE) pStr += "I ";
+            pStr.trim();
+
+            area.addLine("  Char: " + shortUuidStr(ch.uuid) + " [" + pStr + "]");
+            if (!ch.rawValueStr.isEmpty()) {
+                area.addLine("    Val: " + ch.rawValueStr);
+            }
+        }
+        area.addLine("");
+    }
+
+    area.addLine("Press ESC to exit");
+    area.show();
+}
+
+static void selectBuiltinPresetMenu() {
+    struct PresetItem {
+        String title;
+        std::function<HoneypotDeviceDef()> getter;
+    };
+
+    std::vector<PresetItem> presets = {
+        { "1. Airoha RACE (AB1562A)", getBuiltinAirohaRacePreset },
+        { "2. Sony WH-1000XM4",      getBuiltinSonyRacePreset },
+        { "3. Airoha 16-bit FEF0",   getBuiltinAiroha16BitPreset },
+        { "4. Smart Lock IoT (FFE0)",getBuiltinSmartLockPreset }
+    };
+
+    int cursor = 0;
+    while (true) {
+        std::vector<Option> optList;
+        for (const auto &p : presets) {
+            optList.push_back({p.title.c_str(), []() {}});
+        }
+        optList.push_back({"< Back", []() {}});
+
+        int sel = loopOptions(optList, MENU_TYPE_SUBMENU, "HONEYPOT PRESETS", cursor, false);
+        if (sel < 0 || sel >= (int)presets.size()) {
+            break;
+        }
+
+        HoneypotDeviceDef picked = presets[sel].getter();
+        showHoneypotDeviceDetailsUi(picked);
+
+        String runChoice = keyboard("Y", 1, "Launch Honeypot? (Y/N)");
+        if (runChoice.equalsIgnoreCase("Y")) {
+            String jsonStr = serializeHoneypotDeviceToJson(picked);
+            runGattHoneypot(jsonStr);
+            break;
+        }
+    }
+}
+
+static void loadJsonFileMenu() {
+    bool useSd = sdcardMounted;
+    if (!useSd) useSd = setupSdCard(2);
+
+    FS *fs = useSd ? (FS *)&SD : (FS *)&LittleFS;
+    String pickedFile = loopSD(*fs, true, "json", "/bruce/honeypot");
+    if (pickedFile.isEmpty() || pickedFile == "/") {
+        pickedFile = loopSD(*fs, true, "json", "/");
+    }
+
+    if (pickedFile.isEmpty() || pickedFile == "/") {
+        displayWarning("No file selected", true);
+        return;
+    }
+
+    File f = fs->open(pickedFile, FILE_READ);
+    if (!f) {
+        displayError("Cannot open file", true);
+        return;
+    }
+
+    String content = f.readString();
+    f.close();
+
+    HoneypotDeviceDef dev;
+    if (!parseHoneypotJson(content, dev)) {
+        displayError("Invalid Honeypot JSON", true);
+        return;
+    }
+
+    showHoneypotDeviceDetailsUi(dev);
+
+    String runChoice = keyboard("Y", 1, "Launch Honeypot? (Y/N)");
+    if (runChoice.equalsIgnoreCase("Y")) {
+        runGattHoneypot(pickedFile);
+    }
+}
+
+void gattHoneypotMenu() {
+    int cursor = 0;
+    while (true) {
+        std::vector<Option> menuOpts = {
+            {"Load JSON Device Profile (SD/LittleFS)", []() { loadJsonFileMenu(); }},
+            {"< Back to Bluetooth Menu", []() {}}
+        };
+
+        int chosen = loopOptions(menuOpts, MENU_TYPE_SUBMENU, "GATT HONEYPOT", cursor, false);
+        if (chosen < 0 || chosen == (int)menuOpts.size() - 1) {
+            break;
+        }
+    }
+}
+
+#endif // !LITE_VERSION

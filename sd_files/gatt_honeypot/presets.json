@@ -1,0 +1,110 @@
+{
+  "presets": [
+    {
+      "name": "Airoha RACE Device",
+      "mac": "94:DB:56:AB:CD:EF",
+      "mac_type": "public",
+      "services": [
+        {
+          "uuid": "180A",
+          "characteristics": [
+            { "uuid": "2A29", "properties": ["read"], "value": "Airoha Technology" },
+            { "uuid": "2A24", "properties": ["read"], "value": "AB1562A" },
+            { "uuid": "2A25", "properties": ["read"], "value": "001B66814A2C" },
+            { "uuid": "2A26", "properties": ["read"], "value": "2.5.0" },
+            { "uuid": "2A27", "properties": ["read"], "value": "v1.0" },
+            { "uuid": "2A28", "properties": ["read"], "value": "SDK-2.5.1" }
+          ]
+        },
+        {
+          "uuid": "180F",
+          "characteristics": [
+            { "uuid": "2A19", "properties": ["read", "notify"], "value": "5A", "is_hex": true }
+          ]
+        },
+        {
+          "uuid": "5052494D-2DAB-0341-6972-6F6861424C45",
+          "characteristics": [
+            { "uuid": "43484152-2DAB-3241-6972-6F6861424C45", "properties": ["write", "write_nr"], "value": "" },
+            { "uuid": "43484152-2DAB-3141-6972-6F6861424C45", "properties": ["read", "notify", "indicate"], "value": "055B02000000", "is_hex": true },
+            { "uuid": "43484152-2DAB-3041-6972-6F6861424C45", "properties": ["read", "notify"], "value": "055B02000000", "is_hex": true }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "WH-1000XM4",
+      "mac": "00:1B:66:81:4A:2C",
+      "mac_type": "public",
+      "services": [
+        {
+          "uuid": "180A",
+          "characteristics": [
+            { "uuid": "2A29", "properties": ["read"], "value": "Sony Corporation" },
+            { "uuid": "2A24", "properties": ["read"], "value": "WH-1000XM4" },
+            { "uuid": "2A25", "properties": ["read"], "value": "001B66814A2C" },
+            { "uuid": "2A26", "properties": ["read"], "value": "2.5.0" },
+            { "uuid": "2A27", "properties": ["read"], "value": "v1.0" },
+            { "uuid": "2A28", "properties": ["read"], "value": "SDK-2.5.1" }
+          ]
+        },
+        {
+          "uuid": "180F",
+          "characteristics": [
+            { "uuid": "2A19", "properties": ["read", "notify"], "value": "5F", "is_hex": true }
+          ]
+        },
+        {
+          "uuid": "dc405470-a351-4a59-97d8-2e2e3b207fbb",
+          "characteristics": [
+            { "uuid": "bfd869fa-a3f2-4c2f-bcff-3eb1ec80cead", "properties": ["write", "write_nr"], "value": "" },
+            { "uuid": "2a6b6575-faf6-418c-923f-ccd63a56d955", "properties": ["read", "notify", "indicate"], "value": "055B02000000", "is_hex": true }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Airoha Headset",
+      "mac": "4C:65:A8:12:34:56",
+      "mac_type": "random",
+      "services": [
+        {
+          "uuid": "180A",
+          "characteristics": [
+            { "uuid": "2A29", "properties": ["read"], "value": "Airoha" },
+            { "uuid": "2A24", "properties": ["read"], "value": "AB1562M" },
+            { "uuid": "2A26", "properties": ["read"], "value": "1.2.0" }
+          ]
+        },
+        {
+          "uuid": "0000fef0-0000-1000-8000-00805f9b34fb",
+          "characteristics": [
+            { "uuid": "0000fef1-0000-1000-8000-00805f9b34fb", "properties": ["write", "write_nr"], "value": "" },
+            { "uuid": "0000fef2-0000-1000-8000-00805f9b34fb", "properties": ["read", "notify"], "value": "055B02000000", "is_hex": true }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "SmartLock-Pro-92",
+      "mac": "A4:C1:38:99:88:77",
+      "mac_type": "public",
+      "services": [
+        {
+          "uuid": "180A",
+          "characteristics": [
+            { "uuid": "2A29", "properties": ["read"], "value": "SmartSecurity Inc" },
+            { "uuid": "2A24", "properties": ["read"], "value": "SL-9200" }
+          ]
+        },
+        {
+          "uuid": "0000ffe0-0000-1000-8000-00805f9b34fb",
+          "characteristics": [
+            { "uuid": "0000ffe1-0000-1000-8000-00805f9b34fb", "properties": ["read", "write"], "value": "41444D494E", "is_hex": true },
+            { "uuid": "0000ffe2-0000-1000-8000-00805f9b34fb", "properties": ["read", "notify"], "value": "01", "is_hex": true }
+          ]
+        }
+      ]
+    }
+  ]
+}

