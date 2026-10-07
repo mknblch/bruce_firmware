@@ -171,7 +171,11 @@ static bool gattDeviceNameMacLess(const GattScannedDevice &left, const GattScann
 
 static constexpr uint32_t GATT_NEW_DEVICE_HIGHLIGHT_MS = 5000;
 static constexpr uint16_t GATT_NEW_DEVICE_COLOR = 0x07E0;
-static constexpr uint16_t GATT_EVICTION_COLOR = 0xF986;
+static constexpr uint32_t GATT_INACTIVE_WARNING_MS = 5000;
+static constexpr uint32_t GATT_INACTIVE_RED_MS = 10000;
+static constexpr uint32_t GATT_DEVICE_EXPIRY_MS = 15000;
+static constexpr uint16_t GATT_INACTIVE_WARNING_COLOR = 0xFA00;
+static constexpr uint16_t GATT_INACTIVE_RED_COLOR = 0xF986;
 
 String gattFitText(const String &text, int maxPx) {
     if (maxPx <= 0) return "";
@@ -961,6 +965,17 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
                 strncpy(selectedMac, uiDevices[selectedIdx].macStr, sizeof(selectedMac) - 1);
             }
             if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                uint32_t now = millis();
+                for (size_t i = 0; i < g_gattScanState.count;) {
+                    if (now - g_gattScanState.devices[i].lastSeen >= GATT_DEVICE_EXPIRY_MS) {
+                        for (size_t j = i + 1; j < g_gattScanState.count; j++) {
+                            g_gattScanState.devices[j - 1] = g_gattScanState.devices[j];
+                        }
+                        g_gattScanState.count--;
+                    } else {
+                        i++;
+                    }
+                }
                 uiCount = g_gattScanState.count;
                 uiPackets = g_gattScanState.totalPackets;
                 for (size_t i = 0; i < uiCount; i++) {
@@ -1041,21 +1056,6 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
             tft.drawFastHLine(BORDER_PAD_X, headerY + lineH - 1, tftWidth - 2 * BORDER_PAD_X, TFT_DARKGREY);
 
             // 2. Device List rows
-            uint16_t minPackets = 0;
-            int8_t minRssi = -100;
-            if (uiCount > 0) {
-                minPackets = uiDevices[0].packetCount;
-                for (size_t i = 1; i < uiCount; i++) {
-                    minPackets = std::min(minPackets, uiDevices[i].packetCount);
-                }
-                bool haveMinRssi = false;
-                for (size_t i = 0; i < uiCount; i++) {
-                    if (uiDevices[i].packetCount == minPackets && (!haveMinRssi || uiDevices[i].rssi < minRssi)) {
-                        minRssi = uiDevices[i].rssi;
-                        haveMinRssi = true;
-                    }
-                }
-            }
             for (int r = 0; r < visibleRows; r++) {
                 int itemIdx = scrollOffset + r;
                 int rowY = listStartY + r * lineH;
@@ -1063,9 +1063,16 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
                 if (itemIdx < (int)uiCount) {
                     bool isSel = (itemIdx == selectedIdx);
                     uint16_t bg = isSel ? bruceConfig.priColor : bruceConfig.bgColor;
+                    uint32_t silenceMs = now - uiDevices[itemIdx].lastSeen;
                     bool isNew = now - uiDevices[itemIdx].discoveredAt < GATT_NEW_DEVICE_HIGHLIGHT_MS;
-                    bool isEvictionCandidate = uiDevices[itemIdx].packetCount == minPackets && uiDevices[itemIdx].rssi == minRssi;
-                    uint16_t highlightColor = isNew ? GATT_NEW_DEVICE_COLOR : (isEvictionCandidate ? GATT_EVICTION_COLOR : bruceConfig.priColor);
+                    uint16_t highlightColor = bruceConfig.priColor;
+                    if (silenceMs >= GATT_INACTIVE_RED_MS) {
+                        highlightColor = GATT_INACTIVE_RED_COLOR;
+                    } else if (silenceMs >= GATT_INACTIVE_WARNING_MS) {
+                        highlightColor = GATT_INACTIVE_WARNING_COLOR;
+                    } else if (isNew) {
+                        highlightColor = GATT_NEW_DEVICE_COLOR;
+                    }
                     uint16_t fg = isSel ? bruceConfig.bgColor : highlightColor;
 
                     tft.fillRect(BORDER_PAD_X, rowY, tftWidth - 2 * BORDER_PAD_X, lineH, bg);
