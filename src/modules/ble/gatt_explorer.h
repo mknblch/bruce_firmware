@@ -24,8 +24,12 @@ int gattListLoop(
 // with ESC/SEL) and, when the user selects a device, returns true and outputs its name/MAC/
 // RSSI/address type. Completely unwinds the scanner UI and stack before returning.
 // Reuses the exact same scan engine and g_gattSettings (minRSSI, connectable/address-type
-// filters, etc.) as the main GATT Explorer menu.
-bool gattScanAndPick(String &outName, String &outMac, int &outRssi, uint8_t &outAddrType);
+// filters, etc.) as the main GATT Explorer menu. `passiveOnly` disables scan requests even when
+// the configured scan type is active/both; `allAdvertisements` ignores the current service filter.
+bool gattScanAndPick(
+    String &outName, String &outMac, int &outRssi, uint8_t &outAddrType, bool passiveOnly = false,
+    bool allAdvertisements = false
+);
 
 // Settings screen for the shared scan engine (minRSSI, scan timeout, address-type filter,
 // etc.) - exposed so other features reusing gattScanAndPick() can offer the same tuning menu.

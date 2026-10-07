@@ -17,6 +17,7 @@
 
 namespace {
 
+#if defined(LITE_VERSION)
 struct BleTrackerDiscoveredDevice {
     uint8_t macBytes[6];
     char macStr[18];
@@ -466,6 +467,8 @@ void bleTrackerPickFromScan() {
     }
 }
 
+#endif // LITE_VERSION
+
 // Free-form label prompt reused by both the "save as favorite" flow below and (in a later
 // revision) the favorites list itself.
 String promptForLabel(const String &defaultLabel) {
@@ -781,7 +784,19 @@ void bleTrackerLockTarget(const String &label, const String &mac, uint8_t addrTy
     }
 }
 
-void bleTrackerScanAndPick() { bleTrackerPickFromScan(); }
+void bleTrackerScanAndPick() {
+#if !defined(LITE_VERSION)
+    String name;
+    String mac;
+    int rssi = -100;
+    uint8_t addrType = BLE_ADDR_PUBLIC;
+    if (gattScanAndPick(name, mac, rssi, addrType, true, true)) {
+        bleTrackerLockTarget(name, mac, addrType);
+    }
+#else
+    bleTrackerPickFromScan();
+#endif
+}
 
 void BleTrackerMenu() {
     while (true) {

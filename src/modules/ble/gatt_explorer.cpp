@@ -780,7 +780,7 @@ static GattExplorerClientCallbacks g_gattClientCallbacks;
 // Forward Declarations
 //=============================================================================
 
-static void runContinuousScan(GattFilterMode filterMode);
+static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly = false);
 static void exploreGattDevice(GattScannedDevice &device);
 static void browseServicesAndChars(NimBLEClient *pClient, const GattScannedDevice &device);
 static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteCharacteristic *pChar, const String &serviceName);
@@ -792,7 +792,7 @@ static void runAutoDumpAll();
 // Continuous Scan Implementation (Live Interactive Scanner)
 //=============================================================================
 
-static void runContinuousScan(GattFilterMode filterMode) {
+static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
     // 1. Drain residual keys from menu selection
     vTaskDelay(pdMS_TO_TICKS(150));
     check(SelPress);
@@ -837,7 +837,7 @@ static void runContinuousScan(GattFilterMode filterMode) {
     pBLEScan->setScanCallbacks(&g_gattScanCallbacks, true);
 
     // Apply scan type from settings: Passive (safe, no TX), Active (requests scan responses), Both (cycles)
-    bool activeScan = (g_gattSettings.scanType == SCAN_ACTIVE || g_gattSettings.scanType == SCAN_BOTH);
+    bool activeScan = !passiveOnly && (g_gattSettings.scanType == SCAN_ACTIVE || g_gattSettings.scanType == SCAN_BOTH);
     pBLEScan->setActiveScan(activeScan);
     pBLEScan->setInterval(100);
     pBLEScan->setWindow(99);
@@ -2142,18 +2142,28 @@ void gattSettingsMenu() {
 // Reusable Scan-And-Pick Entry Point (for other features, e.g. BLE Tracker)
 //=============================================================================
 
-bool gattScanAndPick(String &outName, String &outMac, int &outRssi, uint8_t &outAddrType) {
+bool gattScanAndPick(
+    String &outName, String &outMac, int &outRssi, uint8_t &outAddrType, bool passiveOnly, bool allAdvertisements
+) {
     GattScannedDevice picked;
     bool hasPick = false;
     g_gattPickCallback = [&picked, &hasPick](const GattScannedDevice &device) {
         picked = device;
         hasPick = true;
     };
-    runContinuousScan(g_currentFilter);
+    GattFilterMode previousFilter = g_currentFilter;
+    runContinuousScan(allAdvertisements ? FILTER_CONNECTABLE : g_currentFilter, passiveOnly);
+    g_currentFilter = previousFilter;
     g_gattPickCallback = nullptr;
 
     if (hasPick) {
-        outName = (picked.name[0] != '\0') ? String(picked.name) : String(picked.macStr);
+        if (picked.name[0] != '\0') {
+            outName = String(picked.name);
+        } else if (picked.vendor[0] != '\0') {
+            outName = String(picked.vendor) + " (" + String(picked.macStr).substring(9) + ")";
+        } else {
+            outName = String(picked.macStr);
+        }
         outMac = String(picked.macStr);
         outRssi = picked.rssi;
         outAddrType = picked.addressType;
