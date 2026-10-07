@@ -55,6 +55,7 @@ struct HoneypotState {
     uint32_t subCount = 0;
     char lastWritePayload[64] = "";
     std::deque<String> logLines;
+    uint32_t logGeneration = 0;
     StaticSemaphore_t logMutexBuf;
     SemaphoreHandle_t logMutex = nullptr;
 
@@ -73,6 +74,7 @@ struct HoneypotState {
             while (logLines.size() > 40) {
                 logLines.pop_front();
             }
+            logGeneration++;
             xSemaphoreGive(logMutex);
         }
     }
@@ -129,12 +131,15 @@ struct HoneypotState {
             peerMtu = 23;
             lastWritePayload[0] = '\0';
             logLines.clear();
+            logGeneration = 0;
             xSemaphoreGive(logMutex);
         }
     }
 };
 
 static HoneypotState g_hpState;
+static uint8_t g_originalBluetoothMac[6] = {};
+static bool g_originalBluetoothMacSaved = false;
 
 //=============================================================================
 // Helper Functions: Hex & MAC parsing
@@ -259,6 +264,7 @@ static bool parseHoneypotJson(const String &jsonContent, HoneypotDeviceDef &outD
     if (macType.isEmpty()) macType = root["addr_type"].as<String>();
     if (macType.isEmpty()) macType = root["type"].as<String>();
     macType.toLowerCase();
+    macType.trim();
 
     outDevice.isRandomMac = (macType == "random" || macType == "rnd" || macType == "rand");
 
@@ -597,12 +603,6 @@ public:
         g_hpState.setPeer("None", 23);
         g_hpState.addLog("[DISC] " + String(peer.c_str()) + " (0x" + String(reason, HEX) + ")");
         Serial.printf("[HONEYPOT] Disconnected by %s (Reason: 0x%02X)\n", peer.c_str(), reason);
-
-        // Honeypot auto-resume advertising so subsequent probes/attackers connect
-        if (g_hpState.isRunning && pServer && pServer->getAdvertising()) {
-            pServer->getAdvertising()->start();
-            g_hpState.addLog("[ADV] Advertising resumed");
-        }
     }
 
     void onMTUChange(uint16_t MTU, NimBLEConnInfo &connInfo) override {
@@ -668,109 +668,6 @@ public:
         Serial.printf("[HONEYPOT] Subscription on %s: %s\n", uuidStr.c_str(), action.c_str());
     }
 
-#if 0
-    void handleRaceResponseIfApplicable(const uint8_t *data, size_t len) {
-        if (!m_pNotifyChar || !data || len < sizeof(RaceHeader)) return;
-
-        const RaceHeader *hdr = reinterpret_cast<const RaceHeader *>(data);
-        if (hdr->head != RACE_MAGIC_STD && hdr->head != RACE_MAGIC_EXT) return;
-        if (hdr->type != RACE_TYPE_REQ && hdr->type != RACE_TYPE_REQ_NO_RSP) return;
-
-        uint16_t cmdId = hdr->cmdId;
-        std::vector<uint8_t> rspPkt;
-
-        auto buildRsp = [hdr, cmdId, &rspPkt](const uint8_t *payload, size_t pLen) {
-            size_t total = sizeof(RaceHeader) + pLen;
-            rspPkt.resize(total);
-            RaceHeader *outHdr = reinterpret_cast<RaceHeader *>(rspPkt.data());
-            outHdr->head = hdr->head;
-            outHdr->type = RACE_TYPE_RSP;
-            outHdr->length = (uint16_t)(pLen + 2);
-            outHdr->cmdId = cmdId;
-            if (payload && pLen > 0) {
-                memcpy(rspPkt.data() + sizeof(RaceHeader), payload, pLen);
-            }
-        };
-
-        if (cmdId == RACE_CMD_GET_BUILD_VERSION) {
-            // Build version string e.g. "2.5.0\0"
-            const char *bv = "2.5.0";
-            uint8_t p[8];
-            p[0] = 0x00; // RC = SUCCESS
-            memcpy(p + 1, bv, strlen(bv) + 1);
-            buildRsp(p, 1 + strlen(bv) + 1);
-        } else if (cmdId == RACE_CMD_READ_SDK_VERSION) {
-            // SDK version string e.g. "SDK-2.5.1\0"
-            const char *sdk = "SDK-2.5.1";
-            uint8_t p[16];
-            p[0] = 0x00; // RC = SUCCESS
-            memcpy(p + 1, sdk, strlen(sdk) + 1);
-            buildRsp(p, 1 + strlen(sdk) + 1);
-        } else if (cmdId == RACE_CMD_GET_BD_ADDRESS) {
-            // Classic BD_ADDR response: RC (0x00) + Agent (0x00) + BD_ADDR (6B LE)
-            uint8_t p[8] = { 0x00, 0x00, 0xEF, 0xCD, 0xAB, 0x56, 0xDB, 0x94 };
-            buildRsp(p, sizeof(p));
-        } else if (cmdId == RACE_CMD_GET_LINK_KEY) {
-            // Link keys: RC (0x00) + NumDevices (0x00) + Reserved (0x00)
-            uint8_t p[3] = { 0x00, 0x00, 0x00 };
-            buildRsp(p, sizeof(p));
-        } else if (cmdId == RACE_CMD_READ_ADDRESS) {
-            // RAM Read response: RC (0x00) + 0x00 0x00 + Addr (4B LE echoed) + Data (4B LE)
-            if (len >= sizeof(RaceHeader) + 6) {
-                const uint8_t *reqData = data + sizeof(RaceHeader);
-                uint8_t p[11];
-                p[0] = 0x00; // RC = SUCCESS
-                p[1] = 0x00;
-                p[2] = 0x00;
-                // Echo address
-                p[3] = reqData[2];
-                p[4] = reqData[3];
-                p[5] = reqData[4];
-                p[6] = reqData[5];
-                // Simulated RAM data at address
-                p[7] = 0x9C;
-                p[8] = 0x8C;
-                p[9] = 0x23;
-                p[10] = 0x14;
-                buildRsp(p, sizeof(p));
-            }
-        } else if (cmdId == RACE_CMD_STORAGE_PAGE_READ) {
-            // Flash page read response: RC (0x00) + storage_type (1B) + 0x00 0x00 (2B) + Addr (4B LE) + 256B data
-            if (len >= sizeof(RaceHeader) + 6) {
-                const uint8_t *reqData = data + sizeof(RaceHeader);
-                std::vector<uint8_t> p(8 + 256, 0x00);
-                p[0] = 0x00; // RC = SUCCESS
-                p[1] = reqData[0]; // storage type
-                p[2] = 0x00;
-                p[3] = 0x00;
-                // Echo address
-                p[4] = reqData[2];
-                p[5] = reqData[3];
-                p[6] = reqData[4];
-                p[7] = reqData[5];
-                // Fill simulated partition table
-                if (reqData[2] == 0 && reqData[3] == 0 && reqData[4] == 0 && reqData[5] == 0) {
-                    size_t ptOff = 8 + 0x0C;
-                    p[ptOff + 0] = 0x00; p[ptOff + 1] = 0x00; p[ptOff + 2] = 0x01; p[ptOff + 3] = 0x00; // 0x00010000
-                    p[ptOff + 8] = 0x00; p[ptOff + 9] = 0x00; p[ptOff + 10] = 0x10; p[ptOff + 11] = 0x00; // 1MB
-                    p[ptOff + 36] = 0x02; // SYSTEM
-                }
-                buildRsp(p.data(), p.size());
-            }
-        } else {
-            // Generic SUCCESS response for other RACE commands: RC (0x00)
-            uint8_t p[1] = { 0x00 };
-            buildRsp(p, sizeof(p));
-        }
-
-        if (!rspPkt.empty()) {
-            m_pNotifyChar->setValue(rspPkt.data(), rspPkt.size());
-            m_pNotifyChar->notify();
-            g_hpState.addLog("[RACE-RSP] Cmd 0x" + String(cmdId, HEX));
-            Serial.printf("[HONEYPOT] Sent RACE response for cmd 0x%04X (%d bytes)\n", cmdId, (int)rspPkt.size());
-        }
-    }
-#endif
 };
 
 static HoneypotServerCallbacks g_hpServerCallbacks;
@@ -821,32 +718,48 @@ bool startGattHoneypotService(const String &jsonConfigOrPath) {
 
     g_hpState.activeDevice = dev;
 
-    // 1. Configure Hardware MAC address if specified
+    // Preserve the interface address so a custom profile does not leak into
+    // other BLE features after the honeypot stops.
     uint8_t mac[6];
     bool hasCustomMac = parseMacBytes(dev.mac, mac);
     if (!hasCustomMac) return false;
-    g_hpState.isRunning = true;
+    if (esp_read_mac(g_originalBluetoothMac, ESP_MAC_BT) != ESP_OK) return false;
+    g_originalBluetoothMacSaved = true;
 
-    // 2. Initialize BLE
-    BLEStateManager::initBLE(dev.name, ESP_PWR_LVL_P9);
+    // NimBLE reads the public identity address during initialization, so set
+    // the profile address before starting the stack.
+    if (!dev.isRandomMac && esp_iface_mac_addr_set(mac, ESP_MAC_BT) != ESP_OK) {
+        g_originalBluetoothMacSaved = false;
+        return false;
+    }
 
-    if (hasCustomMac) {
-        if (dev.isRandomMac) {
-            uint8_t addr_le[6];
-            addr_le[0] = mac[5];
-            addr_le[1] = mac[4];
-            addr_le[2] = mac[3];
-            addr_le[3] = mac[2];
-            addr_le[4] = mac[1];
-            addr_le[5] = mac[0] | 0xC0; // MSB with static random bits set
-            ble_hs_id_set_rnd(addr_le);
-            NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
-        } else {
-            esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+    // Initialize BLE only after configuring the public identity address.
+    if (!BLEStateManager::initBLE(dev.name, ESP_PWR_LVL_P9)) {
+        esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+        g_originalBluetoothMacSaved = false;
+        return false;
+    }
+
+    if (dev.isRandomMac) {
+        uint8_t addr_le[6];
+        addr_le[0] = mac[5];
+        addr_le[1] = mac[4];
+        addr_le[2] = mac[3];
+        addr_le[3] = mac[2];
+        addr_le[4] = mac[1];
+        addr_le[5] = mac[0] | 0xC0; // MSB with static random bits set
+        if (ble_hs_id_set_rnd(addr_le) != 0 || !NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM)) {
+            esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
             NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+            BLEStateManager::deinitBLE(true);
+            g_originalBluetoothMacSaved = false;
+            return false;
         }
-    } else {
-        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+    } else if (!NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC)) {
+        esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+        BLEStateManager::deinitBLE(true);
+        g_originalBluetoothMacSaved = false;
+        return false;
     }
 
     NimBLEDevice::setSecurityAuth(false, false, false);
@@ -854,11 +767,15 @@ bool startGattHoneypotService(const String &jsonConfigOrPath) {
     // 3. Create Server
     NimBLEServer *pServer = NimBLEDevice::createServer();
     if (!pServer) {
-        g_hpState.isRunning = false;
+        esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+        BLEStateManager::deinitBLE(true);
+        g_originalBluetoothMacSaved = false;
         return false;
     }
 
     pServer->setCallbacks(&g_hpServerCallbacks, false);
+    pServer->advertiseOnDisconnect(true);
 
     // 4. Build GATT database from device definition
     size_t totalChars = 0;
@@ -870,18 +787,42 @@ bool startGattHoneypotService(const String &jsonConfigOrPath) {
 
     NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
     pAdv->reset();
-    pAdv->setName(dev.name.c_str());
+    if (!pAdv->setConnectableMode(BLE_GAP_CONN_MODE_UND) ||
+        !pAdv->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN)) {
+        if (g_originalBluetoothMacSaved) {
+            esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+            g_originalBluetoothMacSaved = false;
+        }
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+        BLEStateManager::deinitBLE(true);
+        return false;
+    }
+    // Put the device name in the primary packet so passive scanners can
+    // identify the honeypot; service UUIDs can spill into the scan response.
+    String advertisedName = dev.name;
+    if (advertisedName.length() > 26) advertisedName = advertisedName.substring(0, 26);
+    if (!pAdv->setName(advertisedName.c_str())) {
+        Serial.println(F("[HONEYPOT] Failed to add device name to advertising data"));
+        if (g_originalBluetoothMacSaved) {
+            esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+            g_originalBluetoothMacSaved = false;
+        }
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+        BLEStateManager::deinitBLE(true);
+        g_hpCharCallbacksPool.clear();
+        return false;
+    }
+    pAdv->enableScanResponse(true);
 
-    int advServiceCount = 0;
     for (size_t sIdx = 0; sIdx < dev.services.size(); sIdx++) {
         const auto &sDef = dev.services[sIdx];
         NimBLEService *pSvc = pServer->createService(sDef.uuid.c_str());
         if (!pSvc) continue;
 
-        // Advertise primary service in 31-byte advertising frame
-        if (advServiceCount < 2) {
-            pAdv->addServiceUUID(sDef.uuid.c_str());
-            advServiceCount++;
+        // NimBLE fills the advertising packet first, then the scan response.
+        // A UUID that does not fit either packet remains available over GATT.
+        if (!pAdv->addServiceUUID(sDef.uuid.c_str())) {
+            g_hpState.addLog("[ADV] Service UUID list full");
         }
 
         for (size_t cIdx = 0; cIdx < sDef.characteristics.size(); cIdx++) {
@@ -901,11 +842,31 @@ bool startGattHoneypotService(const String &jsonConfigOrPath) {
         }
     }
 
-    pServer->start();
+    if (!pServer->start()) {
+        if (g_originalBluetoothMacSaved) {
+            esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+            g_originalBluetoothMacSaved = false;
+        }
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+        BLEStateManager::deinitBLE(true);
+        g_hpCharCallbacksPool.clear();
+        return false;
+    }
 
-    // 5. Start Advertising (Connectable, Scan Response enabled)
-    pAdv->enableScanResponse(true);
-    pAdv->start();
+    // 5. Start connectable advertising indefinitely.
+    if (!pAdv->start(0)) {
+        Serial.println(F("[HONEYPOT] Failed to start advertising"));
+        pAdv->stop();
+        if (g_originalBluetoothMacSaved) {
+            esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+            g_originalBluetoothMacSaved = false;
+        }
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+        BLEStateManager::deinitBLE(true);
+        g_hpCharCallbacksPool.clear();
+        return false;
+    }
+    g_hpState.isRunning = true;
 
     g_hpState.addLog("[INIT] Honeypot: " + dev.name);
     g_hpState.addLog("[MAC] " + dev.mac + (dev.isRandomMac ? " (RND)" : " (PUB)"));
@@ -931,11 +892,16 @@ void stopGattHoneypotService() {
         }
     }
 
-    g_hpCharCallbacksPool.clear();
-
     vTaskDelay(100 / portTICK_PERIOD_MS);
+    // NimBLE address APIs require a live host; restore identity before
+    // deinitializing the stack. Keep callbacks alive until that teardown ends.
+    if (g_originalBluetoothMacSaved) {
+        esp_iface_mac_addr_set(g_originalBluetoothMac, ESP_MAC_BT);
+        g_originalBluetoothMacSaved = false;
+    }
     NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
     BLEStateManager::deinitBLE(true);
+    g_hpCharCallbacksPool.clear();
     Serial.println(F("[HONEYPOT] Stopped and BLE stack cleaned."));
 }
 
@@ -1087,7 +1053,8 @@ void runGattHoneypot(const String &jsonFilePath) {
     bool lastConnected = false;
     uint32_t lastReadCount = 0xFFFFFFFF;
     uint32_t lastWriteCount = 0xFFFFFFFF;
-    size_t lastLogCount = 0;
+    uint32_t lastLogGeneration = UINT32_MAX;
+    uint32_t lastAdvertisingCheck = 0;
 
     while (g_hpState.isRunning) {
         if (check(EscPress) || check(PrevPress)) {
@@ -1108,7 +1075,7 @@ void runGattHoneypot(const String &jsonFilePath) {
                         g_hpState.logLines.clear();
                         xSemaphoreGive(g_hpState.logMutex);
                     }
-                    lastLogCount = 0;
+                    g_hpState.logGeneration++;
                 } else if (lower == 's') {
                     // Save logs to storage
                     String savedPath;
@@ -1125,6 +1092,20 @@ void runGattHoneypot(const String &jsonFilePath) {
         }
 
         uint32_t now = millis();
+        if (!g_hpState.isConnected && now - lastAdvertisingCheck >= 1000) {
+            lastAdvertisingCheck = now;
+            NimBLEServer *pServer = NimBLEDevice::getServer();
+            NimBLEAdvertising *pAdv = pServer ? pServer->getAdvertising() : nullptr;
+            if (pAdv && !pAdv->isAdvertising()) {
+                if (pAdv->start(0)) {
+                    g_hpState.addLog("[ADV] Advertising resumed");
+                    Serial.println(F("[HONEYPOT] Advertising resumed"));
+                } else {
+                    g_hpState.addLog("[ERR] Advertising restart failed");
+                    Serial.println(F("[HONEYPOT] Advertising restart failed"));
+                }
+            }
+        }
         if (now - lastRefresh >= 200) {
             lastRefresh = now;
 
@@ -1157,15 +1138,17 @@ void runGattHoneypot(const String &jsonFilePath) {
 
             // 3. Log View Area
             std::vector<String> snapshotLogs;
+            uint32_t snapshotLogGeneration = 0;
             g_hpState.initMutex();
             if (g_hpState.logMutex && xSemaphoreTake(g_hpState.logMutex, pdMS_TO_TICKS(30)) == pdTRUE) {
                 snapshotLogs.assign(g_hpState.logLines.begin(), g_hpState.logLines.end());
+                snapshotLogGeneration = g_hpState.logGeneration;
                 xSemaphoreGive(g_hpState.logMutex);
             }
 
-            if (snapshotLogs.size() != lastLogCount || g_hpState.isConnected != lastConnected ||
+            if (snapshotLogGeneration != lastLogGeneration || g_hpState.isConnected != lastConnected ||
                 g_hpState.readCount != lastReadCount || g_hpState.writeCount != lastWriteCount) {
-                lastLogCount = snapshotLogs.size();
+                lastLogGeneration = snapshotLogGeneration;
                 lastConnected = g_hpState.isConnected;
                 lastReadCount = g_hpState.readCount;
                 lastWriteCount = g_hpState.writeCount;
