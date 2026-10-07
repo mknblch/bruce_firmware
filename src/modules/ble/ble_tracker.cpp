@@ -812,12 +812,13 @@ void BleTrackerMenu() {
     }
 }
 
-void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient, uint8_t targetAddrType) {
+void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient, uint8_t targetAddrType,
+                   uint16_t connectedServerHandle) {
     // Full-screen tracking view, sized for 240x135 (Cardputer/ADV) and smaller displays: a
     // title row with [ACTIVE]/[PASSIVE] status indicator, an audio-mixer style VU meter with
     // smoothed RSSI & decaying peak hold, and a dBm/stale readout. A persistent onResult()
     // callback (TrackerScanCallbacks) keeps feeding the ring buffer in the background, while
-    // active central connections poll link-layer RSSI directly.
+    // existing client/server connections can poll link-layer RSSI directly.
     bool bleWasActiveBefore = BLEConnected || (BLEDevice::getServer() != nullptr);
 #if !defined(LITE_VERSION)
     bleWasActiveBefore =
@@ -828,7 +829,8 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
     bool scannerWasScanning = scannerWasPresent && pBLEScan->isScanning();
     bool ownsScanner = !bleWasActiveBefore && !scannerWasPresent && !scannerWasScanning;
     bool connectedClient = pClient != nullptr && pClient->isConnected();
-    if (!ownsScanner && !connectedClient) {
+    bool connectedServerPeer = connectedServerHandle != 0xFFFF;
+    if (!ownsScanner && !connectedClient && !connectedServerPeer) {
         displayError("BLE scanner already in use");
         return;
     }
@@ -933,12 +935,19 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
         if (dtSec < 0.0f || dtSec > 1.0f) dtSec = 0.05f;
         lastFrameMs = nowMs;
 
-        // Active connection RSSI polling (when tracking directly from GATT Explorer while connected)
-        bool isActivelyConnected = (pClient != nullptr && pClient->isConnected());
-        if (isActivelyConnected) {
+        // Poll RSSI directly on an existing client or honeypot server connection.
+        bool isActivelyConnected = false;
+        if (pClient != nullptr && pClient->isConnected()) {
             int connRssi = pClient->getRssi();
             if (connRssi != 0) {
                 g_history.appendCurrent((int8_t)connRssi, TRACK_SRC_ESP32);
+                isActivelyConnected = true;
+            }
+        } else if (connectedServerPeer) {
+            int8_t connRssi = 0;
+            if (ble_gap_conn_rssi(connectedServerHandle, &connRssi) == 0) {
+                g_history.appendCurrent(connRssi, TRACK_SRC_ESP32);
+                isActivelyConnected = true;
             }
         }
 
@@ -1152,7 +1161,7 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
         pBLEScan->setScanCallbacks(nullptr);
     }
 
-    if (pClient == nullptr && !bleWasActiveBefore) {
+    if (pClient == nullptr && !connectedServerPeer && !bleWasActiveBefore) {
 #if !defined(LITE_VERSION)
         if (!BLEStateManager::isBLEActive()) stopBLEStack();
 #else

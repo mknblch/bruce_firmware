@@ -1,0 +1,28 @@
+{
+  "name": "Generic Smart TV",
+  "mac": "CE:32:43:54:65:76",
+  "mac_type": "random",
+  "services": [
+    {
+      "uuid": "180A",
+      "characteristics": [
+        { "uuid": "2A29", "properties": ["read"], "value": "Example Home" },
+        { "uuid": "2A24", "properties": ["read"], "value": "Smart-TV-55" },
+        { "uuid": "2A26", "properties": ["read"], "value": "3.2.1" }
+      ]
+    },
+    {
+      "uuid": "180F",
+      "characteristics": [
+        { "uuid": "2A19", "properties": ["read"], "value": "64", "is_hex": true }
+      ]
+    },
+    {
+      "uuid": "0000FD50-0000-1000-8000-00805F9B34FB",
+      "characteristics": [
+        { "uuid": "0000FD51-0000-1000-8000-00805F9B34FB", "properties": ["write", "write_nr"], "value": "" },
+        { "uuid": "0000FD52-0000-1000-8000-00805F9B34FB", "properties": ["read", "notify"], "value": "00", "is_hex": true }
+      ]
+    }
+  ]
+}

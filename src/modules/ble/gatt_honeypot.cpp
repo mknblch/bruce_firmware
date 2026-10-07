@@ -8,6 +8,7 @@
 #include "core/sd_functions.h"
 #include "core/scrollableTextArea.h"
 #include "core/utils.h"
+#include "modules/ble/ble_tracker.h"
 #include <NimBLEDevice.h>
 #include <globals.h>
 #include <esp_mac.h>
@@ -48,6 +49,7 @@ struct HoneypotState {
     volatile bool isRunning = false;
     volatile bool isConnected = false;
     char peerAddress[20] = "None";
+    uint16_t peerConnHandle = 0xFFFF;
     uint16_t peerMtu = 23;
     uint32_t connCount = 0;
     uint32_t readCount = 0;
@@ -79,7 +81,7 @@ struct HoneypotState {
         }
     }
 
-    void setPeer(const char *addr, uint16_t mtu) {
+    void setPeer(const char *addr, uint16_t mtu, uint16_t connHandle = 0xFFFF) {
         initMutex();
         if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (addr) {
@@ -89,11 +91,12 @@ struct HoneypotState {
                 strcpy(peerAddress, "None");
             }
             peerMtu = mtu;
+            peerConnHandle = connHandle;
             xSemaphoreGive(logMutex);
         }
     }
 
-    void getPeer(char *outAddr, size_t maxLen, uint16_t *outMtu = nullptr) {
+    void getPeer(char *outAddr, size_t maxLen, uint16_t *outMtu = nullptr, uint16_t *outConnHandle = nullptr) {
         initMutex();
         if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (outAddr && maxLen > 0) {
@@ -101,6 +104,7 @@ struct HoneypotState {
                 outAddr[maxLen - 1] = '\0';
             }
             if (outMtu) *outMtu = peerMtu;
+            if (outConnHandle) *outConnHandle = peerConnHandle;
             xSemaphoreGive(logMutex);
         }
     }
@@ -129,6 +133,7 @@ struct HoneypotState {
         if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             strcpy(peerAddress, "None");
             peerMtu = 23;
+            peerConnHandle = 0xFFFF;
             lastWritePayload[0] = '\0';
             logLines.clear();
             logGeneration = 0;
@@ -592,7 +597,7 @@ public:
         g_hpState.connCount++;
         std::string pAddr = connInfo.getAddress().toString();
         uint16_t mtu = connInfo.getMTU();
-        g_hpState.setPeer(pAddr.c_str(), mtu);
+        g_hpState.setPeer(pAddr.c_str(), mtu, connInfo.getConnHandle());
         g_hpState.addLog("[CONN] From " + String(pAddr.c_str()) + " (MTU:" + String(mtu) + ")");
         Serial.printf("[HONEYPOT] Incoming connection from %s (MTU: %d)\n", pAddr.c_str(), mtu);
     }
@@ -909,123 +914,84 @@ bool isGattHoneypotActive() {
     return g_hpState.isRunning;
 }
 
-//=============================================================================
-// Preset Export & Storage Helpers
-//=============================================================================
-
-static bool exportDefaultPresetsToStorage(String &outPath) {
-    bool useSd = sdcardMounted;
-    if (!useSd) useSd = setupSdCard(2);
-
-    FS *fs = useSd ? (FS *)&SD : (FS *)&LittleFS;
-    String baseDir = useSd ? "/sd/bruce/honeypot" : "/bruce/honeypot";
-
-    if (!fs->exists("/bruce")) fs->mkdir("/bruce");
-    if (!fs->exists("/bruce/honeypot")) fs->mkdir("/bruce/honeypot");
-
-    String filePath = baseDir + "/airoha_race.json";
-    String localPath = useSd ? "/bruce/honeypot/airoha_race.json" : "/bruce/honeypot/airoha_race.json";
-
-    File f = fs->open(localPath, FILE_WRITE);
-    if (!f) {
-        Serial.printf("[HONEYPOT] Failed to export to %s\n", localPath.c_str());
-        return false;
+String getGattHoneypotStatus() {
+    String status = "=== GATT Honeypot Status ===\nState: ";
+    status += g_hpState.isRunning ? "RUNNING" : "STOPPED";
+    status += "\nProfile: ";
+    status += g_hpState.activeDevice.name.isEmpty() ? "(none)" : g_hpState.activeDevice.name;
+    if (!g_hpState.activeDevice.mac.isEmpty()) {
+        status += "\nIdentity: ";
+        status += g_hpState.activeDevice.mac;
+        status += g_hpState.activeDevice.isRandomMac ? " (random)" : " (public)";
     }
 
-    HoneypotDeviceDef airohaDev = getBuiltinAirohaRacePreset();
-    String jsonStr = serializeHoneypotDeviceToJson(airohaDev);
-    f.print(jsonStr);
-    f.flush();
-    f.close();
-
-    // Also export multi-preset bundle
-    String bundlePath = useSd ? "/bruce/honeypot/presets.json" : "/bruce/honeypot/presets.json";
-    File fb = fs->open(bundlePath, FILE_WRITE);
-    if (fb) {
-        JsonDocument bDoc;
-        JsonArray pArr = bDoc["presets"].to<JsonArray>();
-
-        auto addDevToBundle = [&pArr](const HoneypotDeviceDef &d) {
-            JsonObject dObj = pArr.add<JsonObject>();
-            dObj["name"] = d.name;
-            dObj["mac"] = d.mac;
-            dObj["mac_type"] = d.isRandomMac ? "random" : "public";
-
-            JsonArray svcsArr = dObj["services"].to<JsonArray>();
-            for (const auto &svc : d.services) {
-                JsonObject sObj = svcsArr.add<JsonObject>();
-                sObj["uuid"] = svc.uuid;
-                JsonArray charsArr = sObj["characteristics"].to<JsonArray>();
-                for (const auto &ch : svc.characteristics) {
-                    JsonObject cObj = charsArr.add<JsonObject>();
-                    cObj["uuid"] = ch.uuid;
-                    JsonArray propsArr = cObj["properties"].to<JsonArray>();
-                    if (ch.properties & NIMBLE_PROPERTY::READ) propsArr.add("read");
-                    if (ch.properties & NIMBLE_PROPERTY::WRITE) propsArr.add("write");
-                    if (ch.properties & NIMBLE_PROPERTY::WRITE_NR) propsArr.add("write_nr");
-                    if (ch.properties & NIMBLE_PROPERTY::NOTIFY) propsArr.add("notify");
-                    if (ch.properties & NIMBLE_PROPERTY::INDICATE) propsArr.add("indicate");
-                    cObj["value"] = ch.rawValueStr;
-                    if (ch.isHex) cObj["is_hex"] = true;
-                }
-            }
-        };
-
-        addDevToBundle(getBuiltinAirohaRacePreset());
-        addDevToBundle(getBuiltinSonyRacePreset());
-        addDevToBundle(getBuiltinAiroha16BitPreset());
-        addDevToBundle(getBuiltinSmartLockPreset());
-
-        serializeJsonPretty(bDoc, fb);
-        fb.flush();
-        fb.close();
+    bool advertising = false;
+    if (g_hpState.isRunning) {
+        NimBLEServer *pServer = NimBLEDevice::getServer();
+        NimBLEAdvertising *pAdv = pServer ? pServer->getAdvertising() : nullptr;
+        advertising = pAdv && pAdv->isAdvertising();
     }
+    status += "\nAdvertising: ";
+    status += advertising ? "ACTIVE" : "INACTIVE";
+    status += "\nConnected: ";
+    status += g_hpState.isConnected ? "YES" : "NO";
 
-    outPath = filePath;
-    return true;
+    char peer[20] = "None";
+    uint16_t mtu = 23;
+    g_hpState.getPeer(peer, sizeof(peer), &mtu);
+    status += "\nPeer: ";
+    status += peer;
+    status += " (MTU ";
+    status += String(mtu);
+    status += ")\nConnections: ";
+    status += String((unsigned int)g_hpState.connCount);
+    status += "\nReads: ";
+    status += String((unsigned int)g_hpState.readCount);
+    status += "  Writes: ";
+    status += String((unsigned int)g_hpState.writeCount);
+    status += "  Subscriptions: ";
+    status += String((unsigned int)g_hpState.subCount);
+    return status;
 }
 
-static bool saveHoneypotLogsToStorage(String &outPath) {
-    bool useSd = sdcardMounted;
-    if (!useSd) useSd = setupSdCard(2);
-
-    FS *fs = useSd ? (FS *)&SD : (FS *)&LittleFS;
-    String baseDir = useSd ? "/sd/bruce/honeypot_logs" : "/bruce/honeypot_logs";
-
-    if (!fs->exists("/bruce")) fs->mkdir("/bruce");
-    if (!fs->exists("/bruce/honeypot_logs")) fs->mkdir("/bruce/honeypot_logs");
-
-    char fname[64];
-    snprintf(fname, sizeof(fname), "%s/log_%u.txt", baseDir.c_str(), (unsigned int)(millis() / 1000));
-    outPath = String(fname);
-
-    String localPath = String(fname);
-    if (useSd && localPath.startsWith("/sd")) {
-        localPath = localPath.substring(3);
-    }
-
-    File f = fs->open(localPath, FILE_WRITE);
-    if (!f) return false;
-
-    f.println("=== GATT Honeypot Activity Log ===");
-    f.printf("Device: %s\n", g_hpState.activeDevice.name.c_str());
-    f.printf("MAC: %s (%s)\n", g_hpState.activeDevice.mac.c_str(), g_hpState.activeDevice.isRandomMac ? "RANDOM" : "PUBLIC");
-    f.printf("Total Connections: %u\n", (unsigned int)g_hpState.connCount);
-    f.printf("Total Reads: %u, Writes: %u, Subs: %u\n",
-             (unsigned int)g_hpState.readCount, (unsigned int)g_hpState.writeCount, (unsigned int)g_hpState.subCount);
-    f.println("----------------------------------");
-
+String getGattHoneypotLogs() {
+    std::vector<String> snapshot;
     g_hpState.initMutex();
     if (g_hpState.logMutex && xSemaphoreTake(g_hpState.logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        for (const auto &line : g_hpState.logLines) {
-            f.println(line);
-        }
+        snapshot.assign(g_hpState.logLines.begin(), g_hpState.logLines.end());
         xSemaphoreGive(g_hpState.logMutex);
     }
 
-    f.flush();
-    f.close();
-    return true;
+    String logs = "=== Recent GATT Honeypot Events ===\n";
+    if (snapshot.empty()) {
+        logs += "(no events)";
+        return logs;
+    }
+    for (const String &line : snapshot) {
+        logs += line;
+        logs += '\n';
+    }
+    return logs;
+}
+
+bool setGattHoneypotAdvertising(bool enabled) {
+    if (!g_hpState.isRunning) return false;
+
+    NimBLEServer *pServer = NimBLEDevice::getServer();
+    NimBLEAdvertising *pAdv = pServer ? pServer->getAdvertising() : nullptr;
+    if (!pAdv) return false;
+
+    if (enabled) {
+        if (g_hpState.isConnected) return false;
+        if (pAdv->isAdvertising()) return true;
+        if (!pAdv->start(0)) return false;
+        g_hpState.addLog("[ADV] Advertising started by serial command");
+        return true;
+    }
+
+    pAdv->stop();
+    g_hpState.addLog("[ADV] Advertising stopped by serial command");
+    return !pAdv->isAdvertising();
 }
 
 //=============================================================================
@@ -1038,6 +1004,7 @@ void runGattHoneypot(const String &jsonFilePath) {
         return;
     }
 
+    tft.fillScreen(bruceConfig.bgColor);
     drawMainBorderWithTitle("GATT HONEYPOT");
 
     int lineH = 8 * FP + 3;
@@ -1055,10 +1022,45 @@ void runGattHoneypot(const String &jsonFilePath) {
     uint32_t lastWriteCount = 0xFFFFFFFF;
     uint32_t lastLogGeneration = UINT32_MAX;
     uint32_t lastAdvertisingCheck = 0;
-
     while (g_hpState.isRunning) {
         if (check(EscPress) || check(PrevPress)) {
             break;
+        }
+
+        if (check(SelPress)) {
+            std::vector<Option> actions = {
+                {"Stop Honeypot", []() {}},
+                {"Clear Text", []() {}}
+            };
+            bool connected = g_hpState.isConnected;
+            if (connected) actions.push_back({"Track Connected Device", []() {}});
+            actions.push_back({"< Back", []() {}});
+
+            int selected = loopOptions(actions, MENU_TYPE_SUBMENU, "HONEYPOT ACTIONS");
+            if (selected == 0) {
+                break;
+            } else if (selected == 1) {
+                g_hpState.initMutex();
+                if (g_hpState.logMutex && xSemaphoreTake(g_hpState.logMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    g_hpState.logLines.clear();
+                    g_hpState.logGeneration++;
+                    xSemaphoreGive(g_hpState.logMutex);
+                }
+                lastRefresh = 0;
+            } else if (connected && selected == 2 && g_hpState.isConnected) {
+                char peerAddress[20] = "None";
+                uint16_t peerConnHandle = 0xFFFF;
+                g_hpState.getPeer(peerAddress, sizeof(peerAddress), nullptr, &peerConnHandle);
+                if (peerConnHandle != 0xFFFF) {
+                    bleTrackerRun(peerAddress, "Connected: " + String(peerAddress), nullptr, 0xFF, peerConnHandle);
+                } else {
+                    displayWarning("Connected peer unavailable", true);
+                }
+            }
+            tft.fillScreen(bruceConfig.bgColor);
+            drawMainBorderWithTitle("GATT HONEYPOT");
+            lastRefresh = 0;
+            lastLogGeneration = UINT32_MAX;
         }
 
         keyStroke k = _getKeyPress();
@@ -1076,17 +1078,6 @@ void runGattHoneypot(const String &jsonFilePath) {
                         xSemaphoreGive(g_hpState.logMutex);
                     }
                     g_hpState.logGeneration++;
-                } else if (lower == 's') {
-                    // Save logs to storage
-                    String savedPath;
-                    if (saveHoneypotLogsToStorage(savedPath)) {
-                        displaySuccess("Saved: " + savedPath, true);
-                        drawMainBorderWithTitle("GATT HONEYPOT");
-                        lastRefresh = 0; // force full redraw
-                    } else {
-                        displayError("Save log failed", true);
-                        drawMainBorderWithTitle("GATT HONEYPOT");
-                    }
                 }
             }
         }
@@ -1174,7 +1165,7 @@ void runGattHoneypot(const String &jsonFilePath) {
 
             // Footer
             tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            tft.drawString("ESC:Stop  C:Clear  S:Save", BORDER_PAD_X, footY);
+            tft.drawString("SEL:Menu ESC:Stop C:Clear S:Save", BORDER_PAD_X, footY);
         }
 
         vTaskDelay(30 / portTICK_PERIOD_MS);
@@ -1249,12 +1240,9 @@ static void selectBuiltinPresetMenu() {
         HoneypotDeviceDef picked = presets[sel].getter();
         showHoneypotDeviceDetailsUi(picked);
 
-        String runChoice = keyboard("Y", 1, "Launch Honeypot? (Y/N)");
-        if (runChoice.equalsIgnoreCase("Y")) {
-            String jsonStr = serializeHoneypotDeviceToJson(picked);
-            runGattHoneypot(jsonStr);
-            break;
-        }
+        String jsonStr = serializeHoneypotDeviceToJson(picked);
+        runGattHoneypot(jsonStr);
+        break;
     }
 }
 
@@ -1288,12 +1276,7 @@ static void loadJsonFileMenu() {
         return;
     }
 
-    showHoneypotDeviceDetailsUi(dev);
-
-    String runChoice = keyboard("Y", 1, "Launch Honeypot? (Y/N)");
-    if (runChoice.equalsIgnoreCase("Y")) {
-        runGattHoneypot(pickedFile);
-    }
+    runGattHoneypot(pickedFile);
 }
 
 void gattHoneypotMenu() {

@@ -1,6 +1,7 @@
 #include "ble_commands.h"
 #include "modules/ble/gatt_server.h"
 #include "modules/ble/gatt_explorer.h"
+#include "modules/ble/gatt_honeypot.h"
 #include "modules/ble/race_client.h"
 #include "modules/ble/ble_oui.h"
 #include <globals.h>
@@ -101,6 +102,63 @@ static uint32_t bleCallback(cmd *c) {
         if (timeoutSec <= 0) timeoutSec = 5;
         gattScanCli(timeoutSec);
         return true;
+    } else if (action == "honeypot") {
+        String subAction = param1;
+        subAction.toLowerCase();
+
+        if (subAction == "start") {
+            if (param2.isEmpty()) {
+                serialDevice->println("Usage: ble honeypot start <profile.json path>");
+                return false;
+            }
+            if (isGattHoneypotActive()) {
+                serialDevice->println("Honeypot is already running; stop it before loading another profile.");
+                serialDevice->println(getGattHoneypotStatus());
+                return false;
+            }
+
+            serialDevice->println("Loading honeypot profile: " + param2);
+            if (!startGattHoneypotService(param2)) {
+                serialDevice->println("Failed to load profile or start honeypot; check the path, JSON, and serial log.");
+                return false;
+            }
+            serialDevice->println(getGattHoneypotStatus());
+            return true;
+        } else if (subAction == "stop") {
+            if (!isGattHoneypotActive()) {
+                serialDevice->println("Honeypot is already stopped.");
+                return true;
+            }
+            stopGattHoneypotService();
+            serialDevice->println("Honeypot stopped.");
+            return true;
+        } else if (subAction == "status") {
+            serialDevice->println(getGattHoneypotStatus());
+            return true;
+        } else if (subAction == "logs" || subAction == "log") {
+            serialDevice->println(getGattHoneypotLogs());
+            return true;
+        } else if (subAction == "adv") {
+            String advAction = param2;
+            advAction.toLowerCase();
+            if (advAction == "status" || advAction.isEmpty()) {
+                serialDevice->println(getGattHoneypotStatus());
+                return true;
+            }
+            if (advAction != "start" && advAction != "stop") {
+                serialDevice->println("Usage: ble honeypot adv <start|stop|status>");
+                return false;
+            }
+            bool enabled = advAction == "start";
+            if (!setGattHoneypotAdvertising(enabled)) {
+                serialDevice->println(enabled
+                                           ? "Could not start advertising (honeypot stopped or connected)."
+                                           : "Could not stop advertising.");
+                return false;
+            }
+            serialDevice->println(enabled ? "Honeypot advertising active." : "Honeypot advertising stopped.");
+            return true;
+        }
     } else if (action == "oui") {
         if (param1 == "" || param1 == "status" || param1 == "info") {
             serialDevice->println("=== OUI & Vendor Database Status ===");
@@ -138,6 +196,9 @@ static uint32_t bleCallback(cmd *c) {
         "  ble server stop\n"
         "  ble server status\n"
         "  ble scan [seconds]\n"
+        "  ble honeypot start <profile.json path>\n"
+        "  ble honeypot stop|status|logs\n"
+        "  ble honeypot adv <start|stop|status>\n"
         "  ble connect <MAC> [pub|rnd]\n"
         "  ble race <MAC> [pub|rnd] <check|info|media|ram|flash|parttable|raw>\n"
         "  ble oui [status|<MAC|OUI>]"

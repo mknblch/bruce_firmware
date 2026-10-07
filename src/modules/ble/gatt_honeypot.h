@@ -10,6 +10,9 @@ void runGattHoneypot(const String &jsonFilePath = "");
 bool startGattHoneypotService(const String &jsonConfigOrPath = "");
 void stopGattHoneypotService();
 bool isGattHoneypotActive();
+String getGattHoneypotStatus();
+String getGattHoneypotLogs();
+bool setGattHoneypotAdvertising(bool enabled);
 
 #endif // !LITE_VERSION
 

@@ -1,0 +1,27 @@
+{
+  "name": "Generic Smartwatch",
+  "mac": "C2:10:20:30:40:51",
+  "mac_type": "random",
+  "services": [
+    {
+      "uuid": "180A",
+      "characteristics": [
+        { "uuid": "2A29", "properties": ["read"], "value": "Example Devices" },
+        { "uuid": "2A24", "properties": ["read"], "value": "Watch-01" },
+        { "uuid": "2A26", "properties": ["read"], "value": "1.0.0" }
+      ]
+    },
+    {
+      "uuid": "180F",
+      "characteristics": [
+        { "uuid": "2A19", "properties": ["read", "notify"], "value": "64", "is_hex": true }
+      ]
+    },
+    {
+      "uuid": "180D",
+      "characteristics": [
+        { "uuid": "2A37", "properties": ["notify"], "value": "0048", "is_hex": true }
+      ]
+    }
+  ]
+}

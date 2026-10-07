@@ -40,9 +40,10 @@ void bleTrackerLockTarget(const String &label, const String &mac, uint8_t addrTy
 class NimBLEClient;
 
 // Main tracking loop/UI for a locked target. A supplied address type distinguishes matching
-// public/random addresses; 0xFF preserves MAC-only matching for older saved favorites. When a
-// connected `pClient` shares an existing BLE session, tracking uses connection RSSI without
-// modifying its scanner. Returns when the user presses EscPress.
-void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient = nullptr, uint8_t targetAddrType = 0xFF);
+// public/random addresses; 0xFF preserves MAC-only matching for older saved favorites. When
+// supplied a connected client or server connection handle, tracking uses link RSSI without
+// scanning or changing the connection. Returns when the user presses EscPress.
+void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *pClient = nullptr, uint8_t targetAddrType = 0xFF,
+                   uint16_t connectedServerHandle = 0xFFFF);
 
 #endif

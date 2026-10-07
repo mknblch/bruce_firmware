@@ -1,0 +1,22 @@
+{
+  "name": "Generic UART Bridge",
+  "mac": "D2:43:54:65:76:87",
+  "mac_type": "random",
+  "services": [
+    {
+      "uuid": "180A",
+      "characteristics": [
+        { "uuid": "2A29", "properties": ["read"], "value": "Example Devices" },
+        { "uuid": "2A24", "properties": ["read"], "value": "BLE-UART-01" },
+        { "uuid": "2A26", "properties": ["read"], "value": "1.0" }
+      ]
+    },
+    {
+      "uuid": "6E400001-B5A3-F393-E0A9-E50E24DCCA9E",
+      "characteristics": [
+        { "uuid": "6E400002-B5A3-F393-E0A9-E50E24DCCA9E", "properties": ["write", "write_nr"], "value": "" },
+        { "uuid": "6E400003-B5A3-F393-E0A9-E50E24DCCA9E", "properties": ["read", "notify"], "value": "48656C6C6F", "is_hex": true }
+      ]
+    }
+  ]
+}
