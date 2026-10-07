@@ -58,6 +58,7 @@ struct GattScannedDevice {
     int8_t rssi = -100;
     bool isConnectable = true;
     uint32_t lastSeen = 0;
+    uint32_t discoveredAt = 0;
     uint16_t packetCount = 0;
     uint16_t srv16[4] = {0};
     uint8_t srv16Count = 0;
@@ -148,6 +149,29 @@ static GattUiGeom gattUiGeom() {
 static uint16_t gattDimColor() {
     return getColorVariation(bruceConfig.priColor, 8, -1);
 }
+
+static int gattCompareText(const char *left, const char *right) {
+    while (*left && *right) {
+        int leftChar = tolower((unsigned char)*left++);
+        int rightChar = tolower((unsigned char)*right++);
+        if (leftChar != rightChar) return leftChar - rightChar;
+    }
+    return (unsigned char)*left - (unsigned char)*right;
+}
+
+static bool gattDeviceNameMacLess(const GattScannedDevice &left, const GattScannedDevice &right) {
+    bool leftHasName = left.name[0] != '\0';
+    bool rightHasName = right.name[0] != '\0';
+    if (leftHasName != rightHasName) return leftHasName;
+
+    int nameCompare = gattCompareText(leftHasName ? left.name : left.macStr, rightHasName ? right.name : right.macStr);
+    if (nameCompare != 0) return nameCompare < 0;
+    return strcmp(left.macStr, right.macStr) < 0;
+}
+
+static constexpr uint32_t GATT_NEW_DEVICE_HIGHLIGHT_MS = 5000;
+static constexpr uint16_t GATT_NEW_DEVICE_COLOR = 0x07E0;
+static constexpr uint16_t GATT_EVICTION_COLOR = 0xF986;
 
 String gattFitText(const String &text, int maxPx) {
     if (maxPx <= 0) return "";
@@ -588,7 +612,9 @@ private:
             if (memcmp(g_gattScanState.devices[i].macBytes, devVal, 6) == 0) {
                 g_gattScanState.devices[i].rssi = rssi;
                 g_gattScanState.devices[i].lastSeen = now;
-                g_gattScanState.devices[i].packetCount++;
+                if (g_gattScanState.devices[i].packetCount < UINT16_MAX) {
+                    g_gattScanState.devices[i].packetCount++;
+                }
                 if (isConn) g_gattScanState.devices[i].isConnectable = true;
 
                 if (g_gattScanState.devices[i].name[0] == '\0' && name[0] != '\0') {
@@ -629,15 +655,19 @@ private:
             strncpy(d.tag, tag, sizeof(d.tag) - 1);
             d.tag[sizeof(d.tag) - 1] = '\0';
             d.lastSeen = now;
+            d.discoveredAt = now;
             d.packetCount = 1;
 
             g_gattScanState.count++;
         } else {
-            // Buffer full: replace device with weakest RSSI if this device is stronger
+            // Buffer full: select the least-observed device, then the weakest RSSI.
             size_t minIdx = 0;
+            uint16_t minPackets = g_gattScanState.devices[0].packetCount;
             int8_t minRssi = g_gattScanState.devices[0].rssi;
             for (size_t i = 1; i < g_gattScanState.count; i++) {
-                if (g_gattScanState.devices[i].rssi < minRssi) {
+                if (g_gattScanState.devices[i].packetCount < minPackets ||
+                    (g_gattScanState.devices[i].packetCount == minPackets && g_gattScanState.devices[i].rssi < minRssi)) {
+                    minPackets = g_gattScanState.devices[i].packetCount;
                     minRssi = g_gattScanState.devices[i].rssi;
                     minIdx = i;
                 }
@@ -658,6 +688,7 @@ private:
                 strncpy(d.tag, tag, sizeof(d.tag) - 1);
                 d.tag[sizeof(d.tag) - 1] = '\0';
                 d.lastSeen = now;
+                d.discoveredAt = now;
                 d.packetCount = 1;
             }
         }
@@ -845,8 +876,7 @@ static void runContinuousScan(GattFilterMode filterMode) {
     int lineH = 8 * FP + 4;
     int headerY = BORDER_PAD_Y;
     int listStartY = headerY + lineH + 4;
-    int footerY = tftHeight - BORDER_PAD_Y - lineH;
-    int visibleRows = (footerY - listStartY) / lineH;
+    int visibleRows = (tftHeight - BORDER_PAD_Y - listStartY) / lineH;
     if (visibleRows < 1) visibleRows = 1;
 
     while (true) {
@@ -926,6 +956,10 @@ static void runContinuousScan(GattFilterMode filterMode) {
 
         // Copy snapshot from scanner state under lock
         if (millis() - lastUiUpdate > 100 || needsRedraw) {
+            char selectedMac[sizeof(uiDevices[0].macStr)] = {0};
+            if (selectedIdx >= 0 && selectedIdx < (int)uiCount) {
+                strncpy(selectedMac, uiDevices[selectedIdx].macStr, sizeof(selectedMac) - 1);
+            }
             if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
                 uiCount = g_gattScanState.count;
                 uiPackets = g_gattScanState.totalPackets;
@@ -933,6 +967,25 @@ static void runContinuousScan(GattFilterMode filterMode) {
                     uiDevices[i] = g_gattScanState.devices[i];
                 }
                 xSemaphoreGive(g_gattScanState.mutex);
+            }
+            std::sort(uiDevices, uiDevices + uiCount, gattDeviceNameMacLess);
+            if (selectedMac[0] != '\0') {
+                bool foundSelected = false;
+                for (size_t i = 0; i < uiCount; i++) {
+                    if (strcmp(uiDevices[i].macStr, selectedMac) == 0) {
+                        selectedIdx = (int)i;
+                        foundSelected = true;
+                        break;
+                    }
+                }
+                if (!foundSelected) {
+                    if (uiCount == 0) selectedIdx = 0;
+                    else if (selectedIdx >= (int)uiCount) selectedIdx = (int)uiCount - 1;
+                }
+            } else if (uiCount == 0) {
+                selectedIdx = 0;
+            } else if (selectedIdx >= (int)uiCount) {
+                selectedIdx = (int)uiCount - 1;
             }
             needsRedraw = true;
         }
@@ -988,6 +1041,21 @@ static void runContinuousScan(GattFilterMode filterMode) {
             tft.drawFastHLine(BORDER_PAD_X, headerY + lineH - 1, tftWidth - 2 * BORDER_PAD_X, TFT_DARKGREY);
 
             // 2. Device List rows
+            uint16_t minPackets = 0;
+            int8_t minRssi = -100;
+            if (uiCount > 0) {
+                minPackets = uiDevices[0].packetCount;
+                for (size_t i = 1; i < uiCount; i++) {
+                    minPackets = std::min(minPackets, uiDevices[i].packetCount);
+                }
+                bool haveMinRssi = false;
+                for (size_t i = 0; i < uiCount; i++) {
+                    if (uiDevices[i].packetCount == minPackets && (!haveMinRssi || uiDevices[i].rssi < minRssi)) {
+                        minRssi = uiDevices[i].rssi;
+                        haveMinRssi = true;
+                    }
+                }
+            }
             for (int r = 0; r < visibleRows; r++) {
                 int itemIdx = scrollOffset + r;
                 int rowY = listStartY + r * lineH;
@@ -995,7 +1063,10 @@ static void runContinuousScan(GattFilterMode filterMode) {
                 if (itemIdx < (int)uiCount) {
                     bool isSel = (itemIdx == selectedIdx);
                     uint16_t bg = isSel ? bruceConfig.priColor : bruceConfig.bgColor;
-                    uint16_t fg = isSel ? bruceConfig.bgColor : bruceConfig.priColor;
+                    bool isNew = now - uiDevices[itemIdx].discoveredAt < GATT_NEW_DEVICE_HIGHLIGHT_MS;
+                    bool isEvictionCandidate = uiDevices[itemIdx].packetCount == minPackets && uiDevices[itemIdx].rssi == minRssi;
+                    uint16_t highlightColor = isNew ? GATT_NEW_DEVICE_COLOR : (isEvictionCandidate ? GATT_EVICTION_COLOR : bruceConfig.priColor);
+                    uint16_t fg = isSel ? bruceConfig.bgColor : highlightColor;
 
                     tft.fillRect(BORDER_PAD_X, rowY, tftWidth - 2 * BORDER_PAD_X, lineH, bg);
                     tft.setTextColor(fg, bg);
@@ -1007,9 +1078,9 @@ static void runContinuousScan(GattFilterMode filterMode) {
                     for (int b = 0; b < 4; b++) {
                         int h = 2 + b * 2;
                         if (b < bars) {
-                            tft.fillRect(rssiX + b * 3, rowY + lineH - 3 - h, 2, h, fg);
+                            tft.fillRect(rssiX + b * 3, rowY + lineH - 3 - h, 2, h, highlightColor);
                         } else {
-                            tft.drawFastHLine(rssiX + b * 3, rowY + lineH - 4, 2, fg);
+                            tft.drawFastHLine(rssiX + b * 3, rowY + lineH - 4, 2, highlightColor);
                         }
                     }
 
@@ -1025,7 +1096,7 @@ static void runContinuousScan(GattFilterMode filterMode) {
                         devLabel += String(uiDevices[itemIdx].macStr);
                     }
 
-                    devLabel += " " + String(rssi) + "d";
+                    devLabel += " #" + String(uiDevices[itemIdx].packetCount) + " " + String(rssi) + "d";
                     if (uiDevices[itemIdx].addressType == BLE_ADDR_PUBLIC) {
                         devLabel += " [P]";
                     }
@@ -1043,11 +1114,6 @@ static void runContinuousScan(GattFilterMode filterMode) {
                 }
             }
 
-            // 3. Footer
-            tft.fillRect(BORDER_PAD_X, footerY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
-            tft.setTextColor(getColorVariation(bruceConfig.priColor, 8, -1), bruceConfig.bgColor);
-            const char *footText = g_gattPickCallback ? "ENTER/SEL pick   ESC back" : "ENTER/SEL explore   ESC back";
-            tft.drawCentreString(footText, tftWidth / 2, footerY + 1, 1);
         }
 
         vTaskDelay(pdMS_TO_TICKS(25));
