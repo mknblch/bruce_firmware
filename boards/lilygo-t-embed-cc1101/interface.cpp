@@ -148,8 +148,10 @@ void InputHandler(void) {
     static unsigned long lastEncoderMoveMs = 0;
     static int posDifference = 0;
     static int lastPos = 0;
+    static bool selWasActive = false;
     bool sel = !BTN_ACT;
     bool esc = !BTN_ACT;
+    bool selSampled = false;
 
     int newPos = encoder->getPosition();
     if (newPos != lastPos) {
@@ -168,9 +170,16 @@ void InputHandler(void) {
 
     if (millis() - tm > 200 || LongPress) {
         sel = digitalRead(SEL_BTN);
+        selSampled = true;
 #ifdef T_EMBED_1101
         esc = digitalRead(BK_BTN);
 #endif
+    }
+    bool selPressed = false;
+    if (selSampled) {
+        bool selActive = sel == BTN_ACT;
+        selPressed = selActive && !selWasActive;
+        selWasActive = selActive;
     }
     if (posDifference != 0 || sel == BTN_ACT || esc == BTN_ACT) {
         if (!wakeUpScreen()) AnyKeyPress = true;
@@ -193,7 +202,7 @@ void InputHandler(void) {
         tm2 = millis();
     }
 
-    if (sel == BTN_ACT && millis() - tm2 > 200) {
+    if (selPressed && millis() - tm2 > 200) {
         posDifference = 0;
         SelPress = true;
         tm = millis();

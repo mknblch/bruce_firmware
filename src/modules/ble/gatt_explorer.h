@@ -9,6 +9,8 @@
 #if !defined(LITE_VERSION)
 
 void gattExplorerMenu();
+String getGattExplorerDeviceName();
+bool applyGattExplorerBleIdentity(bool regenerateRandomAddress = false);
 bool gattConnectCli(const String &macStr, uint8_t addrType = 0);
 void gattScanCli(int timeoutSec = 5);
 

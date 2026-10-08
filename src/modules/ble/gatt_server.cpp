@@ -1,6 +1,7 @@
 #if !defined(LITE_VERSION)
 
 #include "gatt_server.h"
+#include "gatt_explorer.h"
 #include "BLE_Suite.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
@@ -523,13 +524,19 @@ bool startGattServerService(int profileMode) {
     g_srvState.reset();
     g_srvState.isRunning = true;
 
-    uint64_t chipid = ESP.getEfuseMac();
-    String serverName = "Bruce-GATT-" + String((uint16_t)(chipid), HEX);
-    serverName.toUpperCase();
+    String serverName = getGattExplorerDeviceName();
+    if (serverName.isEmpty()) {
+        uint64_t chipid = ESP.getEfuseMac();
+        serverName = "Bruce-GATT-" + String((uint16_t)(chipid), HEX);
+        serverName.toUpperCase();
+    }
 
     // 1. Initialize BLE with maximum power and zero authentication hurdles
     BLEStateManager::initBLE(serverName, ESP_PWR_LVL_P9);
-    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+    if (!applyGattExplorerBleIdentity()) {
+        g_srvState.isRunning = false;
+        return false;
+    }
     NimBLEDevice::setSecurityAuth(false, false, false);
 
     // 2. Create and configure Server

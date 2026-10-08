@@ -47,6 +47,9 @@ struct GattSettings {
     int timeoutSec = 3;       // 3, 5, 8, 12, 15
     int scanType = SCAN_PASSIVE; // 0: Passive, 1: Active, 2: Both
     int addrTypeFilter = 0;   // 0: Any, 1: Public only, 2: Random only
+    int ownAddrMode = 0;      // 0: NRPA each scan, 1: Custom static random, 2: Factory public
+    uint8_t customOwnAddr[6] = {0};
+    String deviceName = "";
 };
 
 struct GattScannedDevice {
@@ -79,6 +82,7 @@ struct GattScannerState {
     uint32_t totalPackets = 0;
     SemaphoreHandle_t mutex = nullptr;
     volatile bool active = false;
+    volatile bool paused = false;
     GattFilterMode filterMode = FILTER_CONNECTABLE;
 
     void reset(GattFilterMode filter) {
@@ -88,6 +92,7 @@ struct GattScannerState {
             totalPackets = 0;
             filterMode = filter;
             active = true;
+            paused = false;
             xSemaphoreGive(mutex);
         }
     }
@@ -96,6 +101,7 @@ struct GattScannerState {
         if (!mutex) return;
         if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
             active = false;
+            paused = false;
             xSemaphoreGive(mutex);
         }
     }
@@ -104,6 +110,16 @@ struct GattScannerState {
         if (!mutex) return;
         if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
             active = false;
+            paused = false;
+            count = 0;
+            totalPackets = 0;
+            xSemaphoreGive(mutex);
+        }
+    }
+
+    void clearDevices() {
+        if (!mutex) return;
+        if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
             count = 0;
             totalPackets = 0;
             xSemaphoreGive(mutex);
@@ -112,16 +128,61 @@ struct GattScannerState {
 };
 
 static GattSettings g_gattSettings;
+static uint8_t g_gattRandomOwnAddr[6] = {0};
+static bool g_gattRandomOwnAddrReady = false;
 static GattScannerState g_gattScanState;
 static std::vector<GattScannedDevice> g_discoveredDevices;
 static volatile bool g_scanActive = false;
 static GattFilterMode g_currentFilter = FILTER_CONNECTABLE;
 
+static void generateGattRandomOwnAddress(uint8_t address[6], bool staticRandom) {
+    esp_fill_random(address, 6);
+    address[5] = (address[5] & 0x3F) | (staticRandom ? 0xC0 : 0x00);
+}
+
+static bool configureGattOwnAddress(bool regenerateRandom = false) {
+    if (g_gattSettings.ownAddrMode == 2) {
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+        return true;
+    }
+
+    uint8_t *address = g_gattSettings.ownAddrMode == 1 ? g_gattSettings.customOwnAddr : g_gattRandomOwnAddr;
+    if (g_gattSettings.ownAddrMode == 0 && (regenerateRandom || !g_gattRandomOwnAddrReady)) {
+        generateGattRandomOwnAddress(g_gattRandomOwnAddr, false);
+        g_gattRandomOwnAddrReady = true;
+    }
+    if (g_gattSettings.ownAddrMode == 1 && address[0] == 0 && address[1] == 0 && address[2] == 0 &&
+        address[3] == 0 && address[4] == 0 && address[5] == 0) {
+        generateGattRandomOwnAddress(g_gattSettings.customOwnAddr, true);
+    }
+
+    if (ble_hs_id_set_rnd(address) != 0) return false;
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    return true;
+}
+
+static void applyGattDeviceName() {
+    if (!g_gattSettings.deviceName.isEmpty()) {
+        NimBLEDevice::setDeviceName(std::string(g_gattSettings.deviceName.c_str()));
+    }
+}
+
+String getGattExplorerDeviceName() {
+    return g_gattSettings.deviceName;
+}
+
+bool applyGattExplorerBleIdentity(bool regenerateRandomAddress) {
+    applyGattDeviceName();
+    return configureGattOwnAddress(regenerateRandomAddress);
+}
+
 // When set (via gattScanAndPick()), the live scanner hands the selected device to
 // this callback instead of showing the device action menu, so other features can reuse
 // this screen purely as a device picker.
 static std::function<void(const GattScannedDevice &)> g_gattPickCallback = nullptr;
-static void handleGattDeviceSelection(GattScannedDevice &device);
+static void handleGattDeviceSelection(
+    GattScannedDevice &device, const std::function<void()> &toggleScanPause, const std::function<void()> &stopScan
+);
 
 static constexpr size_t GATT_READ_MAX_BYTES = 512;
 static constexpr size_t GATT_READ_DISPLAY_BYTES = 64;
@@ -197,6 +258,25 @@ static bool performGattRead(NimBLEClient *pClient, uint16_t handle, bool longRea
     if (ok) value = context->value;
     context->release();
     return ok;
+}
+
+static bool secureGattConnection(NimBLEClient *pClient) {
+    if (!pClient || !pClient->isConnected()) return false;
+    if (pClient->getConnInfo().isEncrypted()) return true;
+    if (!pClient->secureConnection(true)) return false;
+
+    uint32_t startedAt = millis();
+    while (pClient->isConnected() && millis() - startedAt < GATT_READ_TIMEOUT_MS) {
+        if (pClient->getConnInfo().isEncrypted()) return true;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return pClient->isConnected() && pClient->getConnInfo().isEncrypted();
+}
+
+static bool isGattSecurityError(int status) {
+    return status == BLE_HS_ATT_ERR(BLE_ATT_ERR_INSUFFICIENT_AUTHEN) ||
+           status == BLE_HS_ATT_ERR(BLE_ATT_ERR_INSUFFICIENT_AUTHOR) ||
+           status == BLE_HS_ATT_ERR(BLE_ATT_ERR_INSUFFICIENT_ENC);
 }
 
 static bool readGattCharacteristic(NimBLEClient *pClient, NimBLERemoteCharacteristic *pChar, NimBLEAttValue &value, int *outStatus = nullptr) {
@@ -404,6 +484,9 @@ static int gattMenu(
     int *cursor = nullptr
 ) {
     if (items.empty()) return -1;
+#ifdef HAS_ENCODER
+    (void)drainRotarySteps();
+#endif
     int count = items.size();
     auto drawer = [&items](int idx, int x, int y, int w, bool sel) {
         uint16_t fg = sel ? bruceConfig.bgColor : bruceConfig.priColor;
@@ -414,11 +497,17 @@ static int gattMenu(
     };
 
     int chosen = gattListLoop(title, count, hint, drawer, cursor);
+#ifdef HAS_ENCODER
+    (void)drainRotarySteps();
+#endif
     if (chosen >= 0 && chosen < count) {
         if (items[chosen].action) {
             items[chosen].action();
         }
     }
+#ifdef HAS_ENCODER
+    (void)drainRotarySteps();
+#endif
     return chosen;
 }
 
@@ -594,7 +683,7 @@ public:
 
 private:
     void processDevice(const NimBLEAdvertisedDevice *dev) {
-        if (!dev || !g_gattScanState.active) return;
+        if (!dev || !g_gattScanState.active || g_gattScanState.paused) return;
         if (!g_gattScanState.mutex) return;
 
         int8_t rssi = dev->getRSSI();
@@ -631,6 +720,11 @@ private:
 
         // Try-take mutex with 0 timeout so NimBLE host task is never blocked
         if (xSemaphoreTake(g_gattScanState.mutex, 0) != pdTRUE) return;
+
+        if (!g_gattScanState.active || g_gattScanState.paused) {
+            xSemaphoreGive(g_gattScanState.mutex);
+            return;
+        }
 
         g_gattScanState.totalPackets++;
 
@@ -928,20 +1022,14 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
         displayError("Failed to init BLE scan");
         return;
     }
+    if (!applyGattExplorerBleIdentity(g_gattSettings.ownAddrMode == 0)) {
+        stopBLEStack();
+        displayError("Failed to set own BLE address");
+        return;
+    }
 
     g_currentFilter = filterMode;
     g_gattScanState.reset(filterMode);
-
-    // Randomize own MAC address once per scan to avoid being tracked by peripherals
-    uint8_t randomAddr[6];
-    esp_fill_random(randomAddr, sizeof(randomAddr));
-    randomAddr[0] &= 0xFE; // clear broadcast bit
-    randomAddr[0] |= 0xC0; // set non-resolvable private random address bits
-    ble_addr_t addr_le;
-    for (int i = 0; i < 6; i++) addr_le.val[i] = randomAddr[i];
-    addr_le.type = BLE_ADDR_RANDOM;
-    ble_hs_id_set_rnd(addr_le.val);
-    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
 
     pBLEScan->setScanCallbacks(&g_gattScanCallbacks, true);
 
@@ -974,8 +1062,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
     const char *spinner = "|/-\\";
     bool needsRedraw = true;
     bool scanPaused = false;
-    bool devicePicked = false;
-    GattScannedDevice pickedDevice;
+    uint32_t pausedAt = 0;
 
     // Snapshot buffer for UI rendering to minimize lock hold time (static to protect task stack)
     static GattScannedDevice uiDevices[GATT_MAX_SCAN_DEVICES];
@@ -987,6 +1074,51 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
     int listStartY = headerY + lineH + 4;
     int visibleRows = (tftHeight - listStartY) / lineH;
     if (visibleRows < 1) visibleRows = 1;
+
+    auto toggleScanPause = [&]() {
+        if (!scanPaused) {
+            pausedAt = millis();
+            if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, portMAX_DELAY) == pdTRUE) {
+                g_gattScanState.paused = true;
+                xSemaphoreGive(g_gattScanState.mutex);
+            }
+            scanPaused = true;
+            pBLEScan->stop();
+        } else if (pBLEScan->start(0, false)) {
+            uint32_t pauseDuration = millis() - pausedAt;
+            if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, portMAX_DELAY) == pdTRUE) {
+                for (size_t i = 0; i < g_gattScanState.count; i++) {
+                    g_gattScanState.devices[i].lastSeen += pauseDuration;
+                    g_gattScanState.devices[i].discoveredAt += pauseDuration;
+                }
+                g_gattScanState.paused = false;
+                xSemaphoreGive(g_gattScanState.mutex);
+            }
+            scanPaused = false;
+        } else {
+            displayError("Failed to resume BLE scan");
+        }
+        needsRedraw = true;
+    };
+
+    bool scanStopped = false;
+    auto stopScan = [&]() {
+        if (scanStopped) return;
+        g_gattScanState.stop();
+        if (pBLEScan) {
+            pBLEScan->stop();
+            pBLEScan->clearResults();
+            pBLEScan->setScanCallbacks(nullptr);
+        }
+        g_scanActive = false;
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+
+        g_discoveredDevices.clear();
+        for (size_t i = 0; i < g_gattScanState.count; i++) {
+            g_discoveredDevices.push_back(g_gattScanState.devices[i]);
+        }
+        scanStopped = true;
+    };
 
     while (true) {
         // Handle physical buttons & encoder
@@ -1042,16 +1174,9 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
                 } else if (lowerKey == 's') {
                     sel = true;
                 } else if (lowerKey == 'p' || lowerKey == ' ') {
-                    if (!scanPaused) {
-                        pBLEScan->stop();
-                        scanPaused = true;
-                    } else {
-                        scanPaused = !pBLEScan->start(0, false);
-                        if (scanPaused) displayError("Failed to resume BLE scan");
-                    }
-                    needsRedraw = true;
+                    toggleScanPause();
                 } else if (lowerKey == 'c') {
-                    g_gattScanState.reset(filterMode);
+                    g_gattScanState.clearDevices();
                     selectedIdx = 0;
                     scrollOffset = 0;
                     needsRedraw = true;
@@ -1071,14 +1196,16 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
             }
             if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
                 uint32_t now = millis();
-                for (size_t i = 0; i < g_gattScanState.count;) {
-                    if (now - g_gattScanState.devices[i].lastSeen >= GATT_DEVICE_EXPIRY_MS) {
-                        for (size_t j = i + 1; j < g_gattScanState.count; j++) {
-                            g_gattScanState.devices[j - 1] = g_gattScanState.devices[j];
+                if (!scanPaused) {
+                    for (size_t i = 0; i < g_gattScanState.count;) {
+                        if (now - g_gattScanState.devices[i].lastSeen >= GATT_DEVICE_EXPIRY_MS) {
+                            for (size_t j = i + 1; j < g_gattScanState.count; j++) {
+                                g_gattScanState.devices[j - 1] = g_gattScanState.devices[j];
+                            }
+                            g_gattScanState.count--;
+                        } else {
+                            i++;
                         }
-                        g_gattScanState.count--;
-                    } else {
-                        i++;
                     }
                 }
                 uiCount = g_gattScanState.count;
@@ -1124,9 +1251,27 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
         }
 
         if (sel && uiCount > 0 && selectedIdx >= 0 && selectedIdx < (int)uiCount) {
-            pickedDevice = uiDevices[selectedIdx];
-            devicePicked = true;
-            break;
+            GattScannedDevice pickedDevice = uiDevices[selectedIdx];
+            if (g_gattPickCallback) {
+                stopScan();
+                g_gattPickCallback(pickedDevice);
+                break;
+            } else {
+                handleGattDeviceSelection(pickedDevice, toggleScanPause, stopScan);
+                if (scanStopped) {
+                    break;
+                }
+#if defined(HAS_ENCODER)
+                (void)drainRotarySteps();
+#endif
+                vTaskDelay(pdMS_TO_TICKS(50));
+                check(SelPress);
+                check(EscPress);
+                _getKeyPress();
+                drawMainBorder(true);
+                needsRedraw = true;
+                lastUiUpdate = 0;
+            }
         }
 
         // Keep scroll offset aligned with selected index
@@ -1138,9 +1283,10 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
         }
 
         // Render UI
-        uint32_t now = millis();
-        if (needsRedraw || (now - lastUiUpdate >= 120)) {
-            lastUiUpdate = now;
+        uint32_t uiNow = millis();
+        uint32_t ageNow = scanPaused ? pausedAt : uiNow;
+        if (needsRedraw || (uiNow - lastUiUpdate >= 120)) {
+            lastUiUpdate = uiNow;
             needsRedraw = false;
             animFrame = (animFrame + 1) % 4;
 
@@ -1168,8 +1314,8 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
                 if (itemIdx < (int)uiCount) {
                     bool isSel = (itemIdx == selectedIdx);
                     uint16_t bg = isSel ? bruceConfig.priColor : bruceConfig.bgColor;
-                    uint32_t silenceMs = now - uiDevices[itemIdx].lastSeen;
-                    bool isNew = now - uiDevices[itemIdx].discoveredAt < GATT_NEW_DEVICE_HIGHLIGHT_MS;
+                    uint32_t silenceMs = ageNow - uiDevices[itemIdx].lastSeen;
+                    bool isNew = ageNow - uiDevices[itemIdx].discoveredAt < GATT_NEW_DEVICE_HIGHLIGHT_MS;
                     uint16_t highlightColor = bruceConfig.priColor;
                     if (silenceMs >= GATT_INACTIVE_RED_MS) {
                         highlightColor = GATT_INACTIVE_RED_COLOR;
@@ -1231,38 +1377,13 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
         vTaskDelay(pdMS_TO_TICKS(25));
     }
 
-    // Stop scanner cleanly
-    g_gattScanState.stop();
-    if (pBLEScan) {
-        pBLEScan->stop();
-        pBLEScan->clearResults();
-        pBLEScan->setScanCallbacks(nullptr);
-    }
-    g_scanActive = false;
-
-    // Restore public address to avoid breaking other BLE features
-    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
-
-    // Synchronize g_discoveredDevices for Auto-Dump and external callers
-    g_discoveredDevices.clear();
-    for (size_t i = 0; i < g_gattScanState.count; i++) {
-        g_discoveredDevices.push_back(g_gattScanState.devices[i]);
-    }
-
     // Drain keys
     vTaskDelay(pdMS_TO_TICKS(150));
     check(SelPress);
     check(EscPress);
     _getKeyPress();
 
-    if (devicePicked) {
-        if (g_gattPickCallback) {
-            g_gattPickCallback(pickedDevice);
-        } else {
-            handleGattDeviceSelection(pickedDevice);
-        }
-    }
-
+    stopScan();
     stopBLEStack();
 }
 
@@ -1277,12 +1398,15 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
     g_lastBleError = 0;
 
     memset(&g_lastConnDiag, 0, sizeof(g_lastConnDiag));
-    g_lastConnDiag.ownAddrType = BLE_OWN_ADDR_PUBLIC;
+    g_lastConnDiag.ownAddrType = g_gattSettings.ownAddrMode == 2 ? BLE_OWN_ADDR_PUBLIC : BLE_OWN_ADDR_RANDOM;
     g_lastConnDiag.peerAddrType = target.getType();
     g_lastConnDiag.phyMask = BLE_GAP_LE_PHY_1M_MASK;
 
     BLEStateManager::initBLE("Bruce-GATT", ESP_PWR_LVL_P9);
-    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+    if (!applyGattExplorerBleIdentity()) {
+        if (outError) *outError = BLE_HS_EUNKNOWN;
+        return false;
+    }
     NimBLEDevice::setSecurityAuth(false, false, false);
 
     // Prepare target addresses: primary (detected address type) and fallback (flipped address type)
@@ -1661,7 +1785,15 @@ static void exploreGattDevice(GattScannedDevice &device) {
             bleTrackerRun(String(device.macStr), label, pClient);
         }});
 
-        devOps.push_back({"6. Disconnect & Back", [pClient]() {
+        devOps.push_back({"6. Pair / Secure Connection", [pClient]() {
+            if (secureGattConnection(pClient)) {
+                displaySuccess("Pairing / encryption successful", true);
+            } else {
+                displayError("Pairing failed or timed out", true);
+            }
+        }});
+
+        devOps.push_back({"7. Disconnect & Back", [pClient]() {
             if (pClient->isConnected()) pClient->disconnect();
         }});
 
@@ -1679,46 +1811,59 @@ static void exploreGattDevice(GattScannedDevice &device) {
     delay(50);
 }
 
-static void handleGattDeviceSelection(GattScannedDevice &device) {
-    stopBLEStack();
-
+static void handleGattDeviceSelection(
+    GattScannedDevice &device, const std::function<void()> &toggleScanPause, const std::function<void()> &stopScan
+) {
     const char *title = device.name[0] != '\0' ? device.name : device.macStr;
-    std::vector<GattMenuItem> deviceActions;
-    deviceActions.push_back({"Connect", [&device]() {
-        exploreGattDevice(device);
-    }});
-    deviceActions.push_back({"Track (Active)", [&device]() {
-        if (!device.isConnectable) {
-            displayWarning("Device is not connectable", true);
-            return;
-        }
+    auto stopScannerForAction = [&]() {
+        stopScan();
+        stopBLEStack();
+    };
 
-        NimBLEClient *pClient = nullptr;
-        int connError = 0;
-        bool userCancelled = false;
-        bool connected = gattConnectWithStrategies(device.address, &pClient, &connError, &userCancelled);
-        if (userCancelled) {
-            displayWarning("Connection cancelled", true);
-            return;
-        }
-        if (!connected || !pClient) {
-            showBleConnectDiagnostics(g_lastConnDiag, device);
-            return;
-        }
+    {
+        std::vector<GattMenuItem> deviceActions;
+        deviceActions.push_back({"Connect", [&device, &stopScannerForAction]() {
+            stopScannerForAction();
+            exploreGattDevice(device);
+        }});
+        deviceActions.push_back({"Track (Active)", [&device, &stopScannerForAction]() {
+            stopScannerForAction();
+            if (!device.isConnectable) {
+                displayWarning("Device is not connectable", true);
+                return;
+            }
 
-        String label = device.name[0] != '\0' ? String(device.name) : String(device.macStr);
-        bleTrackerRun(String(device.macStr), label, pClient, device.addressType);
-        if (pClient->isConnected()) pClient->disconnect();
-        NimBLEDevice::deleteClient(pClient);
-        delay(50);
-    }});
-    deviceActions.push_back({"Track (Passive)", [&device]() {
-        String label = device.name[0] != '\0' ? String(device.name) : String(device.macStr);
-        bleTrackerRun(String(device.macStr), label, nullptr, device.addressType);
-    }});
-    deviceActions.push_back({"< Back", []() {}});
+            NimBLEClient *pClient = nullptr;
+            int connError = 0;
+            bool userCancelled = false;
+            bool connected = gattConnectWithStrategies(device.address, &pClient, &connError, &userCancelled);
+            if (userCancelled) {
+                displayWarning("Connection cancelled", true);
+                return;
+            }
+            if (!connected || !pClient) {
+                showBleConnectDiagnostics(g_lastConnDiag, device);
+                return;
+            }
 
-    gattMenu(title, deviceActions, "SEL choose  ESC back");
+            String label = device.name[0] != '\0' ? String(device.name) : String(device.macStr);
+            bleTrackerRun(String(device.macStr), label, pClient, device.addressType);
+            if (pClient->isConnected()) pClient->disconnect();
+            NimBLEDevice::deleteClient(pClient);
+            delay(50);
+        }});
+        deviceActions.push_back({"Track (Passive)", [&device, &stopScannerForAction]() {
+            stopScannerForAction();
+            String label = device.name[0] != '\0' ? String(device.name) : String(device.macStr);
+            bleTrackerRun(String(device.macStr), label, nullptr, device.addressType);
+        }});
+        deviceActions.push_back({
+            g_gattScanState.paused ? "Continue scanning" : "Pause scanning", [&toggleScanPause]() { toggleScanPause(); }
+        });
+        deviceActions.push_back({"< Back", []() {}});
+
+        gattMenu(title, deviceActions, "SEL choose  ESC back");
+    }
 }
 
 //=============================================================================
@@ -1843,6 +1988,10 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
                 lines.push_back("");
 
                 if (!readOk) {
+                    if (isGattSecurityError(readStatus)) {
+                        lines.push_back("Pairing required");
+                        lines.push_back("Use Pair / Secure Connection");
+                    }
                     lines.push_back("Read failed: " + getBleErrorDescription(readStatus));
                 } else if (val.size() == 0) {
                     lines.push_back("Size: 0 bytes");
@@ -2101,13 +2250,39 @@ static void readStandardDeviceInfo(NimBLEClient *pClient) {
 }
 
 //=============================================================================
-// Dump GATT Tree to SD / LittleFS
+// Export discovered GATT profile as a GATT Honeypot JSON preset
 //=============================================================================
+
+static String uuidForHoneypotProfile(const NimBLEUUID &uuid) {
+    String value = String(uuid.toString().c_str());
+    if (value.startsWith("0x") || value.startsWith("0X")) {
+        value.remove(0, 2);
+    }
+    return value;
+}
+
+static void writeJsonString(File &file, const String &value) {
+    file.print('"');
+    for (size_t i = 0; i < value.length(); i++) {
+        const uint8_t ch = static_cast<uint8_t>(value[i]);
+        if (ch == '"' || ch == '\\') {
+            file.print('\\');
+            file.print(static_cast<char>(ch));
+        } else if (ch < 0x20) {
+            char escaped[7];
+            snprintf(escaped, sizeof(escaped), "\\u%04X", ch);
+            file.print(escaped);
+        } else {
+            file.print(static_cast<char>(ch));
+        }
+    }
+    file.print('"');
+}
 
 static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevice &device, String *outFilePath) {
     if (!pClient || !pClient->isConnected()) return false;
 
-    FS *fs;
+    FS *fs = nullptr;
     String storageType = "";
     if (getFsStorage(fs) && fs == &SD) {
         storageType = "SD";
@@ -2122,75 +2297,102 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
 
     String cleanMac = String(device.address.toString().c_str());
     cleanMac.replace(":", "");
-    String filepath = "/ble_dumps/GATT_" + cleanMac + ".txt";
+    String filepath = "/ble_dumps/GATT_" + cleanMac + ".json";
 
     File file = fs->open(filepath, FILE_WRITE);
     if (!file) return false;
 
-    file.println("==================================================");
-    file.println("BRUCE GATT EXPLORER DUMP");
-    file.println("==================================================");
-    file.println("Device Name: " + String(device.name));
-    file.println("Address:     " + String(device.address.toString().c_str()));
-    file.println("Addr Type:   " + String((device.addressType == BLE_ADDR_PUBLIC) ? "PUBLIC" : "RANDOM"));
-    file.println("RSSI:        " + String(device.rssi) + " dBm");
-    file.println("Dump Time:   " + String(millis()) + " ms");
-    file.println("==================================================\n");
+    const String deviceName = device.name[0] != '\0' ? String(device.name) : cleanMac;
+    file.println("{");
+    file.print("  \"name\": ");
+    writeJsonString(file, deviceName);
+    file.println(",");
+    file.print("  \"mac\": ");
+    writeJsonString(file, String(device.address.toString().c_str()));
+    file.println(",");
+    file.print("  \"mac_type\": ");
+    writeJsonString(file, device.addressType == BLE_ADDR_PUBLIC ? "public" : "random");
+    file.println(",");
+    file.println("  \"services\": [");
 
     const auto &services = pClient->getServices(true);
     for (size_t s = 0; s < services.size(); s++) {
         NimBLERemoteService *srv = services[s];
-        String sUStr = String(srv->getUUID().toString().c_str());
-        String sName = getGattServiceName(sUStr);
-
-        file.printf("[%d] SERVICE: %s (UUID: %s)\n", (int)(s + 1), sName.c_str(), sUStr.c_str());
-
+        String sUStr = uuidForHoneypotProfile(srv->getUUID());
         const auto &chars = srv->getCharacteristics(true);
+        file.println("    {");
+        file.print("      \"uuid\": ");
+        writeJsonString(file, sUStr);
+        file.println(",");
+        file.println("      \"characteristics\": [");
+
         for (size_t c = 0; c < chars.size(); c++) {
             NimBLERemoteCharacteristic *ch = chars[c];
-            String cuStr = String(ch->getUUID().toString().c_str());
-            String cName = getGattCharName(cuStr);
+            const bool canRead = ch->canRead();
+            const bool canWrite = ch->canWrite();
+            const bool canWriteNoResponse = ch->canWriteNoResponse();
+            const bool canNotify = ch->canNotify();
+            const bool canIndicate = ch->canIndicate();
+            String cUStr = uuidForHoneypotProfile(ch->getUUID());
 
-            String flags = "";
-            if (ch->canRead()) flags += "READ ";
-            if (ch->canWrite()) flags += "WRITE ";
-            if (ch->canWriteNoResponse()) flags += "WRITE_NR ";
-            if (ch->canNotify()) flags += "NOTIFY ";
-            if (ch->canIndicate()) flags += "INDICATE ";
-            flags.trim();
+            file.println("        {");
+            file.print("          \"uuid\": ");
+            writeJsonString(file, cUStr);
+            file.println(",");
+            file.println("          \"properties\": [");
+            bool hasProperty = false;
+            auto writeProperty = [&file, &hasProperty](const char *property) {
+                if (hasProperty) file.println(",");
+                file.print("            ");
+                writeJsonString(file, property);
+                hasProperty = true;
+            };
+            if (canRead) writeProperty("read");
+            if (canWrite) writeProperty("write");
+            if (canWriteNoResponse) writeProperty("write_nr");
+            if (canNotify) writeProperty("notify");
+            if (canIndicate) writeProperty("indicate");
+            file.println();
+            file.println("          ],");
 
-            file.printf("    - CHAR: %s (UUID: %s) [0x%04X] [%s]\n", cName.c_str(), cuStr.c_str(), ch->getHandle(), flags.c_str());
-
-            if (ch->canRead()) {
-                NimBLEAttValue val;
+            String hexValue;
+            if (canRead) {
+                NimBLEAttValue value;
                 int readStatus = 0;
-                if (!readGattCharacteristic(pClient, ch, val, &readStatus)) {
-                    file.printf("        VAL: [read failed: %s]\n", getBleErrorDescription(readStatus).c_str());
-                } else if (val.size() > 0) {
-                    const size_t displaySize = std::min(static_cast<size_t>(val.size()), GATT_READ_DISPLAY_BYTES);
-                    String hexStr = "";
-                    String ascStr = "";
-                    for (size_t b = 0; b < displaySize; b++) {
-                        if (val[b] < 0x10) hexStr += "0";
-                        hexStr += String(val[b], HEX) + " ";
-                        char chChar = (char)val[b];
-                        ascStr += (chChar >= 32 && chChar <= 126) ? chChar : '.';
+                if (readGattCharacteristic(pClient, ch, value, &readStatus)) {
+                    for (size_t b = 0; b < value.size(); b++) {
+                        char byteHex[3];
+                        snprintf(byteHex, sizeof(byteHex), "%02X", value[b]);
+                        hexValue += byteHex;
                     }
-                    file.printf("        HEX: %s%s\n", hexStr.c_str(), displaySize < val.size() ? "..." : "");
-                    file.printf("        ASC: \"%s\"%s\n", ascStr.c_str(), displaySize < val.size() ? "..." : "");
                 } else {
-                    file.println("        VAL: [0 bytes]");
+                    Serial.printf("[GATT-EXPORT] Read failed for %s: %s\n",
+                                  cUStr.c_str(), getBleErrorDescription(readStatus).c_str());
                 }
             }
+
+            file.print("          \"value\": ");
+            writeJsonString(file, hexValue);
+            file.println(",");
+            file.println("          \"is_hex\": true");
+            file.print("        }");
+            file.println(c + 1 < chars.size() ? "," : "");
         }
-        file.println("");
+
+        file.println("      ]");
+        file.print("    }");
+        file.println(s + 1 < services.size() ? "," : "");
     }
 
-    file.println("==================================================");
-    file.println("END OF DUMP");
-    file.println("==================================================");
+    file.println("  ]");
+    file.println("}");
+    const bool writeSucceeded = file.getWriteError() == 0;
     file.close();
 
+    if (!writeSucceeded) {
+        fs->remove(filepath);
+        return false;
+    }
     if (outFilePath) *outFilePath = storageType + ":" + filepath;
     return true;
 }
@@ -2206,7 +2408,7 @@ static void runAutoDumpAll() {
     }
 
     GattUiGeom sg = gattUiGeom();
-    drawMainBorderWithTitle("AUTO-DUMP ALL");
+    drawMainBorderWithTitle("EXPORT HONEYPOT PRESETS");
     tft.setTextSize(FP);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
@@ -2252,11 +2454,12 @@ static void runAutoDumpAll() {
     }
 
     std::vector<String> lines;
-    lines.push_back("Auto-Dump Finished!");
+    lines.push_back("Preset export finished!");
     lines.push_back("Success: " + String(successCount) + " / " + String(total) + " devices");
     lines.push_back("Files saved in: /ble_dumps/");
+    lines.push_back("Random MACs export as fixed static random.");
 
-    gattShowScrollableReport("AUTO-DUMP SUMMARY", lines);
+    gattShowScrollableReport("PRESET EXPORT SUMMARY", lines);
 }
 
 //=============================================================================
@@ -2299,6 +2502,47 @@ void gattSettingsMenu() {
         else addrLabel += "Random Only";
         setOptions.push_back({addrLabel, []() {
             g_gattSettings.addrTypeFilter = (g_gattSettings.addrTypeFilter + 1) % 3;
+        }});
+
+        String ownAddrLabel = "5. Own Address: ";
+        if (g_gattSettings.ownAddrMode == 0) ownAddrLabel += "Private each scan";
+        else if (g_gattSettings.ownAddrMode == 1) ownAddrLabel += "Custom static random";
+        else ownAddrLabel += "Factory public";
+        setOptions.push_back({ownAddrLabel, []() {
+            g_gattSettings.ownAddrMode = (g_gattSettings.ownAddrMode + 1) % 3;
+        }});
+
+        String nameLabel = "6. Local BLE Name: " +
+                           (g_gattSettings.deviceName.isEmpty() ? String("Default") : g_gattSettings.deviceName);
+        setOptions.push_back({nameLabel, []() {
+            String name = keyboard(g_gattSettings.deviceName, 31, "GATT local name (max 31):");
+            if (name != "\x1B" && name.length() > 0) {
+                g_gattSettings.deviceName = name;
+            }
+        }});
+
+        setOptions.push_back({"7. Set Custom Random MAC", []() {
+            String address = hex_keyboard("", 12, "MAC: 12 hex digits");
+            address.replace(":", "");
+            address.replace(" ", "");
+            if (address == "\x1B") return;
+            if (address.length() != 12) {
+                displayError("Enter 12 hex digits", true);
+                return;
+            }
+            for (size_t i = 0; i < address.length(); i++) {
+                if (!isxdigit((unsigned char)address.charAt(i))) {
+                    displayError("Invalid MAC address", true);
+                    return;
+                }
+            }
+            for (int i = 0; i < 6; i++) {
+                String byteString = address.substring(i * 2, i * 2 + 2);
+                g_gattSettings.customOwnAddr[5 - i] = (uint8_t)strtoul(byteString.c_str(), nullptr, 16);
+            }
+            g_gattSettings.customOwnAddr[5] = (g_gattSettings.customOwnAddr[5] & 0x3F) | 0xC0;
+            g_gattSettings.ownAddrMode = 1;
+            displaySuccess("Custom random MAC saved", true);
         }});
 
         setOptions.push_back({"< Back to GATT Menu", []() {}});
@@ -2381,7 +2625,7 @@ void gattExplorerMenu() {
             }
         }});
 
-        menuOps.push_back({"3. Auto-Dump to Storage", [=]() {
+        menuOps.push_back({"3. Export Honeypot Presets", [=]() {
             runAutoDumpAll();
         }});
 

@@ -240,6 +240,26 @@ static uint32_t parseProperties(JsonVariant propVar) {
     return props;
 }
 
+static String normalizeHoneypotUuid(const String &rawUuid) {
+    String uuid = rawUuid;
+    uuid.trim();
+    if (uuid.startsWith("0x") || uuid.startsWith("0X")) {
+        uuid.remove(0, 2);
+    }
+    return uuid;
+}
+
+static bool isValidHoneypotUuid(const String &uuid) {
+    NimBLEUUID parsedUuid(std::string(uuid.c_str()));
+    return parsedUuid.bitSize() != 0;
+}
+
+static bool isNimbleManagedServiceUuid(const String &uuid) {
+    NimBLEUUID parsedUuid(std::string(uuid.c_str()));
+    return parsedUuid == NimBLEUUID(static_cast<uint16_t>(0x1800)) ||
+           parsedUuid == NimBLEUUID(static_cast<uint16_t>(0x1801));
+}
+
 static bool parseHoneypotJson(const String &jsonContent, HoneypotDeviceDef &outDevice) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, jsonContent);
@@ -276,8 +296,12 @@ static bool parseHoneypotJson(const String &jsonContent, HoneypotDeviceDef &outD
     JsonArray servicesArr = root["services"].as<JsonArray>();
     for (JsonObject svcObj : servicesArr) {
         HoneypotServiceDef sDef;
-        sDef.uuid = svcObj["uuid"].as<String>();
+        sDef.uuid = normalizeHoneypotUuid(svcObj["uuid"].as<String>());
         if (sDef.uuid.isEmpty()) continue;
+        if (!isValidHoneypotUuid(sDef.uuid)) {
+            Serial.printf("[HONEYPOT-JSON] Invalid service UUID: %s\n", sDef.uuid.c_str());
+            return false;
+        }
 
         JsonArray charsArr = svcObj["characteristics"].as<JsonArray>();
         if (charsArr.isNull()) {
@@ -286,8 +310,12 @@ static bool parseHoneypotJson(const String &jsonContent, HoneypotDeviceDef &outD
 
         for (JsonObject charObj : charsArr) {
             HoneypotCharacteristicDef cDef;
-            cDef.uuid = charObj["uuid"].as<String>();
+            cDef.uuid = normalizeHoneypotUuid(charObj["uuid"].as<String>());
             if (cDef.uuid.isEmpty()) continue;
+            if (!isValidHoneypotUuid(cDef.uuid)) {
+                Serial.printf("[HONEYPOT-JSON] Invalid characteristic UUID: %s\n", cDef.uuid.c_str());
+                return false;
+            }
 
             cDef.properties = parseProperties(charObj["properties"]);
             if (cDef.properties == 0) {
@@ -821,6 +849,11 @@ bool startGattHoneypotService(const String &jsonConfigOrPath) {
 
     for (size_t sIdx = 0; sIdx < dev.services.size(); sIdx++) {
         const auto &sDef = dev.services[sIdx];
+        if (isNimbleManagedServiceUuid(sDef.uuid)) {
+            g_hpState.addLog("[GATT] Using stack-managed service " + sDef.uuid);
+            continue;
+        }
+
         NimBLEService *pSvc = pServer->createService(sDef.uuid.c_str());
         if (!pSvc) continue;
 
