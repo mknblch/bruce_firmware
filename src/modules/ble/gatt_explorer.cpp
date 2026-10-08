@@ -11,7 +11,6 @@
 #include "core/mykeyboard.h"
 #include "core/radio_mem.h"
 #include "core/sd_functions.h"
-#include "core/utils.h"
 #include <LittleFS.h>
 #include <NimBLEDevice.h>
 #include <SD.h>
@@ -65,9 +64,6 @@ struct GattScannedDevice {
     uint32_t lastSeen = 0;
     uint32_t discoveredAt = 0;
     uint16_t packetCount = 0;
-    uint16_t srv16[4] = {0};
-    uint8_t srv16Count = 0;
-    bool has128b = false;
 };
 
 //=============================================================================
