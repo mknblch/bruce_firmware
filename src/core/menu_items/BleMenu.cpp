@@ -37,7 +37,6 @@ void BleMenu::optionsMenu() {
         }
         localOptions.push_back({"Media Cmds", [=]() { MediaCommands(hid_ble, true); }});
         localOptions.push_back({"BLE Scan", ble_scan});
-        localOptions.push_back({"BLE Tracker", [=]() { BleTrackerMenu(); }});
         localOptions.push_back({"GATT Explorer", gattExplorerMenu});
         localOptions.push_back({"GATT Server", gattServerMenu});
         localOptions.push_back({"GATT Honeypot", gattHoneypotMenu});

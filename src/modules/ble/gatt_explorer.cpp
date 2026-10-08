@@ -17,7 +17,9 @@
 #include <SD.h>
 #include <globals.h>
 #include <algorithm>
+#include <atomic>
 #include <functional>
+#include <new>
 #include <vector>
 
 //=============================================================================
@@ -69,7 +71,7 @@ struct GattScannedDevice {
 // State
 //=============================================================================
 
-constexpr size_t GATT_MAX_SCAN_DEVICES = 50;
+constexpr size_t GATT_MAX_SCAN_DEVICES = 100;
 
 struct GattScannerState {
     GattScannedDevice devices[GATT_MAX_SCAN_DEVICES];
@@ -116,9 +118,107 @@ static volatile bool g_scanActive = false;
 static GattFilterMode g_currentFilter = FILTER_CONNECTABLE;
 
 // When set (via gattScanAndPick()), the live scanner hands the selected device to
-// this callback instead of entering exploreGattDevice()'s GATT connect/browse flow - lets
-// other features (e.g. the BLE Tracker) reuse this screen purely as a device picker.
+// this callback instead of showing the device action menu, so other features can reuse
+// this screen purely as a device picker.
 static std::function<void(const GattScannedDevice &)> g_gattPickCallback = nullptr;
+static void handleGattDeviceSelection(GattScannedDevice &device);
+
+static constexpr size_t GATT_READ_MAX_BYTES = 512;
+static constexpr size_t GATT_READ_DISPLAY_BYTES = 64;
+static constexpr uint32_t GATT_READ_TIMEOUT_MS = 10000;
+
+struct GattReadContext {
+    SemaphoreHandle_t completed;
+    NimBLEAttValue value;
+    std::atomic<uint8_t> references{2};
+    int status = 0;
+
+    GattReadContext() : completed(xSemaphoreCreateBinary()) {}
+
+    ~GattReadContext() {
+        if (completed) vSemaphoreDelete(completed);
+    }
+
+    void release() {
+        if (references.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this;
+    }
+};
+
+static int gattReadCallback(uint16_t, const ble_gatt_error *error, ble_gatt_attr *attr, void *arg) {
+    auto *context = static_cast<GattReadContext *>(arg);
+    int status = error->status;
+
+    if (status == 0 && attr) {
+        const uint16_t dataLength = OS_MBUF_PKTLEN(attr->om);
+        if (context->value.size() + dataLength > GATT_READ_MAX_BYTES) {
+            status = BLE_HS_ATT_ERR(BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN);
+        } else {
+            context->value.append(attr->om->om_data, dataLength);
+            return 0;
+        }
+    }
+
+    context->status = status;
+    xSemaphoreGive(context->completed);
+    context->release();
+    return status;
+}
+
+static bool performGattRead(NimBLEClient *pClient, uint16_t handle, bool longRead, NimBLEAttValue &value, int &status) {
+    auto *context = new (std::nothrow) GattReadContext();
+    if (!context) {
+        status = BLE_HS_ENOMEM;
+        return false;
+    }
+    if (!context->completed) {
+        status = BLE_HS_ENOMEM;
+        delete context;
+        return false;
+    }
+
+    int rc = longRead
+                 ? ble_gattc_read_long(pClient->getConnHandle(), handle, 0, gattReadCallback, context)
+                 : ble_gattc_read(pClient->getConnHandle(), handle, gattReadCallback, context);
+    if (rc != 0) {
+        status = rc;
+        context->release();
+        context->release();
+        return false;
+    }
+
+    if (xSemaphoreTake(context->completed, pdMS_TO_TICKS(GATT_READ_TIMEOUT_MS)) != pdTRUE) {
+        status = BLE_HS_ETIMEOUT;
+        context->release();
+        return false;
+    }
+
+    status = context->status;
+    bool ok = status == 0 || status == BLE_HS_EDONE;
+    if (ok) value = context->value;
+    context->release();
+    return ok;
+}
+
+static bool readGattCharacteristic(NimBLEClient *pClient, NimBLERemoteCharacteristic *pChar, NimBLEAttValue &value, int *outStatus = nullptr) {
+    int status = 0;
+    bool ok = false;
+    if (!pClient || !pChar || !pClient->isConnected()) {
+        status = BLE_HS_ENOTCONN;
+    } else {
+        ok = performGattRead(pClient, pChar->getHandle(), true, value, status);
+    }
+
+    if (!ok && status == BLE_HS_ATT_ERR(BLE_ATT_ERR_ATTR_NOT_LONG) && pClient && pChar && pClient->isConnected()) {
+        value = NimBLEAttValue();
+        ok = performGattRead(pClient, pChar->getHandle(), false, value, status);
+    }
+
+    if (!ok && status == BLE_HS_ETIMEOUT && pClient && pClient->isConnected()) {
+        pClient->disconnect();
+    }
+    if (outStatus) *outStatus = status;
+    return ok;
+}
 
 //=============================================================================
 // UI Layout & Helper Functions (Small Font / Compact Mode)
@@ -164,8 +264,13 @@ static bool gattDeviceNameMacLess(const GattScannedDevice &left, const GattScann
     bool rightHasName = right.name[0] != '\0';
     if (leftHasName != rightHasName) return leftHasName;
 
-    int nameCompare = gattCompareText(leftHasName ? left.name : left.macStr, rightHasName ? right.name : right.macStr);
-    if (nameCompare != 0) return nameCompare < 0;
+    if (leftHasName) {
+        int nameCompare = gattCompareText(left.name, right.name);
+        if (nameCompare != 0) return nameCompare < 0;
+    } else {
+        int vendorCompare = gattCompareText(left.vendor, right.vendor);
+        if (vendorCompare != 0) return vendorCompare < 0;
+    }
     return strcmp(left.macStr, right.macStr) < 0;
 }
 
@@ -174,7 +279,7 @@ static constexpr uint16_t GATT_NEW_DEVICE_COLOR = 0x07E0;
 static constexpr uint32_t GATT_INACTIVE_WARNING_MS = 5000;
 static constexpr uint32_t GATT_INACTIVE_RED_MS = 10000;
 static constexpr uint32_t GATT_DEVICE_EXPIRY_MS = 15000;
-static constexpr uint16_t GATT_INACTIVE_WARNING_COLOR = 0xFA00;
+static constexpr uint16_t GATT_INACTIVE_WARNING_COLOR = 0xFEA0;
 static constexpr uint16_t GATT_INACTIVE_RED_COLOR = 0xF986;
 
 String gattFitText(const String &text, int maxPx) {
@@ -880,7 +985,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
     int lineH = 8 * FP + 4;
     int headerY = BORDER_PAD_Y;
     int listStartY = headerY + lineH + 4;
-    int visibleRows = (tftHeight - BORDER_PAD_Y - listStartY) / lineH;
+    int visibleRows = (tftHeight - listStartY) / lineH;
     if (visibleRows < 1) visibleRows = 1;
 
     while (true) {
@@ -1154,7 +1259,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
         if (g_gattPickCallback) {
             g_gattPickCallback(pickedDevice);
         } else {
-            exploreGattDevice(pickedDevice);
+            handleGattDeviceSelection(pickedDevice);
         }
     }
 
@@ -1574,6 +1679,48 @@ static void exploreGattDevice(GattScannedDevice &device) {
     delay(50);
 }
 
+static void handleGattDeviceSelection(GattScannedDevice &device) {
+    stopBLEStack();
+
+    const char *title = device.name[0] != '\0' ? device.name : device.macStr;
+    std::vector<GattMenuItem> deviceActions;
+    deviceActions.push_back({"Connect", [&device]() {
+        exploreGattDevice(device);
+    }});
+    deviceActions.push_back({"Track (Active)", [&device]() {
+        if (!device.isConnectable) {
+            displayWarning("Device is not connectable", true);
+            return;
+        }
+
+        NimBLEClient *pClient = nullptr;
+        int connError = 0;
+        bool userCancelled = false;
+        bool connected = gattConnectWithStrategies(device.address, &pClient, &connError, &userCancelled);
+        if (userCancelled) {
+            displayWarning("Connection cancelled", true);
+            return;
+        }
+        if (!connected || !pClient) {
+            showBleConnectDiagnostics(g_lastConnDiag, device);
+            return;
+        }
+
+        String label = device.name[0] != '\0' ? String(device.name) : String(device.macStr);
+        bleTrackerRun(String(device.macStr), label, pClient, device.addressType);
+        if (pClient->isConnected()) pClient->disconnect();
+        NimBLEDevice::deleteClient(pClient);
+        delay(50);
+    }});
+    deviceActions.push_back({"Track (Passive)", [&device]() {
+        String label = device.name[0] != '\0' ? String(device.name) : String(device.macStr);
+        bleTrackerRun(String(device.macStr), label, nullptr, device.addressType);
+    }});
+    deviceActions.push_back({"< Back", []() {}});
+
+    gattMenu(title, deviceActions, "SEL choose  ESC back");
+}
+
 //=============================================================================
 // Hierarchical Services & Characteristics Browser (Compact / FP Font)
 //=============================================================================
@@ -1686,33 +1833,42 @@ static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteChara
 
         if (pChar->canRead()) {
             actOptions.push_back({"1. Read Value", [pChar, cName, cuStr]() {
-                NimBLEAttValue val = pChar->readValue();
+                NimBLEAttValue val;
+                int readStatus = 0;
+                bool readOk = readGattCharacteristic(pChar->getClient(), pChar, val, &readStatus);
 
                 std::vector<String> lines;
                 lines.push_back("Name: " + cName);
                 lines.push_back("UUID: " + cuStr);
-                lines.push_back("Size: " + String(val.size()) + " bytes");
                 lines.push_back("");
 
-                if (val.size() == 0) {
+                if (!readOk) {
+                    lines.push_back("Read failed: " + getBleErrorDescription(readStatus));
+                } else if (val.size() == 0) {
+                    lines.push_back("Size: 0 bytes");
                     lines.push_back("[Value is empty / 0 bytes]");
                 } else {
+                    lines.push_back("Size: " + String(val.size()) + " bytes");
+                    const size_t displaySize = std::min(static_cast<size_t>(val.size()), GATT_READ_DISPLAY_BYTES);
                     lines.push_back("--- HEX ---");
                     String hexStr = "";
-                    for (size_t i = 0; i < val.size(); i++) {
+                    for (size_t i = 0; i < displaySize; i++) {
                         if (val[i] < 0x10) hexStr += "0";
                         hexStr += String(val[i], HEX) + " ";
-                        if ((i + 1) % 8 == 0 && i < val.size() - 1) {
+                        if ((i + 1) % 8 == 0 && i < displaySize - 1) {
                             lines.push_back(hexStr);
                             hexStr = "";
                         }
                     }
                     if (hexStr.length() > 0) lines.push_back(hexStr);
+                    if (displaySize < val.size()) {
+                        lines.push_back("[Showing first " + String(displaySize) + " bytes]");
+                    }
 
                     lines.push_back("");
                     lines.push_back("--- ASCII ---");
                     String asciiStr = "";
-                    for (size_t i = 0; i < val.size(); i++) {
+                    for (size_t i = 0; i < displaySize; i++) {
                         char c = (char)val[i];
                         asciiStr += (c >= 32 && c <= 126) ? c : '.';
                     }
@@ -1894,30 +2050,35 @@ static void readStandardDeviceInfo(NimBLEClient *pClient) {
     String hardware = "N/A";
     String battery = "N/A";
 
+    auto readTextValue = [pClient](NimBLERemoteCharacteristic *pChar, String &output) {
+        if (!pChar || !pChar->canRead()) return;
+        NimBLEAttValue value;
+        if (readGattCharacteristic(pClient, pChar, value) && value.size() > 0) {
+            output = String(value.c_str());
+        } else {
+            output = "Read failed";
+        }
+    };
+
     NimBLERemoteService *pDis = pClient->getService(NimBLEUUID((uint16_t)0x180A));
     if (pDis) {
-        NimBLERemoteCharacteristic *cMfr = pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A29));
-        if (cMfr && cMfr->canRead()) manufacturer = String(cMfr->readValue().c_str());
-
-        NimBLERemoteCharacteristic *cMod = pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A24));
-        if (cMod && cMod->canRead()) model = String(cMod->readValue().c_str());
-
-        NimBLERemoteCharacteristic *cSer = pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A25));
-        if (cSer && cSer->canRead()) serial = String(cSer->readValue().c_str());
-
-        NimBLERemoteCharacteristic *cFw = pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A26));
-        if (cFw && cFw->canRead()) firmware = String(cFw->readValue().c_str());
-
-        NimBLERemoteCharacteristic *cHw = pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A27));
-        if (cHw && cHw->canRead()) hardware = String(cHw->readValue().c_str());
+        readTextValue(pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A29)), manufacturer);
+        readTextValue(pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A24)), model);
+        readTextValue(pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A25)), serial);
+        readTextValue(pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A26)), firmware);
+        readTextValue(pDis->getCharacteristic(NimBLEUUID((uint16_t)0x2A27)), hardware);
     }
 
     NimBLERemoteService *pBatt = pClient->getService(NimBLEUUID((uint16_t)0x180F));
     if (pBatt) {
         NimBLERemoteCharacteristic *cBatt = pBatt->getCharacteristic(NimBLEUUID((uint16_t)0x2A19));
         if (cBatt && cBatt->canRead()) {
-            NimBLEAttValue v = cBatt->readValue();
-            if (v.size() > 0) battery = String((int)v[0]) + "%";
+            NimBLEAttValue value;
+            if (readGattCharacteristic(pClient, cBatt, value) && value.size() > 0) {
+                battery = String((int)value[0]) + "%";
+            } else {
+                battery = "Read failed";
+            }
         }
     }
 
@@ -2001,18 +2162,22 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
             file.printf("    - CHAR: %s (UUID: %s) [0x%04X] [%s]\n", cName.c_str(), cuStr.c_str(), ch->getHandle(), flags.c_str());
 
             if (ch->canRead()) {
-                NimBLEAttValue val = ch->readValue();
-                if (val.size() > 0) {
+                NimBLEAttValue val;
+                int readStatus = 0;
+                if (!readGattCharacteristic(pClient, ch, val, &readStatus)) {
+                    file.printf("        VAL: [read failed: %s]\n", getBleErrorDescription(readStatus).c_str());
+                } else if (val.size() > 0) {
+                    const size_t displaySize = std::min(static_cast<size_t>(val.size()), GATT_READ_DISPLAY_BYTES);
                     String hexStr = "";
                     String ascStr = "";
-                    for (size_t b = 0; b < val.size(); b++) {
+                    for (size_t b = 0; b < displaySize; b++) {
                         if (val[b] < 0x10) hexStr += "0";
                         hexStr += String(val[b], HEX) + " ";
                         char chChar = (char)val[b];
                         ascStr += (chChar >= 32 && chChar <= 126) ? chChar : '.';
                     }
-                    file.printf("        HEX: %s\n", hexStr.c_str());
-                    file.printf("        ASC: \"%s\"\n", ascStr.c_str());
+                    file.printf("        HEX: %s%s\n", hexStr.c_str(), displaySize < val.size() ? "..." : "");
+                    file.printf("        ASC: \"%s\"%s\n", ascStr.c_str(), displaySize < val.size() ? "..." : "");
                 } else {
                     file.println("        VAL: [0 bytes]");
                 }

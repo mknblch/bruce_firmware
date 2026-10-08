@@ -44,6 +44,38 @@ int g_lastBleDisconnectReason = 0;
 
 String getBleErrorDescription(int reason) {
     if (reason == 0) return "OK";
+
+    if (reason >= 0x101 && reason <= 0x113) {
+        const char *attDescription = nullptr;
+        switch (reason - 0x100) {
+            case 0x01: attDescription = "Invalid Handle"; break;
+            case 0x02: attDescription = "Read Not Permitted"; break;
+            case 0x03: attDescription = "Write Not Permitted"; break;
+            case 0x04: attDescription = "Invalid PDU"; break;
+            case 0x05: attDescription = "Insufficient Authentication (pairing required)"; break;
+            case 0x06: attDescription = "Request Not Supported"; break;
+            case 0x07: attDescription = "Invalid Offset"; break;
+            case 0x08: attDescription = "Insufficient Authorization"; break;
+            case 0x09: attDescription = "Prepare Queue Full"; break;
+            case 0x0A: attDescription = "Attribute Not Found"; break;
+            case 0x0B: attDescription = "Attribute Not Long"; break;
+            case 0x0C: attDescription = "Insufficient Encryption Key Size"; break;
+            case 0x0D: attDescription = "Invalid Attribute Value Length"; break;
+            case 0x0E: attDescription = "Unlikely Error"; break;
+            case 0x0F: attDescription = "Insufficient Encryption"; break;
+            case 0x10: attDescription = "Unsupported Group Type"; break;
+            case 0x11: attDescription = "Insufficient Resources"; break;
+            case 0x12: attDescription = "Database Out Of Sync"; break;
+            case 0x13: attDescription = "Value Not Allowed"; break;
+        }
+
+        if (attDescription) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "0x%02X: ATT %s", reason, attDescription);
+            return String(buf);
+        }
+    }
+
     const char *str = NimBLEUtils::returnCodeToString(reason);
     if (str && strlen(str) > 0 && strcmp(str, "Unknown") != 0) {
         char buf[64];
