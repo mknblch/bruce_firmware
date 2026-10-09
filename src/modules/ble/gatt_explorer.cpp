@@ -41,10 +41,16 @@ enum GattScanType {
     SCAN_BOTH
 };
 
+enum GattScanMode {
+    SCAN_NORMAL = 0,
+    SCAN_ONLY_NEW
+};
+
 struct GattSettings {
     int minRssi = -100;        // -100 (All), -85, -75, -65
     int timeoutSec = 3;       // 3, 5, 8, 12, 15
     int scanType = SCAN_PASSIVE; // 0: Passive, 1: Active, 2: Both
+    GattScanMode scanMode = SCAN_NORMAL;
     int addrTypeFilter = 0;   // 0: Any, 1: Public only, 2: Random only
     int ownAddrMode = 0;      // 0: NRPA each scan, 1: Custom static random, 2: Factory public
     uint8_t customOwnAddr[6] = {0};
@@ -366,6 +372,13 @@ static constexpr uint32_t GATT_INACTIVE_RED_MS = 10000;
 static constexpr uint32_t GATT_DEVICE_EXPIRY_MS = 15000;
 static constexpr uint16_t GATT_INACTIVE_WARNING_COLOR = 0xFEA0;
 static constexpr uint16_t GATT_INACTIVE_RED_COLOR = 0xF986;
+
+static int gattOnlyNewColorBucket(const GattScannedDevice &device, uint32_t now) {
+    uint32_t age = now - device.discoveredAt;
+    if (age < GATT_NEW_DEVICE_HIGHLIGHT_MS) return 0;
+    if (age < GATT_INACTIVE_RED_MS) return 1;
+    return 2;
+}
 
 String gattFitText(const String &text, int maxPx) {
     if (maxPx <= 0) return "";
@@ -1035,6 +1048,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
 
     g_currentFilter = filterMode;
     g_gattScanState.reset(filterMode);
+    const bool onlyNewMode = !collectOnly && g_gattSettings.scanMode == SCAN_ONLY_NEW;
 
     pBLEScan->setScanCallbacks(&g_gattScanCallbacks, true);
 
@@ -1205,7 +1219,10 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
                 uint32_t now = millis();
                 if (!scanPaused && !collectOnly) {
                     for (size_t i = 0; i < g_gattScanState.count;) {
-                        if (now - g_gattScanState.devices[i].lastSeen >= GATT_DEVICE_EXPIRY_MS) {
+                        uint32_t deviceAge = onlyNewMode
+                                                 ? now - g_gattScanState.devices[i].discoveredAt
+                                                 : now - g_gattScanState.devices[i].lastSeen;
+                        if (deviceAge >= GATT_DEVICE_EXPIRY_MS) {
                             for (size_t j = i + 1; j < g_gattScanState.count; j++) {
                                 g_gattScanState.devices[j - 1] = g_gattScanState.devices[j];
                             }
@@ -1222,7 +1239,17 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
                 }
                 xSemaphoreGive(g_gattScanState.mutex);
             }
-            std::sort(uiDevices, uiDevices + uiCount, gattDeviceNameMacLess);
+            uint32_t sortAgeNow = scanPaused ? pausedAt : millis();
+            if (onlyNewMode) {
+                std::sort(uiDevices, uiDevices + uiCount, [sortAgeNow](const GattScannedDevice &left, const GattScannedDevice &right) {
+                    int leftBucket = gattOnlyNewColorBucket(left, sortAgeNow);
+                    int rightBucket = gattOnlyNewColorBucket(right, sortAgeNow);
+                    if (leftBucket != rightBucket) return leftBucket < rightBucket;
+                    return gattDeviceNameMacLess(left, right);
+                });
+            } else {
+                std::sort(uiDevices, uiDevices + uiCount, gattDeviceNameMacLess);
+            }
             if (selectedMac[0] != '\0') {
                 bool foundSelected = false;
                 for (size_t i = 0; i < uiCount; i++) {
@@ -1324,7 +1351,12 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
                     uint32_t silenceMs = ageNow - uiDevices[itemIdx].lastSeen;
                     bool isNew = ageNow - uiDevices[itemIdx].discoveredAt < GATT_NEW_DEVICE_HIGHLIGHT_MS;
                     uint16_t highlightColor = bruceConfig.priColor;
-                    if (silenceMs >= GATT_INACTIVE_RED_MS) {
+                    if (onlyNewMode) {
+                        int bucket = gattOnlyNewColorBucket(uiDevices[itemIdx], ageNow);
+                        if (bucket == 0) highlightColor = GATT_NEW_DEVICE_COLOR;
+                        else if (bucket == 1) highlightColor = GATT_INACTIVE_WARNING_COLOR;
+                        else highlightColor = GATT_INACTIVE_RED_COLOR;
+                    } else if (silenceMs >= GATT_INACTIVE_RED_MS) {
                         highlightColor = GATT_INACTIVE_RED_COLOR;
                     } else if (silenceMs >= GATT_INACTIVE_WARNING_MS) {
                         highlightColor = GATT_INACTIVE_WARNING_COLOR;
@@ -2571,7 +2603,13 @@ void gattSettingsMenu() {
             g_gattSettings.scanType = (g_gattSettings.scanType + 1) % 3;
         }});
 
-        String addrLabel = "4. Addr Type: ";
+        String scanModeLabel = "4. Scan Mode: ";
+        scanModeLabel += g_gattSettings.scanMode == SCAN_ONLY_NEW ? "Only New" : "Normal";
+        setOptions.push_back({scanModeLabel, []() {
+            g_gattSettings.scanMode = g_gattSettings.scanMode == SCAN_NORMAL ? SCAN_ONLY_NEW : SCAN_NORMAL;
+        }});
+
+        String addrLabel = "5. Addr Type: ";
         if (g_gattSettings.addrTypeFilter == 0) addrLabel += "Any";
         else if (g_gattSettings.addrTypeFilter == 1) addrLabel += "Public Only";
         else addrLabel += "Random Only";
@@ -2579,7 +2617,7 @@ void gattSettingsMenu() {
             g_gattSettings.addrTypeFilter = (g_gattSettings.addrTypeFilter + 1) % 3;
         }});
 
-        String ownAddrLabel = "5. Own Address: ";
+        String ownAddrLabel = "6. Own Address: ";
         if (g_gattSettings.ownAddrMode == 0) ownAddrLabel += "Private each scan";
         else if (g_gattSettings.ownAddrMode == 1) ownAddrLabel += "Custom static random";
         else ownAddrLabel += "Factory public";
@@ -2587,7 +2625,7 @@ void gattSettingsMenu() {
             g_gattSettings.ownAddrMode = (g_gattSettings.ownAddrMode + 1) % 3;
         }});
 
-        String nameLabel = "6. Local BLE Name: " + g_gattSettings.deviceName;
+        String nameLabel = "7. Local BLE Name: " + g_gattSettings.deviceName;
         setOptions.push_back({nameLabel, []() {
             String name = keyboard(g_gattSettings.deviceName, 31, "GATT local name (max 31):");
             if (name != "\x1B" && name.length() > 0) {
@@ -2595,7 +2633,7 @@ void gattSettingsMenu() {
             }
         }});
 
-        setOptions.push_back({"7. Set Custom Random MAC", []() {
+        setOptions.push_back({"8. Set Custom Random MAC", []() {
             String address = hex_keyboard("", 12, "MAC: 12 hex digits");
             address.replace(":", "");
             address.replace(" ", "");
