@@ -587,12 +587,15 @@ class TrackerScanCallbacks : public NimBLEScanCallbacks {
 
 TrackerScanCallbacks g_trackerScanCallbacks;
 
-// Direction estimator using Circular Vector Average (Angular Centroid):
-// Accumulates EMA signal levels across 36 angular bins (10° resolution) and computes
-// the 2D vector centroid sum to provide a smooth, continuous target direction robust
-// against multi-path reflections and noise spikes.
+// Direction estimator: per-heading-bin median-of-5 RSSI (with outlier clamping), a peak search on
+// a 3-bin smoothed profile and an exponentially sharpened circular centroid around the peak
+// (+/-60 deg window, so a back lobe / body shadow can't drag the estimate). Contrast between
+// the peak and the median bin and a 180-degree ambiguity check drive the confidence tier.
 constexpr float HEADING_BEST_DECAY_DB_PER_SEC = 2.0f;
 constexpr float HEADING_NOISE_FLOOR = -100.0f;
+constexpr int BIN_WINDOW = 5;
+constexpr float BIN_OUTLIER_DB = 12.0f;
+constexpr float PEAK_SHARPNESS_DB = 6.0f;
 
 enum HeadingConfidence {
     CONFIDENCE_LOW = 0,  // Red: Need more samples / sweep sectors
@@ -602,18 +605,27 @@ enum HeadingConfidence {
 
 struct BestHeadingTable {
     float binRssi[HEADING_BUCKETS];
+    float win[HEADING_BUCKETS][BIN_WINDOW];
+    uint8_t winN[HEADING_BUCKETS];
+    uint8_t winPos[HEADING_BUCKETS];
     uint16_t sampleCount[HEADING_BUCKETS];
     unsigned long lastDecayMs = 0;
     float lastTargetDeg = -1.0f;
+    float lastContrastDb = 0.0f;
+    bool lastAmbiguous = false;
     bool hasTarget = false;
 
     void reset() {
         for (int i = 0; i < HEADING_BUCKETS; i++) {
             binRssi[i] = HEADING_NOISE_FLOOR;
             sampleCount[i] = 0;
+            winN[i] = 0;
+            winPos[i] = 0;
         }
         lastDecayMs = millis();
         lastTargetDeg = -1.0f;
+        lastContrastDb = 0.0f;
+        lastAmbiguous = false;
         hasTarget = false;
     }
 
@@ -624,14 +636,29 @@ struct BestHeadingTable {
         if (dtSec <= 0.0f) return;
         float drop = HEADING_BEST_DECAY_DB_PER_SEC * dtSec;
         for (int i = 0; i < HEADING_BUCKETS; i++) {
-            if (binRssi[i] > HEADING_NOISE_FLOOR) {
-                binRssi[i] -= drop;
-                if (binRssi[i] < HEADING_NOISE_FLOOR) {
-                    binRssi[i] = HEADING_NOISE_FLOOR;
-                    sampleCount[i] = 0;
-                }
+            if (sampleCount[i] == 0) continue;
+            binRssi[i] -= drop;
+            for (int k = 0; k < winN[i]; k++) win[i][k] -= drop;
+            if (binRssi[i] <= HEADING_NOISE_FLOOR) {
+                binRssi[i] = HEADING_NOISE_FLOOR;
+                sampleCount[i] = 0;
+                winN[i] = 0;
             }
         }
+    }
+
+    static float median(const float *v, int n) {
+        float t[BIN_WINDOW > 36 ? BIN_WINDOW : 36];
+        for (int i = 0; i < n; i++) {
+            float x = v[i];
+            int j = i - 1;
+            while (j >= 0 && t[j] > x) {
+                t[j + 1] = t[j];
+                j--;
+            }
+            t[j + 1] = x;
+        }
+        return (n & 1) ? t[n / 2] : 0.5f * (t[n / 2 - 1] + t[n / 2]);
     }
 
     void feed(uint16_t bucket, int8_t rssi) {
@@ -639,56 +666,89 @@ struct BestHeadingTable {
         float r = (float)rssi;
         if (r < HEADING_NOISE_FLOOR) r = HEADING_NOISE_FLOOR;
 
-        if (sampleCount[bucket] == 0 || binRssi[bucket] <= HEADING_NOISE_FLOOR) {
-            binRssi[bucket] = r;
-            sampleCount[bucket] = 1;
-        } else {
-            binRssi[bucket] = 0.35f * r + 0.65f * binRssi[bucket];
-            if (sampleCount[bucket] < 100) sampleCount[bucket]++;
+        if (winN[bucket] >= 3) {
+            // Clamp outliers relative to the current bin median instead of letting them jump the bin.
+            float med = binRssi[bucket];
+            if (r > med + BIN_OUTLIER_DB) r = med + BIN_OUTLIER_DB;
+            else if (r < med - BIN_OUTLIER_DB) r = med - BIN_OUTLIER_DB;
         }
+        win[bucket][winPos[bucket]] = r;
+        winPos[bucket] = (winPos[bucket] + 1) % BIN_WINDOW;
+        if (winN[bucket] < BIN_WINDOW) winN[bucket]++;
+        binRssi[bucket] = median(win[bucket], winN[bucket]);
+        if (sampleCount[bucket] < 100) sampleCount[bucket]++;
     }
 
-    // Circular Vector Average (Angular Centroid) across all heading bins with confidence scoring
+    // Pure getter apart from the target low-pass filter: bin ageing is done by decay() in the main loop.
     float getTargetBearingDeg(bool &resolved, HeadingConfidence &conf) {
-        decay();
-
-        float sumX = 0.0f;
-        float sumY = 0.0f;
-        float totalWeight = 0.0f;
         int totalSamples = 0;
         int populatedSectors = 0;
-
+        float vals[HEADING_BUCKETS];
         for (int i = 0; i < HEADING_BUCKETS; i++) {
-            if (binRssi[i] > HEADING_NOISE_FLOOR && sampleCount[i] > 0) {
+            if (sampleCount[i] > 0 && binRssi[i] > HEADING_NOISE_FLOOR) {
                 totalSamples += sampleCount[i];
-                populatedSectors++;
-
-                float sig = binRssi[i] - HEADING_NOISE_FLOOR; // 0..60
-                float countFactor = min((float)sampleCount[i], 4.0f) / 4.0f;
-                float w = (sig * sig) * (0.4f + 0.6f * countFactor);
-
-                float rad = (i * HEADING_BUCKET_DEG) * (M_PI / 180.0f);
-                sumX += w * cosf(rad);
-                sumY += w * sinf(rad);
-                totalWeight += w;
+                vals[populatedSectors++] = binRssi[i];
             }
         }
+        conf = CONFIDENCE_LOW;
+        if (populatedSectors == 0) {
+            resolved = hasTarget;
+            return hasTarget ? lastTargetDeg : 0.0f;
+        }
 
-        float vectorMag = sqrtf(sumX * sumX + sumY * sumY);
-        float directivity = (totalWeight > 0.001f) ? (vectorMag / totalWeight) : 0.0f;
+        // Peak search on a 3-bin smoothed profile (unpopulated neighbours count as 6 dB below).
+        auto bin = [&](int i, float fallback) {
+            i = (i % HEADING_BUCKETS + HEADING_BUCKETS) % HEADING_BUCKETS;
+            return (sampleCount[i] > 0 && binRssi[i] > HEADING_NOISE_FLOOR) ? binRssi[i] : fallback;
+        };
+        int peak = -1;
+        float peakScore = -1000.0f;
+        for (int i = 0; i < HEADING_BUCKETS; i++) {
+            if (sampleCount[i] == 0 || binRssi[i] <= HEADING_NOISE_FLOOR) continue;
+            float own = binRssi[i];
+            float score = 0.5f * own + 0.25f * bin(i - 1, own - 6.0f) + 0.25f * bin(i + 1, own - 6.0f);
+            if (score > peakScore) {
+                peakScore = score;
+                peak = i;
+            }
+        }
+        float rmax = binRssi[peak];
+        float contrast = rmax - median(vals, populatedSectors);
 
-        // Confidence estimation: rewards both packet count, angular spread, and lobe distinctiveness
+        // Sharpened centroid inside +/-60 deg of the peak.
+        float sumX = 0.0f, sumY = 0.0f, totalWeight = 0.0f;
+        for (int d = -6; d <= 6; d++) {
+            int i = ((peak + d) % HEADING_BUCKETS + HEADING_BUCKETS) % HEADING_BUCKETS;
+            if (sampleCount[i] == 0 || binRssi[i] <= HEADING_NOISE_FLOOR) continue;
+            float countFactor = min((float)sampleCount[i], 4.0f) / 4.0f;
+            float w = expf((binRssi[i] - rmax) / PEAK_SHARPNESS_DB) * (0.4f + 0.6f * countFactor);
+            float rad = (i * HEADING_BUCKET_DEG) * (M_PI / 180.0f);
+            sumX += w * cosf(rad);
+            sumY += w * sinf(rad);
+            totalWeight += w;
+        }
+
+        // 180-degree ambiguity: a second lobe nearly as strong on the opposite side.
+        bool ambiguous = false;
+        for (int d = -2; d <= 2; d++) {
+            int i = ((peak + HEADING_BUCKETS / 2 + d) % HEADING_BUCKETS + HEADING_BUCKETS) % HEADING_BUCKETS;
+            if (sampleCount[i] > 0 && binRssi[i] > HEADING_NOISE_FLOOR && binRssi[i] >= rmax - 3.0f) {
+                ambiguous = true;
+            }
+        }
+        lastContrastDb = contrast;
+        lastAmbiguous = ambiguous;
+
         if (totalSamples < 6 || populatedSectors < 3) {
             conf = CONFIDENCE_LOW;
-        } else if (totalSamples < 14 || populatedSectors < 5 || directivity < 0.25f) {
+        } else if (totalSamples < 14 || populatedSectors < 5 || contrast < 5.0f || ambiguous) {
             conf = CONFIDENCE_MED;
         } else {
             conf = CONFIDENCE_HIGH;
         }
 
-        if (totalWeight > 8.0f && vectorMag > 4.0f) {
-            float angleRad = atan2f(sumY, sumX);
-            float targetDeg = angleRad * (180.0f / M_PI);
+        if (populatedSectors >= 2 && totalSamples >= 3 && contrast >= 3.0f && totalWeight > 0.001f) {
+            float targetDeg = atan2f(sumY, sumX) * (180.0f / M_PI);
             targetDeg = fmodf(targetDeg + 360.0f, 360.0f);
 
             if (!hasTarget) {
@@ -710,9 +770,194 @@ struct BestHeadingTable {
     }
 };
 
+// ---- Walk-and-sweep trilateration -------------------------------------------------------
+// The IMU dead-reckons the user's path (heading frame, meters). RSSI samples are averaged into
+// ~0.75 m cells along that path; the target position is the point whose log-distance path-loss
+// model  rssi = A - 10 n log10(d)  best fits all cells (A is solved in closed form per
+// candidate, so the unknown TX power doesn't matter). A coarse-to-fine grid search is used,
+// with a weak prior from the direction arrow to break the mirror ambiguity of a straight path.
+constexpr int TRI_MAX_CELLS = 64;
+constexpr float TRI_CELL_M = 0.75f;
+constexpr float PATH_LOSS_N = 2.2f;
+constexpr float TX_POWER_AT_1M = -59.0f;
+
+struct RssiCell {
+    float x, y;
+    float rssi;
+    uint16_t n;
+    uint32_t lastMs;
+};
+
+struct TrilatSolver {
+    RssiCell cells[TRI_MAX_CELLS];
+    int count = 0;
+    bool dirty = false;
+    bool resolved = false;
+    float estX = 0.0f, estY = 0.0f;
+    float rmsDb = 99.0f;
+    uint32_t epoch = 0; // bumps whenever the estimate or cell set changes
+
+    void reset() {
+        count = 0;
+        dirty = false;
+        resolved = false;
+        rmsDb = 99.0f;
+        epoch++;
+    }
+
+    void addSample(float x, float y, float rssi, uint32_t ms) {
+        int best = -1;
+        float bestD2 = TRI_CELL_M * TRI_CELL_M;
+        for (int i = 0; i < count; i++) {
+            float dx = cells[i].x - x, dy = cells[i].y - y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) {
+                bestD2 = d2;
+                best = i;
+            }
+        }
+        if (best >= 0) {
+            RssiCell &c = cells[best];
+            c.rssi += 0.3f * (rssi - c.rssi);
+            if (c.n < 50) c.n++;
+            c.lastMs = ms;
+        } else {
+            int slot = count;
+            if (count >= TRI_MAX_CELLS) {
+                slot = 0;
+                for (int i = 1; i < count; i++)
+                    if ((int32_t)(cells[i].lastMs - cells[slot].lastMs) < 0) slot = i;
+            } else {
+                count++;
+            }
+            cells[slot] = {x, y, rssi, 1, ms};
+        }
+        dirty = true;
+        epoch++;
+    }
+
+    // Cost in dB^2 of a target at (px,py); optionally returns the model-only RMS.
+    float cost(float px, float py, bool prior, float curX, float curY, float bearingDeg, float *rmsOut) const {
+        float l[TRI_MAX_CELLS];
+        float sumW = 0.0f, sumR = 0.0f;
+        for (int i = 0; i < count; i++) {
+            float dx = cells[i].x - px, dy = cells[i].y - py;
+            float d2 = dx * dx + dy * dy + 0.25f; // never closer than 0.5 m
+            l[i] = cells[i].rssi + 5.0f * PATH_LOSS_N * log10f(d2);
+            float w = min((float)cells[i].n, 4.0f);
+            sumW += w;
+            sumR += w * l[i];
+        }
+        float A = sumR / sumW;
+        float acc = 0.0f;
+        for (int i = 0; i < count; i++) {
+            float w = min((float)cells[i].n, 4.0f);
+            float e = l[i] - A;
+            acc += w * e * e;
+        }
+        float c = acc / sumW;
+        if (rmsOut) *rmsOut = sqrtf(c);
+        if (prior) {
+            float dx = px - curX, dy = py - curY;
+            if (dx * dx + dy * dy > 0.25f) {
+                float ang = atan2f(dx, dy) * (180.0f / M_PI);
+                c += 25.0f * (1.0f - cosf((ang - bearingDeg) * (M_PI / 180.0f)));
+            }
+        }
+        return c;
+    }
+
+    // Returns true if a (new) position estimate was produced.
+    bool solve(bool priorValid, float bearingDeg, float curX, float curY) {
+        dirty = false;
+        if (count < 4) return false;
+        float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f, minR = 1e9f, maxR = -1e9f;
+        for (int i = 0; i < count; i++) {
+            minX = min(minX, cells[i].x);
+            maxX = max(maxX, cells[i].x);
+            minY = min(minY, cells[i].y);
+            maxY = max(maxY, cells[i].y);
+            minR = min(minR, cells[i].rssi);
+            maxR = max(maxR, cells[i].rssi);
+        }
+        float extent = max(maxX - minX, maxY - minY);
+        if (extent < 2.0f || (maxR - minR) < 4.0f) return false;
+
+        float cx = 0.5f * (minX + maxX), cy = 0.5f * (minY + maxY);
+        float half = min(20.0f, 0.5f * extent + 12.0f);
+        float bx = cx, by = cy, bc = 1e18f;
+        for (float py = cy - half; py <= cy + half; py += 1.5f) {
+            for (float px = cx - half; px <= cx + half; px += 1.5f) {
+                float c = cost(px, py, priorValid, curX, curY, bearingDeg, nullptr);
+                if (c < bc) {
+                    bc = c;
+                    bx = px;
+                    by = py;
+                }
+            }
+        }
+        const float steps[2] = {0.4f, 0.1f};
+        const float spans[2] = {1.5f, 0.4f};
+        for (int st = 0; st < 2; st++) {
+            float ox = bx, oy = by;
+            for (float py = oy - spans[st]; py <= oy + spans[st] + 0.001f; py += steps[st]) {
+                for (float px = ox - spans[st]; px <= ox + spans[st] + 0.001f; px += steps[st]) {
+                    float c = cost(px, py, priorValid, curX, curY, bearingDeg, nullptr);
+                    if (c < bc) {
+                        bc = c;
+                        bx = px;
+                        by = py;
+                    }
+                }
+            }
+        }
+        float rms = 0.0f;
+        cost(bx, by, false, 0, 0, 0, &rms);
+        rmsDb = rms;
+        if (resolved) {
+            estX += 0.6f * (bx - estX);
+            estY += 0.6f * (by - estY);
+        } else {
+            estX = bx;
+            estY = by;
+        }
+        resolved = true;
+        epoch++;
+        return true;
+    }
+};
+
+constexpr int CRUMB_MAX = 64;
+struct Breadcrumbs {
+    float x[CRUMB_MAX], y[CRUMB_MAX];
+    int count = 0;
+    int head = 0;
+
+    void reset() { count = head = 0; }
+
+    void add(float px, float py) {
+        if (count > 0) {
+            int last = (head + CRUMB_MAX - 1) % CRUMB_MAX;
+            float dx = px - x[last], dy = py - y[last];
+            if (dx * dx + dy * dy < 0.35f * 0.35f) return;
+        }
+        x[head] = px;
+        y[head] = py;
+        head = (head + 1) % CRUMB_MAX;
+        if (count < CRUMB_MAX) count++;
+    }
+
+    int idx(int i) const { return (head + CRUMB_MAX - count + i) % CRUMB_MAX; } // i = 0 oldest
+};
+
+// Distance from smoothed RSSI using the log-distance model (rough guide only).
+float estimateDistanceM(float rssi) {
+    return powf(10.0f, (TX_POWER_AT_1M - rssi) / (10.0f * PATH_LOSS_N));
+}
+
 // Draws an arrow centered at (cx, cy) with the given radius, pointing `angleDeg` clockwise
 // from straight up (0deg = up, matching a compass rose drawn on screen).
-void drawHeadingArrow(int cx, int cy, int radius, float angleDeg, uint16_t color) {
+template <class G> void drawHeadingArrow(G &g, int cx, int cy, int radius, float angleDeg, uint16_t color) {
     float rad = angleDeg * (PI / 180.0f);
     float dx = sinf(rad);
     float dy = -cosf(rad);
@@ -728,7 +973,7 @@ void drawHeadingArrow(int cx, int cy, int radius, float angleDeg, uint16_t color
     int rightX = cx + (int)(sinf(rad - backSpread) * backLen);
     int rightY = cy + (int)(-cosf(rad - backSpread) * backLen);
 
-    tft.fillTriangle(tipX, tipY, leftX, leftY, rightX, rightY, color);
+    g.fillTriangle(tipX, tipY, leftX, leftY, rightX, rightY, color);
 }
 
 // Maps a 0.0 - 1.0 fraction to a smooth gradient color: Red (low/0.0) -> Yellow (mid/0.5) -> Green (high/1.0).
@@ -753,6 +998,81 @@ uint16_t getDimColor(uint16_t color) {
     uint8_t g = ((color >> 5) & 0x3F) / 4;
     uint8_t b = (color & 0x1F) / 4;
     return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// Little north-up (initial-facing-up) map of the walked path, RSSI cells, the user and the
+// trilaterated target. Scales automatically to fit everything with a minimum 8 m span.
+template <class G> void drawTrackMapOn(
+    G &g, int mx, int my, int msz, const Breadcrumbs &crumbs, const TrilatSolver &tri, float curX, float curY,
+    float headingDeg, bool stale
+) {
+    float minX = curX, maxX = curX, minY = curY, maxY = curY;
+    auto grow = [&](float x, float y) {
+        minX = min(minX, x);
+        maxX = max(maxX, x);
+        minY = min(minY, y);
+        maxY = max(maxY, y);
+    };
+    for (int i = 0; i < crumbs.count; i++) {
+        int k = crumbs.idx(i);
+        grow(crumbs.x[k], crumbs.y[k]);
+    }
+    if (tri.resolved) grow(tri.estX, tri.estY);
+    float span = max(max(maxX - minX, maxY - minY) + 2.0f, 8.0f);
+    float cx = 0.5f * (minX + maxX), cy = 0.5f * (minY + maxY);
+    float scale = (msz - 8) / span;
+    int midX = mx + msz / 2, midY = my + msz / 2;
+    auto px = [&](float x) { return midX + (int)lroundf((x - cx) * scale); };
+    auto py = [&](float y) { return midY - (int)lroundf((y - cy) * scale); };
+    auto clampIn = [&](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+
+    g.fillRect(mx, my, msz, msz, bruceConfig.bgColor);
+    g.drawRect(mx, my, msz, msz, TFT_DARKGREY);
+
+    int lx = 0, ly = 0;
+    for (int i = 0; i < crumbs.count; i++) {
+        int k = crumbs.idx(i);
+        int x = clampIn(px(crumbs.x[k]), mx + 1, mx + msz - 2);
+        int y = clampIn(py(crumbs.y[k]), my + 1, my + msz - 2);
+        if (i > 0) g.drawLine(lx, ly, x, y, TFT_DARKGREY);
+        lx = x;
+        ly = y;
+    }
+    for (int i = 0; i < tri.count; i++) {
+        int x = clampIn(px(tri.cells[i].x), mx + 1, mx + msz - 3);
+        int y = clampIn(py(tri.cells[i].y), my + 1, my + msz - 3);
+        float f = constrain((tri.cells[i].rssi + 100.0f) / 60.0f, 0.0f, 1.0f);
+        g.fillRect(x, y, 2, 2, getVuColor(f));
+    }
+    if (tri.resolved && !stale) {
+        int tx = clampIn(px(tri.estX), mx + 4, mx + msz - 5);
+        int ty = clampIn(py(tri.estY), my + 4, my + msz - 5);
+        uint16_t col = tri.rmsDb < 6.0f ? TFT_RED : tft.color565(230, 150, 40);
+        g.drawCircle(tx, ty, 3, col);
+        g.drawLine(tx - 2, ty - 2, tx + 2, ty + 2, col);
+        g.drawLine(tx - 2, ty + 2, tx + 2, ty - 2, col);
+    }
+    int ux = clampIn(px(curX), mx + 2, mx + msz - 3);
+    int uy = clampIn(py(curY), my + 2, my + msz - 3);
+    float rad = headingDeg * (PI / 180.0f);
+    g.drawLine(ux, uy, ux + (int)lroundf(sinf(rad) * 6), uy - (int)lroundf(cosf(rad) * 6), TFT_CYAN);
+    g.fillCircle(ux, uy, 2, TFT_WHITE);
+}
+
+void drawTrackMap(
+    int mx, int my, int msz, const Breadcrumbs &crumbs, const TrilatSolver &tri, float curX, float curY,
+    float headingDeg, bool stale
+) {
+    // Compose off-screen and push in one transfer so the map never visibly clears (no flicker).
+    tft_sprite spr(static_cast<tft_display *>(&tft));
+    spr.setColorDepth(16);
+    if (spr.createSprite(msz, msz) != nullptr) {
+        drawTrackMapOn(spr, 0, 0, msz, crumbs, tri, curX, curY, headingDeg, stale);
+        spr.pushSprite(mx, my);
+        spr.deleteSprite();
+    } else {
+        drawTrackMapOn(tft, mx, my, msz, crumbs, tri, curX, curY, headingDeg, stale);
+    }
 }
 
 } // namespace
@@ -883,10 +1203,20 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                 tft.fillRect(calBarX + 2, calBarY + 2, fillW, calBarH - 4, bruceConfig.priColor);
             }
         });
-        g_history.setHeadingBucket(0);
     }
     BestHeadingTable bestHeading;
     if (hasImu) bestHeading.reset();
+    TrilatSolver trilat;
+    trilat.reset();
+    Breadcrumbs crumbs;
+    crumbs.reset();
+    float curX = 0.0f, curY = 0.0f;
+    float trendHist[8] = {0};
+    int trendCount = 0;
+    unsigned long lastTrendMs = 0, lastSolveMs = 0, lastMapMs = 0;
+    int lastTrendState = -9, lastDistKey = -9;
+    uint32_t lastMapEpoch = 0xFFFFFFFF, lastMapSteps = 0xFFFFFFFF;
+    float lastMapHeading = -999.0f;
 
     drawMainBorder();
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
@@ -916,6 +1246,10 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
         arrowCenterY = (readoutY + LH * FP + 4) + arrowRadius + 2;
     }
     int infoTextX = arrowCenterX + arrowRadius + 12;
+    // Position map right of the arrow, same height; text sits between arrow and map.
+    int mapSize = 2 * arrowRadius + 4;
+    int mapX = tftWidth - BORDER_PAD_X - mapSize;
+    int mapY = arrowCenterY - mapSize / 2;
 
     float emaRssi = -100.0f;
     bool emaInitialized = false;
@@ -968,7 +1302,8 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
 
         if (hasImu) {
             currentHeadingDeg = imu_get_heading_delta_deg();
-            g_history.setHeadingBucket(headingDegToBucket(currentHeadingDeg));
+            imu_get_position(curX, curY);
+            crumbs.add(curX, curY);
             bestHeading.decay();
         }
 
@@ -986,7 +1321,11 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                 peakFraction = rawFraction;
                 peakHoldUntilMs = nowMs + 800; // Hold peak for 800ms
             }
-            if (hasImu) bestHeading.feed(sample.headingBucket, sample.rssi);
+            if (hasImu) {
+                // Tag with the heading interpolated at the packet's own timestamp.
+                bestHeading.feed(headingDegToBucket(imu_heading_at(sample.timestamp)), sample.rssi);
+                trilat.addSample(curX, curY, (float)sample.rssi, sample.timestamp);
+            }
         }
 
         bool stale = !emaInitialized || (nowMs - lastSeenMs) > 5000;
@@ -1069,11 +1408,43 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                 angleDeg = (int)fmodf(targetDeg - currentHeadingDeg + 360.0f, 360.0f);
             }
 
+            // Hot/cold trend: linear fit over the last ~3 s of smoothed RSSI (sampled every 500 ms).
+            if (stale) {
+                trendCount = 0;
+            } else if (nowMs - lastTrendMs >= 500) {
+                lastTrendMs = nowMs;
+                if (trendCount == 8) {
+                    for (int i = 1; i < 8; i++) trendHist[i - 1] = trendHist[i];
+                    trendCount = 7;
+                }
+                trendHist[trendCount++] = emaRssi;
+            }
+            int trendState = 0; // -1 colder, 0 steady, +1 warmer, 2 = unknown
+            if (trendCount < 5) {
+                trendState = 2;
+            } else {
+                float sx = 0, sy = 0, sxx = 0, sxy = 0;
+                for (int i = 0; i < trendCount; i++) {
+                    sx += i;
+                    sy += trendHist[i];
+                    sxx += i * i;
+                    sxy += i * trendHist[i];
+                }
+                float denom = trendCount * sxx - sx * sx;
+                float slope = denom > 0 ? (trendCount * sxy - sx * sy) / denom : 0.0f; // dB per 0.5 s
+                float change = slope * (trendCount - 1);
+                trendState = change > 1.5f ? 1 : (change < -1.5f ? -1 : 0);
+            }
+            float distM = estimateDistanceM(emaRssi);
+            int distKey = stale ? -1 : (distM < 3.0f ? (int)(distM * 2.0f) : 10 + (int)distM);
+
             // Redraw if relative angle rotated by at least 2 degrees, or resolution status changed,
             // or confidence changed, or staleness changed, or first frame.
             if (firstDraw || abs(angleDeg - lastDrawnAngleDeg) >= 2 || resolved != lastDrawnResolved ||
-                conf != lastDrawnConf || stale != lastDrawnArrowStale) {
-                tft.fillCircle(arrowCenterX, arrowCenterY, arrowRadius + 2, bruceConfig.bgColor);
+                conf != lastDrawnConf || stale != lastDrawnArrowStale || trendState != lastTrendState ||
+                distKey != lastDistKey) {
+                lastTrendState = trendState;
+                lastDistKey = distKey;
 
                 uint16_t bgCol, ringCol, arrowCol;
                 if (stale) {
@@ -1099,26 +1470,44 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                     arrowCol = TFT_WHITE;
                 }
 
-                tft.fillCircle(arrowCenterX, arrowCenterY, arrowRadius, bgCol);
-                tft.drawCircle(arrowCenterX, arrowCenterY, arrowRadius, ringCol);
-
-                if (resolved) {
-                    drawHeadingArrow(arrowCenterX, arrowCenterY, arrowRadius - 3, (float)angleDeg, arrowCol);
-                } else {
-                    // No confident direction yet - draw a center crosshair so the compass area is never empty/blank
-                    tft.drawPixel(arrowCenterX, arrowCenterY, arrowCol);
-                    tft.drawPixel(arrowCenterX - 1, arrowCenterY, arrowCol);
-                    tft.drawPixel(arrowCenterX + 1, arrowCenterY, arrowCol);
-                    tft.drawPixel(arrowCenterX, arrowCenterY - 1, arrowCol);
-                    tft.drawPixel(arrowCenterX, arrowCenterY + 1, arrowCol);
+                {
+                    // Compass is composed off-screen and pushed once -> no erase/redraw flicker.
+                    int side = 2 * arrowRadius + 6;
+                    int ox = arrowCenterX - side / 2, oy = arrowCenterY - side / 2;
+                    tft_sprite cs(static_cast<tft_display *>(&tft));
+                    cs.setColorDepth(16);
+                    bool useSpr = cs.createSprite(side, side) != nullptr;
+                    if (useSpr) {
+                        int c = side / 2;
+                        cs.fillRect(0, 0, side, side, bruceConfig.bgColor);
+                        cs.fillCircle(c, c, arrowRadius, bgCol);
+                        cs.drawCircle(c, c, arrowRadius, ringCol);
+                        if (resolved) {
+                            drawHeadingArrow(cs, c, c, arrowRadius - 3, (float)angleDeg, arrowCol);
+                        } else {
+                            cs.drawPixel(c, c, arrowCol);
+                            cs.drawPixel(c - 1, c, arrowCol);
+                            cs.drawPixel(c + 1, c, arrowCol);
+                            cs.drawPixel(c, c - 1, arrowCol);
+                            cs.drawPixel(c, c + 1, arrowCol);
+                        }
+                        cs.pushSprite(ox, oy);
+                        cs.deleteSprite();
+                    } else {
+                        tft.fillCircle(arrowCenterX, arrowCenterY, arrowRadius + 2, bruceConfig.bgColor);
+                        tft.fillCircle(arrowCenterX, arrowCenterY, arrowRadius, bgCol);
+                        tft.drawCircle(arrowCenterX, arrowCenterY, arrowRadius, ringCol);
+                        if (resolved) drawHeadingArrow(tft, arrowCenterX, arrowCenterY, arrowRadius - 3, (float)angleDeg, arrowCol);
+                    }
                 }
 
                 // Render side text cleanly separated from compass rose
-                int textW = tftWidth - BORDER_PAD_X - infoTextX;
+                int textW = mapX - 4 - infoTextX;
                 if (textW > 20) {
                     int line1Y = arrowCenterY - arrowRadius + 2;
                     int line2Y = line1Y + LH * FP + 3;
-                    tft.fillRect(infoTextX, line1Y, textW, LH * FP * 2 + 8, bruceConfig.bgColor);
+                    int line3Y = line2Y + LH * FP + 3;
+                    tft.fillRect(infoTextX, line1Y, textW, LH * FP * 3 + 10, bruceConfig.bgColor);
 
                     tft.setTextSize(FP);
                     tft.setCursor(infoTextX, line1Y);
@@ -1155,6 +1544,22 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                         tft.setTextColor(tft.color565(60, 220, 80), bruceConfig.bgColor);
                         tft.print("Sweep: locked");
                     }
+                    if (!stale) {
+                        tft.setCursor(infoTextX, line3Y);
+                        tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+                        if (distM < 10.0f) tft.printf("~%.1fm ", distM);
+                        else tft.printf("~%dm ", (int)distM);
+                        if (trendState == 1) {
+                            tft.setTextColor(tft.color565(60, 220, 80), bruceConfig.bgColor);
+                            tft.print("Warmer");
+                        } else if (trendState == -1) {
+                            tft.setTextColor(tft.color565(240, 80, 80), bruceConfig.bgColor);
+                            tft.print("Colder");
+                        } else if (trendState == 0) {
+                            tft.setTextColor(TFT_DARKGREY, bruceConfig.bgColor);
+                            tft.print("Steady");
+                        }
+                    }
                     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
                 }
 
@@ -1163,10 +1568,28 @@ void bleTrackerRun(const String &targetMac, const String &label, NimBLEClient *p
                 lastDrawnConf = conf;
                 lastDrawnArrowStale = stale;
             }
+
+            // Trilateration: refit when new data arrived (at most every 1.5 s), then redraw the map
+            // when the path, estimate or heading tick changed (at most ~7 fps).
+            if (trilat.dirty && nowMs - lastSolveMs >= 1500) {
+                lastSolveMs = nowMs;
+                bool priorOk = resolved && conf >= CONFIDENCE_MED;
+                trilat.solve(priorOk, targetDeg, curX, curY);
+            }
+            uint32_t steps = imu_step_count();
+            if (firstDraw || (nowMs - lastMapMs >= 150 &&
+                              (trilat.epoch != lastMapEpoch || steps != lastMapSteps ||
+                               fabsf(currentHeadingDeg - lastMapHeading) >= 6.0f))) {
+                lastMapMs = nowMs;
+                lastMapEpoch = trilat.epoch;
+                lastMapSteps = steps;
+                lastMapHeading = currentHeadingDeg;
+                drawTrackMap(mapX, mapY, mapSize, crumbs, trilat, curX, curY, currentHeadingDeg, stale);
+            }
         }
 
         firstDraw = false;
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(15)); // fast loop keeps IMU integration accurate; UI redraws are gated
     }
 
     g_history.end();

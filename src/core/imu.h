@@ -50,3 +50,22 @@ bool imu_calibrate(uint32_t durationMs = 600, std::function<void(int)> progressC
 // Resets the internal heading accumulator to 0. Call this whenever a new tracking session
 // starts so stale heading data from a previous session/target doesn't bleed into a new one.
 void imu_reset_heading();
+
+// Reads accelerometer + gyroscope once and advances heading (tilt-compensated yaw about the
+// gravity axis, trapezoidal integration), zero-velocity bias tracking and step dead reckoning.
+// Call this often (>= 50 Hz) for best accuracy; imu_get_heading_delta_deg() calls it too.
+void imu_update();
+
+// Heading (deg, clockwise, [0,360)) linearly interpolated at the given millis() timestamp from
+// the last ~1.2 s of imu_update() history. Timestamps outside the window are clamped.
+float imu_heading_at(uint32_t ms);
+
+// Steps detected since imu_reset_heading()/imu_calibrate().
+uint32_t imu_step_count();
+
+// Dead-reckoned position in meters in the heading frame (+y = initial facing direction,
+// +x = 90 deg clockwise from it), advanced by a fixed step length along the heading per step.
+void imu_get_position(float &xMeters, float &yMeters);
+
+// True while the device has been motionless long enough for gyro-bias re-estimation.
+bool imu_is_stationary();
