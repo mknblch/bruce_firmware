@@ -1049,7 +1049,10 @@ static GattExplorerClientCallbacks g_gattClientCallbacks;
 // Forward Declarations
 //=============================================================================
 
-static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly = false, bool collectOnly = false);
+static bool runContinuousScan(GattFilterMode filterMode, bool passiveOnly = false, bool collectOnly = false);
+static bool scanAutoDumpRound();
+static bool autoDumpExitPressed();
+static bool connectionCancelPressed(bool cancelOnSelect);
 static void exploreGattDevice(GattScannedDevice &device);
 static void browseServicesAndChars(NimBLEClient *pClient, const GattScannedDevice &device);
 static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteCharacteristic *pChar, const String &serviceName);
@@ -1061,7 +1064,7 @@ static void runAutoDumpAll();
 // Continuous Scan Implementation (Live Interactive Scanner)
 //=============================================================================
 
-static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool collectOnly) {
+static bool runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool collectOnly) {
     // 1. Drain residual keys from menu selection
     vTaskDelay(pdMS_TO_TICKS(150));
     check(SelPress);
@@ -1071,7 +1074,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
     // 2. Check RAM availability
     if (!radioHasMemForBle()) {
         displayError("Low RAM: free WiFi/SD first", true);
-        return;
+        return false;
     }
 
     bool bleInUse = BLEConnected || (BLEDevice::getServer() != nullptr);
@@ -1080,18 +1083,18 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
 #endif
     if (bleInUse || pBLEScan != nullptr) {
         displayError("BLE scanner already in use");
-        return;
+        return false;
     }
 
     // 3. Setup BLE scan
     if (!ble_scan_setup() || pBLEScan == nullptr) {
         displayError("Failed to init BLE scan");
-        return;
+        return false;
     }
     if (!applyGattExplorerBleIdentity(g_gattSettings.ownAddrMode == 0)) {
         stopBLEStack();
         displayError("Failed to set own BLE address");
-        return;
+        return false;
     }
 
     g_currentFilter = filterMode;
@@ -1118,7 +1121,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
         g_scanActive = false;
         stopBLEStack();
         displayError("Failed to start BLE scan");
-        return;
+        return false;
     }
     g_scanActive = true;
     const uint32_t scanStartedAt = millis();
@@ -1172,6 +1175,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
     };
 
     bool scanStopped = false;
+    bool scanCancelled = false;
     auto stopScan = [&]() {
         if (scanStopped) return;
         g_gattScanState.stop();
@@ -1255,6 +1259,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
         }
 
         if (esc) {
+            scanCancelled = true;
             break;
         }
 
@@ -1483,13 +1488,111 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool 
 
     stopScan();
     stopBLEStack();
+    return !scanCancelled;
+}
+
+static bool scanAutoDumpRound() {
+    if (!radioHasMemForBle()) {
+        displayError("Low RAM: free WiFi/SD first", true);
+        return false;
+    }
+
+    bool bleInUse = BLEConnected || (BLEDevice::getServer() != nullptr);
+#if !defined(LITE_VERSION)
+    bleInUse = bleInUse || BLEStateManager::isBLEActive() || BLEStateManager::getActiveClientCount() > 0;
+#endif
+    if (bleInUse || pBLEScan != nullptr) {
+        displayError("BLE scanner already in use");
+        return false;
+    }
+
+    if (!ble_scan_setup() || pBLEScan == nullptr) {
+        stopBLEStack();
+        displayError("Failed to init BLE scan");
+        return false;
+    }
+    if (!applyGattExplorerBleIdentity(g_gattSettings.ownAddrMode == 0)) {
+        stopBLEStack();
+        displayError("Failed to set own BLE address");
+        return false;
+    }
+
+    g_currentFilter = FILTER_CONNECTABLE;
+    g_gattScanState.reset(FILTER_CONNECTABLE, false);
+    pBLEScan->setScanCallbacks(&g_gattScanCallbacks, true);
+    pBLEScan->setActiveScan(g_gattSettings.scanType == SCAN_ACTIVE);
+    pBLEScan->setInterval(100);
+    pBLEScan->setWindow(99);
+    pBLEScan->setDuplicateFilter(false);
+    pBLEScan->setMaxResults(0);
+    pBLEScan->clearResults();
+
+    if (!pBLEScan->start(0, false)) {
+        g_gattScanState.stop();
+        pBLEScan->setScanCallbacks(nullptr);
+        pBLEScan->clearResults();
+        stopBLEStack();
+        displayError("Failed to start BLE scan");
+        return false;
+    }
+    g_scanActive = true;
+
+    bool scanCancelled = false;
+    const uint32_t scanStartedAt = millis();
+    const uint32_t scanDurationMs = (uint32_t)g_gattSettings.timeoutSec * 1000;
+    while (millis() - scanStartedAt < scanDurationMs) {
+        keyStroke key = _getKeyPress();
+        if (autoDumpExitPressed()) scanCancelled = true;
+        for (char ch : key.word) {
+            if (ch == 0x1B) scanCancelled = true;
+        }
+        if (scanCancelled) break;
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+
+    g_gattScanState.stop();
+    pBLEScan->stop();
+    pBLEScan->clearResults();
+    pBLEScan->setScanCallbacks(nullptr);
+    g_scanActive = false;
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+
+    g_discoveredDevices.clear();
+    for (size_t i = 0; i < g_gattScanState.count; i++) {
+        g_discoveredDevices.push_back(g_gattScanState.devices[i]);
+    }
+    stopBLEStack();
+    return !scanCancelled;
+}
+
+static bool autoDumpExitPressed() {
+    if (check(EscPress)) return true;
+#if defined(T_EMBED)
+    return check(SelPress);
+#else
+    return false;
+#endif
+}
+
+static bool connectionCancelPressed(bool cancelOnSelect) {
+    if (check(EscPress) || check(PrevPress)) return true;
+#if defined(T_EMBED)
+    return cancelOnSelect && check(SelPress);
+#else
+    (void)cancelOnSelect;
+    return false;
+#endif
 }
 
 //=============================================================================
 // Robust Multi-Strategy GATT Connection
 //=============================================================================
 
-bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outClient, int *outError, bool *outUserCancelled, uint32_t timeoutMs) {
+bool gattConnectWithStrategies(
+    const NimBLEAddress &target, NimBLEClient **outClient, int *outError, bool *outUserCancelled, uint32_t timeoutMs,
+    bool cancelOnSelect
+) {
+    if (outClient) *outClient = nullptr;
     if (outError) *outError = 0;
     if (outUserCancelled) *outUserCancelled = false;
     g_lastBleDisconnectReason = 0;
@@ -1500,7 +1603,11 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
     g_lastConnDiag.peerAddrType = target.getType();
     g_lastConnDiag.phyMask = BLE_GAP_LE_PHY_1M_MASK;
 
-    BLEStateManager::initBLE("BLE", ESP_PWR_LVL_P9);
+    if (!BLEStateManager::initBLE("BLE", ESP_PWR_LVL_P9)) {
+        Serial.println(F("[BLE-DBG] BLE initialization failed; aborting connection."));
+        if (outError) *outError = BLE_HS_EUNKNOWN;
+        return false;
+    }
     if (!applyGattExplorerBleIdentity()) {
         if (outError) *outError = BLE_HS_EUNKNOWN;
         return false;
@@ -1557,7 +1664,7 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
     int spinnerIdx = 0;
 
     for (size_t i = 0; i < totalStrats; i++) {
-        if (check(EscPress) || check(PrevPress)) {
+        if (connectionCancelPressed(cancelOnSelect)) {
             Serial.println(F("[BLE-DBG] Aborted by user keypress before strategy."));
             if (outUserCancelled) *outUserCancelled = true;
             if (outError) *outError = lastErr;
@@ -1632,7 +1739,7 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
 
         while (millis() - startMs < perStratTimeoutMs) {
             // Check for user cancellation (ESC / Prev)
-            if (check(EscPress) || check(PrevPress)) {
+            if (connectionCancelPressed(cancelOnSelect)) {
                 Serial.println(F("[BLE-DBG] Aborted by user keypress during connection attempt."));
                 pClient->cancelConnect();
                 vTaskDelay(50 / portTICK_PERIOD_MS);
@@ -1723,7 +1830,7 @@ bool gattConnectWithStrategies(const NimBLEAddress &target, NimBLEClient **outCl
         // Delay briefly between strategies before next attempt, still checking for ESC
         uint32_t pauseStart = millis();
         while (millis() - pauseStart < 100) {
-            if (check(EscPress) || check(PrevPress)) {
+            if (connectionCancelPressed(cancelOnSelect)) {
                 Serial.println(F("[BLE-DBG] Aborted by user keypress during pause."));
                 if (outUserCancelled) *outUserCancelled = true;
                 if (outError) *outError = lastErr;
@@ -1837,13 +1944,16 @@ static void exploreGattDevice(GattScannedDevice &device) {
     tft.drawString(gattFitText("Connected! Discovering attributes...", tftWidth - 2 * BORDER_PAD_X), BORDER_PAD_X, statusY);
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
-    pClient->discoverAttributes();
+    bool discoveryComplete = pClient->discoverAttributes();
+    if (!discoveryComplete) {
+        Serial.println(F("[GATT] Attribute discovery incomplete; using discovered services."));
+    }
 
-    const auto &services = pClient->getServices(true);
+    const auto &services = pClient->getServices(false);
     if (services.empty()) {
-        displayWarning("No GATT services exposed", true);
-        pClient->disconnect();
+        if (pClient->isConnected()) pClient->disconnect();
         NimBLEDevice::deleteClient(pClient);
+        displayWarning("No GATT services exposed", true);
         return;
     }
 
@@ -1978,7 +2088,7 @@ static void browseServicesAndChars(NimBLEClient *pClient, const GattScannedDevic
     int serviceCursor = 0;
 
     while (pClient->isConnected()) {
-        const auto &services = pClient->getServices(true);
+        const auto &services = pClient->getServices(false);
         if (services.empty()) {
             displayWarning("No services found", true);
             return;
@@ -2017,7 +2127,7 @@ static void browseServicesAndChars(NimBLEClient *pClient, const GattScannedDevic
 
         // Browse characteristics of selected service
         while (pClient->isConnected()) {
-            const auto &chars = selectedSrv->getCharacteristics(true);
+            const auto &chars = selectedSrv->getCharacteristics(false);
             if (chars.empty()) {
                 displayWarning("No characteristics in service", true);
                 break;
@@ -2415,7 +2525,7 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
     File file = fs->open(filepath, FILE_WRITE);
     if (!file) return false;
 
-    const auto &services = pClient->getServices(true);
+    const auto &services = pClient->getServices(false);
     NimBLERemoteCharacteristic *deviceNameChar = nullptr;
     NimBLEAttValue deviceNameValue;
     bool deviceNameRead = false;
@@ -2449,7 +2559,7 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
     for (size_t s = 0; s < services.size(); s++) {
         NimBLERemoteService *srv = services[s];
         String sUStr = uuidForHoneypotProfile(srv->getUUID());
-        const auto &chars = srv->getCharacteristics(true);
+        const auto &chars = srv->getCharacteristics(false);
         file.println("    {");
         file.print("      \"uuid\": ");
         writeJsonString(file, sUStr);
@@ -2549,79 +2659,97 @@ static void runAutoDumpAll() {
         return;
     }
 
-    g_discoveredDevices.clear();
-    runContinuousScan(FILTER_CONNECTABLE, false, true);
-    if (g_discoveredDevices.empty()) {
-        displayWarning("No devices discovered", true);
-        return;
-    }
-
-    GattUiGeom sg = gattUiGeom();
-    drawMainBorderWithTitle("SAVE HONEYPOT PRESETS");
-    tft.setTextSize(FP);
-    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-
-    int total = g_discoveredDevices.size();
+    std::vector<String> attemptedMacs;
     int successCount = 0;
     int skippedCount = 0;
     int failedCount = 0;
-    int lineY = sg.top;
+    int scanRound = 0;
+    bool stopped = false;
+    GattUiGeom sg = gattUiGeom();
 
-    for (int i = 0; i < total; i++) {
-        if (check(EscPress)) {
-            tft.drawString("Aborted by user.", BORDER_PAD_X, lineY);
+    while (!stopped) {
+        if (autoDumpExitPressed()) break;
+        scanRound++;
+        if (!scanAutoDumpRound()) {
+            stopped = true;
             break;
         }
 
-        const auto &dev = g_discoveredDevices[i];
-        String devName = dev.name[0] != '\0' ? String(dev.name) : String(dev.macStr);
-        String progress = "[" + String(i + 1) + "/" + String(total) + "] " + devName;
-        tft.drawString(gattFitText(progress, tftWidth - 20), BORDER_PAD_X, lineY);
-        lineY += 12;
+        drawMainBorderWithTitle("AUTO GATT DUMP - ESC STOP");
+        tft.setTextSize(FP);
+        tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+        tft.drawString("Scan " + String(scanRound) + " | Tried " + String(attemptedMacs.size()), BORDER_PAD_X, sg.top);
+        tft.drawString("Saved " + String(successCount) + " | Failed " + String(failedCount), BORDER_PAD_X, sg.top + 12);
+        int lineY = sg.top + 26;
 
-        if (!dev.isConnectable) {
-            failedCount++;
-            continue;
-        }
-        if (fs->exists(gattPresetFilePath(dev))) {
-            skippedCount++;
-            continue;
-        }
+        for (size_t i = 0; i < g_discoveredDevices.size(); i++) {
+            if (autoDumpExitPressed()) {
+                stopped = true;
+                break;
+            }
 
-        NimBLEClient *pClient = nullptr;
-        bool userCancelled = false;
-        bool connected = gattConnectWithStrategies(dev.address, &pClient, nullptr, &userCancelled);
-        if (userCancelled) {
-            tft.drawString("Aborted by user.", BORDER_PAD_X, lineY);
-            break;
-        }
-        if (connected && pClient) {
-            vTaskDelay(100 / portTICK_PERIOD_MS);
-            bool discovered = pClient->discoverAttributes();
-            String path;
-            if (discovered && dumpDeviceGattToStorage(pClient, dev, &path)) {
-                successCount++;
+            GattScannedDevice dev = g_discoveredDevices[i];
+            String mac = String(dev.macStr);
+            if (std::find(attemptedMacs.begin(), attemptedMacs.end(), mac) != attemptedMacs.end()) continue;
+
+            // Mark before connecting so timeout and other failures are not retried on later scans.
+            attemptedMacs.push_back(mac);
+            String devName = dev.name[0] != '\0' ? String(dev.name) : mac;
+            String progress = "[" + String(attemptedMacs.size()) + "] " + devName;
+            tft.drawString(gattFitText(progress, tftWidth - 20), BORDER_PAD_X, lineY);
+            lineY += 12;
+
+            if (!dev.isConnectable) {
+                failedCount++;
+                continue;
+            }
+            if (fs->exists(gattPresetFilePath(dev))) {
+                skippedCount++;
+                continue;
+            }
+
+            NimBLEClient *pClient = nullptr;
+            bool userCancelled = false;
+            bool connected = gattConnectWithStrategies(dev.address, &pClient, nullptr, &userCancelled, 0, true);
+            if (userCancelled) {
+                stopBLEStack();
+                stopped = true;
+                break;
+            }
+            if (connected && pClient) {
+                vTaskDelay(100 / portTICK_PERIOD_MS);
+                bool discovered = pClient->discoverAttributes();
+                String path;
+                if (discovered && dumpDeviceGattToStorage(pClient, dev, &path)) {
+                    successCount++;
+                } else {
+                    failedCount++;
+                }
+                pClient->disconnect();
+                NimBLEDevice::deleteClient(pClient);
             } else {
                 failedCount++;
             }
-            pClient->disconnect();
-            NimBLEDevice::deleteClient(pClient);
-        } else {
-            failedCount++;
-        }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+            stopBLEStack();
+            vTaskDelay(100 / portTICK_PERIOD_MS);
 
-        if (lineY > tftHeight - 24) {
-            lineY = sg.top;
-            tft.fillRect(BORDER_PAD_X, lineY, tftWidth - 2 * BORDER_PAD_X, tftHeight - lineY - 14, bruceConfig.bgColor);
+            if (lineY > tftHeight - 24) {
+                tft.fillRect(BORDER_PAD_X, sg.top + 26, tftWidth - 2 * BORDER_PAD_X,
+                             tftHeight - sg.top - 40, bruceConfig.bgColor);
+                lineY = sg.top + 26;
+            }
         }
+        g_discoveredDevices.clear();
     }
 
+    stopBLEStack();
+
     std::vector<String> lines;
-    lines.push_back("Preset scan finished!");
+    lines.push_back("Auto-dump stopped.");
+    lines.push_back("Devices remembered: " + String(attemptedMacs.size()));
     lines.push_back("Saved: " + String(successCount));
     lines.push_back("Already saved: " + String(skippedCount));
-    lines.push_back("Failed / not connectable: " + String(failedCount));
+    lines.push_back("Failed / timed out: " + String(failedCount));
     lines.push_back("Files: " + storageType + ":/BruceGATT/<mac>.json");
     lines.push_back("Random MACs export as fixed static random.");
 
@@ -2875,11 +3003,11 @@ bool gattConnectCli(const String &macStr, uint8_t addrType) {
 
     Serial.println(F("[BLE-CLI] Connected successfully! Discovering services..."));
     if (pClient->discoverAttributes()) {
-        const auto &services = pClient->getServices(true);
+        const auto &services = pClient->getServices(false);
         Serial.printf("[BLE-CLI] Found %d services:\n", (int)services.size());
         for (auto *srv : services) {
             Serial.printf("[BLE-CLI]  + Service: %s\n", srv->getUUID().toString().c_str());
-            const auto &chars = srv->getCharacteristics(true);
+            const auto &chars = srv->getCharacteristics(false);
             for (auto *chr : chars) {
                 String props = "";
                 if (chr->canRead()) props += "R ";
