@@ -27,7 +27,7 @@ int gattListLoop(
 // RSSI/address type. Completely unwinds the scanner UI and stack before returning.
 // Reuses the exact same scan engine and g_gattSettings (minRSSI, connectable/address-type
 // filters, etc.) as the main GATT Explorer menu. `passiveOnly` disables scan requests even when
-// the configured scan type is active/both; `allAdvertisements` ignores the current service filter.
+// the configured scan type is active; `allAdvertisements` ignores the current service filter.
 bool gattScanAndPick(
     String &outName, String &outMac, int &outRssi, uint8_t &outAddrType, bool passiveOnly = false,
     bool allAdvertisements = false
