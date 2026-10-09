@@ -131,6 +131,16 @@ static std::vector<GattScannedDevice> g_discoveredDevices;
 static volatile bool g_scanActive = false;
 static GattFilterMode g_currentFilter = FILTER_CONNECTABLE;
 
+static void ensureGattDeviceName() {
+    if (!g_gattSettings.deviceName.isEmpty()) return;
+
+    static const char characters[] = "abcdefghijklmnopqrstuvwxyz";
+    g_gattSettings.deviceName.reserve(8);
+    for (int i = 0; i < 8; i++) {
+        g_gattSettings.deviceName += characters[random(0, sizeof(characters) - 1)];
+    }
+}
+
 static void generateGattRandomOwnAddress(uint8_t address[6], bool staticRandom) {
     esp_fill_random(address, 6);
     address[5] = (address[5] & 0x3F) | (staticRandom ? 0xC0 : 0x00);
@@ -158,9 +168,8 @@ static bool configureGattOwnAddress(bool regenerateRandom = false) {
 }
 
 static void applyGattDeviceName() {
-    if (!g_gattSettings.deviceName.isEmpty()) {
-        NimBLEDevice::setDeviceName(std::string(g_gattSettings.deviceName.c_str()));
-    }
+    ensureGattDeviceName();
+    NimBLEDevice::setDeviceName(std::string(g_gattSettings.deviceName.c_str()));
 }
 
 String getGattExplorerDeviceName() {
@@ -979,7 +988,7 @@ static GattExplorerClientCallbacks g_gattClientCallbacks;
 // Forward Declarations
 //=============================================================================
 
-static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly = false);
+static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly = false, bool collectOnly = false);
 static void exploreGattDevice(GattScannedDevice &device);
 static void browseServicesAndChars(NimBLEClient *pClient, const GattScannedDevice &device);
 static void handleCharacteristicActions(NimBLEClient *pClient, NimBLERemoteCharacteristic *pChar, const String &serviceName);
@@ -991,7 +1000,7 @@ static void runAutoDumpAll();
 // Continuous Scan Implementation (Live Interactive Scanner)
 //=============================================================================
 
-static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
+static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly, bool collectOnly) {
     // 1. Drain residual keys from menu selection
     vTaskDelay(pdMS_TO_TICKS(150));
     check(SelPress);
@@ -1050,6 +1059,8 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
         return;
     }
     g_scanActive = true;
+    const uint32_t scanStartedAt = millis();
+    const uint32_t scanDurationMs = collectOnly ? (uint32_t)g_gattSettings.timeoutSec * 1000 : 0;
 
     int selectedIdx = 0;
     int scrollOffset = 0;
@@ -1169,9 +1180,9 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
                     esc = true;
                 } else if (lowerKey == 's') {
                     sel = true;
-                } else if (lowerKey == 'p' || lowerKey == ' ') {
+                } else if ((lowerKey == 'p' || lowerKey == ' ') && !collectOnly) {
                     toggleScanPause();
-                } else if (lowerKey == 'c') {
+                } else if (lowerKey == 'c' && !collectOnly) {
                     g_gattScanState.clearDevices();
                     selectedIdx = 0;
                     scrollOffset = 0;
@@ -1192,7 +1203,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
             }
             if (g_gattScanState.mutex && xSemaphoreTake(g_gattScanState.mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
                 uint32_t now = millis();
-                if (!scanPaused) {
+                if (!scanPaused && !collectOnly) {
                     for (size_t i = 0; i < g_gattScanState.count;) {
                         if (now - g_gattScanState.devices[i].lastSeen >= GATT_DEVICE_EXPIRY_MS) {
                             for (size_t j = i + 1; j < g_gattScanState.count; j++) {
@@ -1246,7 +1257,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
             }
         }
 
-        if (sel && uiCount > 0 && selectedIdx >= 0 && selectedIdx < (int)uiCount) {
+        if (!collectOnly && sel && uiCount > 0 && selectedIdx >= 0 && selectedIdx < (int)uiCount) {
             GattScannedDevice pickedDevice = uiDevices[selectedIdx];
             if (g_gattPickCallback) {
                 stopScan();
@@ -1290,7 +1301,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
             tft.setTextSize(FP);
             tft.fillRect(BORDER_PAD_X, headerY, tftWidth - 2 * BORDER_PAD_X, lineH, bruceConfig.bgColor);
             tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            String title = "GATT SCAN ";
+            String title = collectOnly ? "AUTO GATT SCAN " : "GATT SCAN ";
             if (filterMode != FILTER_CONNECTABLE) {
                 title = "[" + String(getFilterModeName(filterMode)) + "] ";
             }
@@ -1370,6 +1381,7 @@ static void runContinuousScan(GattFilterMode filterMode, bool passiveOnly) {
 
         }
 
+        if (collectOnly && millis() - scanStartedAt >= scanDurationMs) break;
         vTaskDelay(pdMS_TO_TICKS(25));
     }
 
@@ -2285,6 +2297,12 @@ static String gattValueToHex(const NimBLEAttValue &value) {
     return hexValue;
 }
 
+static String gattPresetFilePath(const GattScannedDevice &device) {
+    String mac = String(device.address.toString().c_str());
+    mac.replace(":", "");
+    return "/BruceGATT/" + mac + ".json";
+}
+
 static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevice &device, String *outFilePath) {
     if (!pClient || !pClient->isConnected()) return false;
 
@@ -2299,11 +2317,9 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
 
     if (!fs || storageType.isEmpty()) return false;
 
-    if (!fs->exists("/ble_dumps")) fs->mkdir("/ble_dumps");
+    if (!fs->exists("/BruceGATT") && !fs->mkdir("/BruceGATT")) return false;
 
-    String cleanMac = String(device.address.toString().c_str());
-    cleanMac.replace(":", "");
-    String filepath = "/ble_dumps/GATT_" + cleanMac + ".json";
+    String filepath = gattPresetFilePath(device);
 
     File file = fs->open(filepath, FILE_WRITE);
     if (!file) return false;
@@ -2425,18 +2441,39 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
 //=============================================================================
 
 static void runAutoDumpAll() {
+    FS *fs = nullptr;
+    String storageType;
+    if (getFsStorage(fs) && fs == &SD) {
+        storageType = "SD";
+    } else if (setupLittleFS()) {
+        fs = &LittleFS;
+        storageType = "LittleFS";
+    }
+    if (!fs || storageType.isEmpty()) {
+        displayError("Persistent storage unavailable", true);
+        return;
+    }
+    if (!fs->exists("/BruceGATT") && !fs->mkdir("/BruceGATT")) {
+        displayError("Cannot create /BruceGATT", true);
+        return;
+    }
+
+    g_discoveredDevices.clear();
+    runContinuousScan(g_currentFilter, false, true);
     if (g_discoveredDevices.empty()) {
-        displayWarning("No devices discovered to dump", true);
+        displayWarning("No devices discovered", true);
         return;
     }
 
     GattUiGeom sg = gattUiGeom();
-    drawMainBorderWithTitle("EXPORT HONEYPOT PRESETS");
+    drawMainBorderWithTitle("SAVE HONEYPOT PRESETS");
     tft.setTextSize(FP);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
 
     int total = g_discoveredDevices.size();
     int successCount = 0;
+    int skippedCount = 0;
+    int failedCount = 0;
     int lineY = sg.top;
 
     for (int i = 0; i < total; i++) {
@@ -2451,6 +2488,15 @@ static void runAutoDumpAll() {
         tft.drawString(gattFitText(progress, tftWidth - 20), BORDER_PAD_X, lineY);
         lineY += 12;
 
+        if (!dev.isConnectable) {
+            failedCount++;
+            continue;
+        }
+        if (fs->exists(gattPresetFilePath(dev))) {
+            skippedCount++;
+            continue;
+        }
+
         NimBLEClient *pClient = nullptr;
         bool userCancelled = false;
         bool connected = gattConnectWithStrategies(dev.address, &pClient, nullptr, &userCancelled);
@@ -2460,13 +2506,17 @@ static void runAutoDumpAll() {
         }
         if (connected && pClient) {
             vTaskDelay(100 / portTICK_PERIOD_MS);
-            pClient->discoverAttributes();
+            bool discovered = pClient->discoverAttributes();
             String path;
-            if (dumpDeviceGattToStorage(pClient, dev, &path)) {
+            if (discovered && dumpDeviceGattToStorage(pClient, dev, &path)) {
                 successCount++;
+            } else {
+                failedCount++;
             }
             pClient->disconnect();
             NimBLEDevice::deleteClient(pClient);
+        } else {
+            failedCount++;
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
 
@@ -2477,12 +2527,14 @@ static void runAutoDumpAll() {
     }
 
     std::vector<String> lines;
-    lines.push_back("Preset export finished!");
-    lines.push_back("Success: " + String(successCount) + " / " + String(total) + " devices");
-    lines.push_back("Files saved in: /ble_dumps/");
+    lines.push_back("Preset scan finished!");
+    lines.push_back("Saved: " + String(successCount));
+    lines.push_back("Already saved: " + String(skippedCount));
+    lines.push_back("Failed / not connectable: " + String(failedCount));
+    lines.push_back("Files: " + storageType + ":/BruceGATT/<mac>.json");
     lines.push_back("Random MACs export as fixed static random.");
 
-    gattShowScrollableReport("PRESET EXPORT SUMMARY", lines);
+    gattShowScrollableReport("PRESET SCAN SUMMARY", lines);
 }
 
 //=============================================================================
@@ -2535,8 +2587,7 @@ void gattSettingsMenu() {
             g_gattSettings.ownAddrMode = (g_gattSettings.ownAddrMode + 1) % 3;
         }});
 
-        String nameLabel = "6. Local BLE Name: " +
-                           (g_gattSettings.deviceName.isEmpty() ? String("Default") : g_gattSettings.deviceName);
+        String nameLabel = "6. Local BLE Name: " + g_gattSettings.deviceName;
         setOptions.push_back({nameLabel, []() {
             String name = keyboard(g_gattSettings.deviceName, 31, "GATT local name (max 31):");
             if (name != "\x1B" && name.length() > 0) {
@@ -2620,6 +2671,7 @@ bool gattScanAndPick(
 //=============================================================================
 
 void gattExplorerMenu() {
+    ensureGattDeviceName();
     int cursor = 0;
     while (true) {
         std::vector<GattMenuItem> menuOps;
@@ -2648,7 +2700,7 @@ void gattExplorerMenu() {
             }
         }});
 
-        menuOps.push_back({"3. Export Honeypot Presets", [=]() {
+        menuOps.push_back({"3. Scan & Save Honeypot Presets", [=]() {
             runAutoDumpAll();
         }});
 
