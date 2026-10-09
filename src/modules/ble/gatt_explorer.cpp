@@ -2275,6 +2275,16 @@ static void writeJsonString(File &file, const String &value) {
     file.print('"');
 }
 
+static String gattValueToHex(const NimBLEAttValue &value) {
+    String hexValue;
+    for (size_t b = 0; b < value.size(); b++) {
+        char byteHex[3];
+        snprintf(byteHex, sizeof(byteHex), "%02X", value[b]);
+        hexValue += byteHex;
+    }
+    return hexValue;
+}
+
 static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevice &device, String *outFilePath) {
     if (!pClient || !pClient->isConnected()) return false;
 
@@ -2298,7 +2308,25 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
     File file = fs->open(filepath, FILE_WRITE);
     if (!file) return false;
 
-    const String deviceName = device.name[0] != '\0' ? String(device.name) : cleanMac;
+    const auto &services = pClient->getServices(true);
+    NimBLERemoteCharacteristic *deviceNameChar = nullptr;
+    NimBLEAttValue deviceNameValue;
+    bool deviceNameRead = false;
+    for (NimBLERemoteService *srv : services) {
+        if (!(srv->getUUID() == NimBLEUUID(static_cast<uint16_t>(0x1800)))) continue;
+        deviceNameChar = srv->getCharacteristic(NimBLEUUID(static_cast<uint16_t>(0x2A00)));
+        if (deviceNameChar && deviceNameChar->canRead()) {
+            deviceNameRead = readGattCharacteristic(pClient, deviceNameChar, deviceNameValue);
+        }
+        break;
+    }
+
+    String deviceName = device.name[0] != '\0' ? String(device.name) : "";
+    if (deviceName.isEmpty() && deviceNameRead && deviceNameValue.size() > 0) {
+        deviceName = String(deviceNameValue.c_str());
+    }
+    if (deviceName.isEmpty()) deviceName = "Unknown device";
+    const String deviceNameHex = deviceNameRead ? gattValueToHex(deviceNameValue) : "";
     file.println("{");
     file.print("  \"name\": ");
     writeJsonString(file, deviceName);
@@ -2311,7 +2339,6 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
     file.println(",");
     file.println("  \"services\": [");
 
-    const auto &services = pClient->getServices(true);
     for (size_t s = 0; s < services.size(); s++) {
         NimBLERemoteService *srv = services[s];
         String sUStr = uuidForHoneypotProfile(srv->getUUID());
@@ -2353,17 +2380,17 @@ static bool dumpDeviceGattToStorage(NimBLEClient *pClient, const GattScannedDevi
 
             String hexValue;
             if (canRead) {
-                NimBLEAttValue value;
-                int readStatus = 0;
-                if (readGattCharacteristic(pClient, ch, value, &readStatus)) {
-                    for (size_t b = 0; b < value.size(); b++) {
-                        char byteHex[3];
-                        snprintf(byteHex, sizeof(byteHex), "%02X", value[b]);
-                        hexValue += byteHex;
-                    }
+                if (ch == deviceNameChar && deviceNameRead) {
+                    hexValue = deviceNameHex;
                 } else {
-                    Serial.printf("[GATT-EXPORT] Read failed for %s: %s\n",
-                                  cUStr.c_str(), getBleErrorDescription(readStatus).c_str());
+                    NimBLEAttValue value;
+                    int readStatus = 0;
+                    if (readGattCharacteristic(pClient, ch, value, &readStatus)) {
+                        hexValue = gattValueToHex(value);
+                    } else {
+                        Serial.printf("[GATT-EXPORT] Read failed for %s: %s\n",
+                                      cUStr.c_str(), getBleErrorDescription(readStatus).c_str());
+                    }
                 }
             }
 

@@ -1056,7 +1056,7 @@ void runGattHoneypot(const String &jsonFilePath) {
     uint32_t lastLogGeneration = UINT32_MAX;
     uint32_t lastAdvertisingCheck = 0;
     while (g_hpState.isRunning) {
-        if (check(EscPress) || check(PrevPress)) {
+        if (check(EscPress)) {
             break;
         }
 
@@ -1198,7 +1198,7 @@ void runGattHoneypot(const String &jsonFilePath) {
 
             // Footer
             tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-            tft.drawString("SEL:Menu ESC:Stop C:Clear S:Save", BORDER_PAD_X, footY);
+            tft.drawString("SEL:Menu ESC:Stop C:Clear", BORDER_PAD_X, footY);
         }
 
         vTaskDelay(30 / portTICK_PERIOD_MS);
